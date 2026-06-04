@@ -29,9 +29,11 @@ No model/LLM is in the loop. Every stage is a known, deterministic algorithm.
 (`tests/fixtures/daikonic/source.png`) end-to-end is a gating requirement, not
 just a fixture. The output must:
 - render within tolerance of the source (SSIM ≥ target / pixel-ΔE ≤ target);
-- recognize the dome as a native `<ellipse>`, the two color bands as
-  `<rect>`/rounded-rect, and the tip + two leaf sprouts via the Bézier
-  path-fallback;
+- emit the two color bands as native `<rect>` / `<polygon>` (the tapering band
+  is a trapezoid), and the dome (half-ellipse: flat bottom + elliptic-arc top),
+  the tip, and the two leaf sprouts as clean **parametric `<path>`s** (line +
+  elliptic-arc / Bézier segments) — i.e. whole-region primitives where the
+  region *is* one, segment-fitted paths otherwise;
 - be **exactly bilaterally symmetric** (leaves emitted as a `<use>` mirror);
 - use the unified flat palette (the three anti-aliased "navies" collapsed to one);
 - be re-editable (tweaking `rx`/`ry` re-renders deterministically).
