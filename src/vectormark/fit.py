@@ -30,15 +30,17 @@ def recognize_primitive(contour: np.ndarray, *, epsilon: float) -> Shape | None:
         return None
 
     # circle
-    cm = CircleModel()
-    if cm.estimate(pts) and _max_residual(cm, pts) <= epsilon:
-        xc, yc, r = cm.params
-        return Shape("circle", {"cx": xc, "cy": yc, "r": r})
+    cm = CircleModel.from_estimate(pts)
+    if cm and _max_residual(cm, pts) <= epsilon:
+        xc, yc = cm.center
+        return Shape("circle", {"cx": xc, "cy": yc, "r": cm.radius})
 
     # ellipse (axis-aligned check: snap small thetas to 0 for symmetric output)
-    em = EllipseModel()
-    if em.estimate(pts):
-        xc, yc, a, b, theta = em.params
+    em = EllipseModel.from_estimate(pts)
+    if em:
+        xc, yc = em.center
+        a, b = em.axis_lengths
+        theta = em.theta
         if _max_residual(em, pts) <= epsilon and (abs(theta) < 0.08 or abs(abs(theta) - np.pi) < 0.08):
             return Shape("ellipse", {"cx": xc, "cy": yc, "rx": a, "ry": b})
 

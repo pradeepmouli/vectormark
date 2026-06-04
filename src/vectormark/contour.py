@@ -26,7 +26,10 @@ def rdp(points: np.ndarray, epsilon: float) -> np.ndarray:
     if norm == 0:
         d = np.hypot(*(pts - start).T)
     else:
-        d = np.abs(np.cross(line, pts - start)) / norm
+        diff = pts - start
+        # 2-D cross product as an explicit scalar (np.cross on 2-D vectors is
+        # deprecated in NumPy 2.0)
+        d = np.abs(line[0] * diff[:, 1] - line[1] * diff[:, 0]) / norm
     idx = int(d.argmax())
     if d[idx] > epsilon:
         left = rdp(pts[: idx + 1], epsilon)
@@ -49,7 +52,8 @@ def corner_indices(poly: np.ndarray, *, angle_threshold_deg: float = 40.0) -> li
         v1, v2 = cur - prev, nxt - cur
         if np.hypot(*v1) == 0 or np.hypot(*v2) == 0:
             continue
-        ang = np.arctan2(np.cross(v1, v2), np.dot(v1, v2))
+        cross = v1[0] * v2[1] - v1[1] * v2[0]   # 2-D scalar cross (NumPy 2.0)
+        ang = np.arctan2(cross, np.dot(v1, v2))
         if abs(ang) >= thresh:
             corners.append(i)
     return corners
