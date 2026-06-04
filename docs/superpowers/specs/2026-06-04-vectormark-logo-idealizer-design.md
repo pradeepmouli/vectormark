@@ -21,9 +21,23 @@ No model/LLM is in the loop. Every stage is a known, deterministic algorithm.
 **Goals**
 - Turn a flat-color, segmented logo raster into a brand-grade SVG.
 - Output is **semantic and editable**: native SVG primitives + `<use>` mirroring.
-- **Exact** bilateral/n-fold symmetry when the source is symmetric.
+- **Exact** bilateral symmetry when the source is symmetric (n-fold in v1.1).
 - Fully deterministic and reproducible (same input → same bytes).
 - Architecture that ports cleanly from a Python prototype to a Rust core.
+
+**Primary acceptance criterion (v1):** converting the **Daikonic mark**
+(`tests/fixtures/daikonic/source.png`) end-to-end is a gating requirement, not
+just a fixture. The output must:
+- render within tolerance of the source (SSIM ≥ target / pixel-ΔE ≤ target);
+- recognize the dome as a native `<ellipse>`, the two color bands as
+  `<rect>`/rounded-rect, and the tip + two leaf sprouts via the Bézier
+  path-fallback;
+- be **exactly bilaterally symmetric** (leaves emitted as a `<use>` mirror);
+- use the unified flat palette (the three anti-aliased "navies" collapsed to one);
+- be re-editable (tweaking `rx`/`ry` re-renders deterministically).
+
+The hand-built `tests/fixtures/daikonic/reference-geometric.svg` is the visual
+target; `reference-trace.svg` is the organic-trace baseline for comparison.
 
 **Non-goals (v1)**
 - Photographic / heavily shaded logos (gradients arrive in v1.1).
@@ -148,20 +162,22 @@ data → output data, no shared mutable state.
   ΔE under threshold — catches "valid SVG that looks wrong."
 - **Property tests:** symmetric input ⇒ exactly-symmetric output; idempotent
   re-trace; primitive-recognition recall on synthetic ellipses/rects/polys.
-- **Fixture #1:** the Daikonic mark (`reference-design/uploads/Image 1.png`),
-  with the existing trace + geometric SVGs as reference points.
+- **Fixture #1 (gating):** the Daikonic mark
+  (`tests/fixtures/daikonic/source.png`), with `reference-geometric.svg` as the
+  target and `reference-trace.svg` as the baseline (see §2 acceptance criterion).
 
 ## 10. Open items (resolve at plan time)
 
 - **Repository:** standalone repo at `active/py/vectormark` (**resolved**).
+- **Primitive vocabulary v1:** circle, ellipse, rect, rounded-rect, regular
+  polygon (**resolved**); teardrop/tip stays Bézier path-fallback; capsule/
+  stadium deferred.
+- **n-fold symmetry:** v1 ships **bilateral only**; n-fold detection/wedge-
+  replication deferred to **v1.1** (**resolved**). Pipeline stays n-fold-ready.
 - **Packaging:** PyPI distribution name (verify `vectormark` availability);
   license MIT.
-- **Primitive vocabulary v1:** circle, ellipse, rect, rounded-rect, regular
-  polygon confirmed; add capsule/stadium and teardrop-as-primitive? (teardrop
-  likely stays path-fallback.)
-- **n-fold symmetry:** detection designed in; ship in v1 or defer to v1.1?
 - **Default ε values** for symmetry gate, primitive recognition, RDP — tune on
-  the corpus.
+  the corpus (Daikonic mark first).
 
 ## 11. Algorithm references
 
