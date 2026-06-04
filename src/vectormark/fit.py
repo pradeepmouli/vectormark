@@ -86,3 +86,47 @@ def _point_seg_dist(p, a, b) -> float:
     ab = b - a
     t = 0.0 if np.dot(ab, ab) == 0 else np.clip(np.dot(p - a, ab) / np.dot(ab, ab), 0, 1)
     return float(np.hypot(*(p - (a + t * ab))))
+
+
+from ._fitcurve import fit_cubic_beziers
+from .contour import corner_indices
+
+
+def _segment_is_straight(seg: np.ndarray, epsilon: float) -> bool:
+    if len(seg) <= 2:
+        return True
+    return _max_point_to_polyline(seg, np.vstack([seg[0], seg[-1]])) <= epsilon
+
+
+def _fmt(v: float) -> str:
+    return f"{v:.2f}".rstrip("0").rstrip(".")
+
+
+def fit_path(contour: np.ndarray, *, epsilon: float, max_error: float) -> Shape:
+    """Corner-split the contour; emit lines for straight runs, Béziers otherwise."""
+    pts = np.asarray(contour, dtype=float)
+    closed = np.allclose(pts[0], pts[-1])
+    ring = pts[:-1] if closed else pts
+    simp = rdp(ring, epsilon)
+    corners = corner_indices(np.vstack([simp, simp[0]]), angle_threshold_deg=40)
+    # map corner positions in `simp` back to indices in `ring`
+    corner_pts = simp[corners] if corners else simp[[0]]
+    cut_idx = sorted({int(np.argmin(np.hypot(*(ring - cp).T))) for cp in corner_pts})
+    if len(cut_idx) < 2:
+        cut_idx = [0, len(ring) // 2]
+
+    d = f"M{_fmt(ring[cut_idx[0]][0])} {_fmt(ring[cut_idx[0]][1])} "
+    for k in range(len(cut_idx)):
+        i0 = cut_idx[k]
+        i1 = cut_idx[(k + 1) % len(cut_idx)]
+        seg = ring[i0:i1 + 1] if i1 > i0 else np.vstack([ring[i0:], ring[: i1 + 1]])
+        if len(seg) < 2:
+            continue
+        if _segment_is_straight(seg, epsilon):
+            d += f"L{_fmt(seg[-1][0])} {_fmt(seg[-1][1])} "
+        else:
+            for b in fit_cubic_beziers(seg, max_error):
+                d += (f"C{_fmt(b[1][0])} {_fmt(b[1][1])} {_fmt(b[2][0])} {_fmt(b[2][1])} "
+                      f"{_fmt(b[3][0])} {_fmt(b[3][1])} ")
+    d += "Z"
+    return Shape("path", {"d": d})

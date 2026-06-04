@@ -61,3 +61,23 @@ def test_polygon_rejects_curved_region():
 def _disk_local(size=60):
     yy, xx = np.ogrid[:size, :size]
     return ((xx - 30) ** 2 + (yy - 30) ** 2) <= 18 * 18
+
+
+from vectormark.fit import fit_path
+
+
+def test_fit_path_of_square_uses_only_lines():
+    mask = np.zeros((30, 30), bool); mask[6:24, 6:24] = True
+    c = outer_contour(mask)
+    shape = fit_path(c, epsilon=1.0, max_error=0.8)
+    assert shape.kind == "path"
+    assert "C" not in shape.params["d"]      # all straight -> only line ops
+    assert shape.params["d"].strip().endswith("Z")
+
+
+def test_fit_path_of_dome_uses_curve():
+    yy, xx = np.ogrid[:80, :80]
+    dome = (((xx - 40) ** 2 / 900 + (yy - 55) ** 2 / 1600) <= 1) & (yy <= 55)
+    c = outer_contour(dome)
+    shape = fit_path(c, epsilon=1.0, max_error=0.8)
+    assert shape.kind == "path" and "C" in shape.params["d"]   # curved top
