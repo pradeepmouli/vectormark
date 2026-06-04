@@ -51,7 +51,7 @@ def delta_e(a: np.ndarray, b: np.ndarray) -> float:
 
 def extract_palette(
     rgb_image: np.ndarray, *, max_colors: int = 16, merge_de: float = 0.045,
-    min_fraction: float = 0.02,
+    min_fraction: float = 0.002,
 ) -> np.ndarray:
     """Greedy frequency-ordered palette in OKLab; skips AA blends.
 

@@ -427,10 +427,16 @@ from vectormark.color import extract_palette, quantize
 
 
 def _band_image():
-    """64x64: navy top half, teal bottom half, with a 1px AA blend row between."""
+    """64x64: navy top, teal bottom, with a realistic 1px anti-alias gradient row
+    between — each column a distinct navy->teal blend, so no single blend colour
+    is frequent enough to survive (mirrors real AA: edge blends spread across many
+    low-count colours). A single uniform blend row would be wrongly high-count."""
     img = np.zeros((64, 64, 3), dtype=np.uint8)
     img[:31] = (6, 35, 54)       # navy
-    img[31] = (33, 101, 105)     # AA blend (few pixels)
+    navy = np.array([6.0, 35.0, 54.0]); teal = np.array([61.0, 168.0, 157.0])
+    for x in range(64):
+        t = x / 63.0
+        img[31, x] = np.round(navy * (1 - t) + teal * t).astype(np.uint8)
     img[32:] = (61, 168, 157)    # teal
     return img
 
