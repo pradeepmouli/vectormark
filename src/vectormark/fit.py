@@ -54,3 +54,35 @@ def recognize_primitive(contour: np.ndarray, *, epsilon: float) -> Shape | None:
         return Shape("rect", {"x": minx, "y": miny, "w": maxx - minx, "h": maxy - miny})
 
     return None
+
+
+from .contour import rdp
+
+
+def recognize_polygon(contour: np.ndarray, *, epsilon: float, max_vertices: int = 8) -> Shape | None:
+    """Emit a <polygon> when the contour simplifies to few straight edges."""
+    pts = np.asarray(contour, dtype=float)
+    simp = rdp(pts, epsilon)
+    if np.allclose(simp[0], simp[-1]):
+        simp = simp[:-1]
+    if not (3 <= len(simp) <= max_vertices):
+        return None
+    # every original point must lie within ε of the simplified polygon edges
+    if _max_point_to_polyline(pts, np.vstack([simp, simp[0]])) > epsilon:
+        return None
+    return Shape("polygon", {"points": [(float(x), float(y)) for x, y in simp]})
+
+
+def _max_point_to_polyline(pts: np.ndarray, poly: np.ndarray) -> float:
+    worst = 0.0
+    segs = np.stack([poly[:-1], poly[1:]], axis=1)
+    for p in pts:
+        d = min(_point_seg_dist(p, s[0], s[1]) for s in segs)
+        worst = max(worst, d)
+    return worst
+
+
+def _point_seg_dist(p, a, b) -> float:
+    ab = b - a
+    t = 0.0 if np.dot(ab, ab) == 0 else np.clip(np.dot(p - a, ab) / np.dot(ab, ab), 0, 1)
+    return float(np.hypot(*(p - (a + t * ab))))

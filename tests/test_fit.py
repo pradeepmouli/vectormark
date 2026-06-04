@@ -33,3 +33,31 @@ def test_rejects_half_ellipse_region():
     dome = (((xx - 30) ** 2 / 324 + (yy - 40) ** 2 / 400) <= 1) & (yy <= 40)
     c = outer_contour(dome)
     assert recognize_primitive(c, epsilon=1.0) is None
+
+
+from vectormark.fit import recognize_polygon
+
+
+def _trapezoid(size=60):
+    m = np.zeros((size, size), bool)
+    for y in range(10, 40):
+        half = int(20 - (y - 10) * 0.3)
+        m[y, 30 - half:30 + half] = True
+    return m
+
+
+def test_recognizes_trapezoid_as_polygon():
+    c = outer_contour(_trapezoid())
+    shape = recognize_polygon(c, epsilon=1.2)
+    assert shape is not None and shape.kind == "polygon"
+    assert 4 <= len(shape.params["points"]) <= 5
+
+
+def test_polygon_rejects_curved_region():
+    c = outer_contour(_disk := _disk_local())
+    assert recognize_polygon(c, epsilon=1.2) is None
+
+
+def _disk_local(size=60):
+    yy, xx = np.ogrid[:size, :size]
+    return ((xx - 30) ** 2 + (yy - 30) ** 2) <= 18 * 18
