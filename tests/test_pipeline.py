@@ -1,6 +1,6 @@
 import numpy as np
 from PIL import Image
-from vectormark.pipeline import idealize
+from vectormark.pipeline import Options, idealize
 
 
 def _two_band_logo(path):
@@ -31,3 +31,13 @@ def test_gradient_image_does_not_crash():
         grad[:, x] = (x * 6, 100, 255 - x * 6)
     svg = idealize(grad)
     assert svg.startswith("<svg")
+
+
+def test_flatten_emits_only_paths():
+    img = np.full((60, 80, 3), 255, np.uint8)
+    img[8:26, 12:68] = (6, 35, 54)
+    img[34:52, 20:60] = (61, 168, 157)
+    flat = idealize(img, options=Options(flatten=True))
+    assert "<path" in flat
+    for elem in ("<rect", "<ellipse", "<circle", "<polygon", "<use"):
+        assert elem not in flat

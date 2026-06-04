@@ -9,7 +9,7 @@ from PIL import Image
 
 from .color import extract_palette, quantize
 from .contour import outer_contour
-from .emit import mirror_use, render_svg_doc, shape_to_svg
+from .emit import mirror_use, path_svg, reflect_path_d, render_svg_doc, shape_to_path_d, shape_to_svg
 from .fit import Shape, fit_path, recognize_polygon, recognize_primitive
 from .segment import segment
 from .symmetry import classify_regions, detect_axis
@@ -82,10 +82,18 @@ def idealize(image, *, options: Options | None = None) -> str:
         shape = _fit_region(region, opt, axis if not is_pair else None)
         if shape is None:
             continue
-        elem_id = f"s{eid}"
-        body.append(shape_to_svg(shape, region.color_hex, elem_id))
-        if is_pair and axis is not None:
-            body.append(mirror_use(elem_id, axis))
+        if opt.flatten:
+            # everything becomes a <path>; the mirror is baked as a reflected
+            # path (no <use>, no basic shapes) for maximum portability
+            d = shape_to_path_d(shape)
+            body.append(path_svg(d, region.color_hex))
+            if is_pair and axis is not None:
+                body.append(path_svg(reflect_path_d(d, axis.x), region.color_hex))
+        else:
+            elem_id = f"s{eid}"
+            body.append(shape_to_svg(shape, region.color_hex, elem_id))
+            if is_pair and axis is not None:
+                body.append(mirror_use(elem_id, axis))
         eid += 1
 
     return render_svg_doc(w, h, body)
