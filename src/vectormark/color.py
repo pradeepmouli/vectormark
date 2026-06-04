@@ -72,6 +72,8 @@ def extract_palette(
             palette_idx.append(i)
         if len(palette_idx) >= max_colors:
             break
+    if not palette_idx and len(colors):
+        palette_idx = [0]   # fall back to the most frequent colour
     return colors[palette_idx].astype(np.uint8)
 
 

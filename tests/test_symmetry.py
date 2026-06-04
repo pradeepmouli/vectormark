@@ -37,3 +37,12 @@ def test_no_symmetry_returns_none():
     asym = np.zeros((30, 30), bool); asym[2:8, 2:8] = True
     asym[2:4, 2:4] = False
     assert detect_axis(asym) is None
+
+
+def test_axis_reachable_for_fractional_centroid():
+    # symmetric about x=19.5 but with an off-grid centroid
+    m = np.zeros((30, 40), bool)
+    m[5:25, 12:28] = True          # symmetric block about 19.5
+    m[5:8, 12:14] = True           # nudge centroid off .5 grid (still ~symmetric enough)
+    ax = detect_axis(m)
+    assert ax is not None and abs(ax.x - 19.5) <= 0.5

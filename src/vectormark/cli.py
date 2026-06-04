@@ -16,10 +16,12 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--max-error", type=float, default=1.0, help="Bézier fit tolerance in px")
     ap.add_argument("--colors", type=int, default=16, help="max palette colours")
     ap.add_argument("--flatten", action="store_true", help="flatten primitives to paths")
+    ap.add_argument("--no-symmetry", action="store_true", help="disable symmetry detection")
     args = ap.parse_args(argv)
 
     svg = idealize(args.input, options=Options(
-        epsilon=args.epsilon, max_error=args.max_error, max_colors=args.colors, flatten=args.flatten,
+        epsilon=args.epsilon, max_error=args.max_error, max_colors=args.colors,
+        flatten=args.flatten, no_symmetry=args.no_symmetry,
     ))
     if args.output:
         with open(args.output, "w") as f:

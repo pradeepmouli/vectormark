@@ -50,3 +50,11 @@ def test_quantize_collapses_blend_row():
     pal = extract_palette(img, max_colors=8)
     q = quantize(img, pal)
     assert set(map(tuple, np.unique(q.reshape(-1, 3), axis=0))) <= {(6, 35, 54), (61, 168, 157)}
+
+
+def test_extract_palette_never_empty_on_gradient():
+    grad = np.zeros((40, 40, 3), np.uint8)
+    for x in range(40):
+        grad[:, x] = (x * 6, 100, 255 - x * 6)
+    pal = extract_palette(grad)
+    assert len(pal) >= 1

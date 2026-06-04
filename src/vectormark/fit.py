@@ -8,12 +8,14 @@ import numpy as np
 from shapely.geometry import Polygon
 from skimage.measure import CircleModel, EllipseModel
 
+from ._fitcurve import fit_cubic_beziers
+from .contour import corner_indices, rdp
+
 
 @dataclass
 class Shape:
     kind: str                 # "circle" | "ellipse" | "rect" | "polygon" | "path"
     params: dict
-    closed: bool = True
 
 
 def _max_residual(model, pts: np.ndarray) -> float:
@@ -58,12 +60,11 @@ def recognize_primitive(contour: np.ndarray, *, epsilon: float) -> Shape | None:
     return None
 
 
-from .contour import rdp
-
-
 def recognize_polygon(contour: np.ndarray, *, epsilon: float, max_vertices: int = 8) -> Shape | None:
     """Emit a <polygon> when the contour simplifies to few straight edges."""
     pts = np.asarray(contour, dtype=float)
+    if len(pts) < 3:
+        return None
     simp = rdp(pts, epsilon)
     if np.allclose(simp[0], simp[-1]):
         simp = simp[:-1]
@@ -88,10 +89,6 @@ def _point_seg_dist(p, a, b) -> float:
     ab = b - a
     t = 0.0 if np.dot(ab, ab) == 0 else np.clip(np.dot(p - a, ab) / np.dot(ab, ab), 0, 1)
     return float(np.hypot(*(p - (a + t * ab))))
-
-
-from ._fitcurve import fit_cubic_beziers
-from .contour import corner_indices
 
 
 def _segment_is_straight(seg: np.ndarray, epsilon: float) -> bool:

@@ -17,3 +17,17 @@ def test_idealize_emits_two_rects(tmp_path):
     assert svg.count("<rect") == 2
     assert "#062336" in svg and "#3DA89D" in svg
     assert 'viewBox="0 0 80 60"' in svg
+
+
+def test_solid_color_image_does_not_crash(tmp_path):
+    from PIL import Image
+    Image.fromarray(np.full((24, 24, 3), (40, 40, 40), np.uint8)).save(tmp_path / "solid.png")
+    svg = idealize(str(tmp_path / "solid.png"))
+    assert svg.startswith("<svg") and svg.strip().endswith("</svg>")
+
+def test_gradient_image_does_not_crash():
+    grad = np.zeros((40, 40, 3), np.uint8)
+    for x in range(40):
+        grad[:, x] = (x * 6, 100, 255 - x * 6)
+    svg = idealize(grad)
+    assert svg.startswith("<svg")

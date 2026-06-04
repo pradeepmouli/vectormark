@@ -8,11 +8,12 @@ from skimage.measure import find_contours
 
 def outer_contour(mask: np.ndarray) -> np.ndarray:
     """Longest sub-pixel contour of `mask`, as an (N, 2) array of (x, y) points."""
-    contours = find_contours(mask.astype(float), 0.5)
+    padded = np.pad(mask.astype(float), 1)
+    contours = find_contours(padded, 0.5)
     if not contours:
         return np.empty((0, 2))
-    longest = max(contours, key=len)          # rows of (row, col) == (y, x)
-    return np.column_stack([longest[:, 1], longest[:, 0]])  # -> (x, y)
+    longest = max(contours, key=len)                 # rows of (row, col) == (y, x)
+    return np.column_stack([longest[:, 1] - 1, longest[:, 0] - 1])  # -> (x, y), unpad
 
 
 def rdp(points: np.ndarray, epsilon: float) -> np.ndarray:

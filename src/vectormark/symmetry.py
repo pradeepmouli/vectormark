@@ -33,7 +33,7 @@ def detect_axis(silhouette: np.ndarray, *, tol: float = 0.10) -> Axis | None:
     ys, xs = np.nonzero(silhouette)
     if xs.size == 0:
         return None
-    cx = xs.mean()
+    cx = round(float(xs.mean()))
     candidates = np.arange(cx - 6, cx + 6 + 0.5, 0.5)
     scored = [(float(_mismatch(silhouette, a)), float(a)) for a in candidates]
     best_mismatch, best_x = min(scored)
@@ -52,7 +52,6 @@ def classify_regions(
     straddlers: list[Region] = []
     pairs: list[tuple[Region, Region]] = []
     used: set[int] = set()
-    by_label = {r.label: r for r in regions}
     for r in regions:
         if r.label in used:
             continue

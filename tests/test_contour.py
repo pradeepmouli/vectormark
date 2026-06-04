@@ -23,3 +23,10 @@ def test_corner_indices_finds_square_corners():
     c = rdp(outer_contour(mask), epsilon=1.0)
     corners = corner_indices(c, angle_threshold_deg=45)
     assert len(corners) >= 4
+
+
+def test_edge_touching_rect_contour_is_closed_and_full():
+    mask = np.zeros((20, 20), bool); mask[0:10, 0:8] = True   # touches top + left edges
+    c = outer_contour(mask)
+    assert np.allclose(c[0], c[-1])                 # closed
+    assert c[:, 0].min() <= 0.5 and c[:, 1].min() <= 0.5   # reaches the touched edges

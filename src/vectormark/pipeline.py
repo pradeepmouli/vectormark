@@ -22,10 +22,13 @@ class Options:
     max_error: float = 1.0        # Bézier fit tolerance (px)
     max_colors: int = 16
     flatten: bool = False
+    no_symmetry: bool = False
 
 
-def _fit_region(region: Region, opt: Options, axis: Axis | None) -> Shape:
+def _fit_region(region: Region, opt: Options, axis: Axis | None) -> Shape | None:
     contour = outer_contour(region.mask)
+    if len(contour) < 3:
+        return None
     shape = recognize_primitive(contour, epsilon=opt.epsilon)
     if shape is None:
         shape = recognize_polygon(contour, epsilon=opt.epsilon)
@@ -57,8 +60,11 @@ def idealize(image, *, options: Options | None = None) -> str:
     q = quantize(arr, palette)
     regions = segment(q)
 
+    if not regions:
+        return render_svg_doc(w, h, [])
+
     silhouette = np.any([r.mask for r in regions], axis=0)
-    axis = detect_axis(silhouette)
+    axis = None if opt.no_symmetry else detect_axis(silhouette)
 
     straddlers: list[Region]
     pairs: list[tuple[Region, Region]]
@@ -74,6 +80,8 @@ def idealize(image, *, options: Options | None = None) -> str:
     eid = 0
     for region, is_pair in drawn:
         shape = _fit_region(region, opt, axis if not is_pair else None)
+        if shape is None:
+            continue
         elem_id = f"s{eid}"
         body.append(shape_to_svg(shape, region.color_hex, elem_id))
         if is_pair and axis is not None:
