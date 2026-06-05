@@ -17,6 +17,13 @@ from .symmetry import classify_regions, detect_axis
 from .types import Axis, Region
 
 
+# Single mark-level corner radius = this fraction of the median segment height.
+# It is computed ONCE per mark and shared by every segment, so the bands, the cap,
+# and the cone all round identically — instead of each segment picking its own
+# radius from its own height (which made tall segments round more than short ones).
+_CORNER_RADIUS_FRACTION = 0.22
+
+
 @dataclass
 class Options:
     epsilon: float = 1.5          # primitive/polygon recognition tolerance (px)
@@ -27,7 +34,16 @@ class Options:
     no_symmetry: bool = False
 
 
-def _fit_region(region: Region, opt: Options, axis: Axis | None) -> Shape | None:
+def _mark_corner_radius(regions: list[Region]) -> float:
+    """One shared fillet radius for the whole mark, from the median segment height."""
+    heights = sorted(float(r.mask.any(axis=1).sum()) for r in regions if r.area > 0)
+    if not heights:
+        return 0.0
+    median_h = heights[len(heights) // 2]
+    return round(_CORNER_RADIUS_FRACTION * median_h, 1)
+
+
+def _fit_region(region: Region, opt: Options, axis: Axis | None, corner_radius: float) -> Shape | None:
     contours = [c for c in region_contours(region.mask) if len(c) >= 3]
     if not contours:
         return None
@@ -52,15 +68,16 @@ def _fit_region(region: Region, opt: Options, axis: Axis | None) -> Shape | None
     if axis is not None:
         # band-like? a clean rounded trapezoid (straight tapering sides + flat
         # top/bottom + filleted corners) beats the free half-outline fit.
-        trap = rounded_trapezoid_fit(contour, axis.x, max_error=opt.max_error)
+        trap = rounded_trapezoid_fit(contour, axis.x, radius=corner_radius, max_error=opt.max_error)
         if trap is not None:
             return trap
         # flat-based dome cap? a parametric half-ellipse (two convex kappa arcs)
         # beats the free half-outline fit and is inflection-free by construction.
-        cap = half_ellipse_cap_fit(contour, axis.x, max_error=opt.max_error)
+        cap = half_ellipse_cap_fit(contour, axis.x, corner_radius=corner_radius, max_error=opt.max_error)
         if cap is not None:
             return cap
-        sym = symmetric_fit(contour, axis.x, epsilon=opt.epsilon, max_error=opt.max_error)
+        sym = symmetric_fit(contour, axis.x, corner_radius=corner_radius,
+                            epsilon=opt.epsilon, max_error=opt.max_error)
         if sym is not None:
             return sym
 
@@ -97,6 +114,7 @@ def idealize(image, *, options: Options | None = None) -> str:
 
     silhouette = np.any([r.mask for r in regions], axis=0)
     axis = None if opt.no_symmetry else detect_axis(silhouette)
+    corner_radius = _mark_corner_radius(regions)
 
     straddlers: list[Region]
     pairs: list[tuple[Region, Region]]
@@ -111,7 +129,7 @@ def idealize(image, *, options: Options | None = None) -> str:
     drawn.sort(key=lambda rp: rp[0].area, reverse=True)
     eid = 0
     for region, is_pair in drawn:
-        shape = _fit_region(region, opt, axis if not is_pair else None)
+        shape = _fit_region(region, opt, axis if not is_pair else None, corner_radius)
         if shape is None:
             continue
         if opt.flatten:

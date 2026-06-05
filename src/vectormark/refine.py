@@ -18,6 +18,60 @@ from .contour import rdp
 from .fit import Shape, _fmt, _segment_is_straight
 
 _KAPPA = 0.5522847498
+_FILLET_K = 0.5522847498  # cubic handle for a quarter-circle-ish fillet
+
+
+def _fillet_seg(p_in: np.ndarray, corner: np.ndarray, p_out: np.ndarray) -> tuple:
+    """A cubic fillet from p_in to p_out that bulges toward the sharp `corner`.
+    Shared by every segment so all rounded corners look identical."""
+    c1 = p_in + _FILLET_K * (corner - p_in)
+    c2 = p_out + _FILLET_K * (corner - p_out)
+    return ("C", c1, c2, p_out)
+
+
+def _unit(v: np.ndarray) -> np.ndarray:
+    n = np.hypot(*v)
+    return v / n if n else v
+
+
+def _tangent_in(prev_node: np.ndarray, seg: tuple) -> np.ndarray:
+    """Unit tangent pointing INTO the segment's end node."""
+    if seg[0] == "L":
+        return _unit(seg[1] - prev_node)
+    if seg[0] == "Q":
+        return _unit(seg[2] - seg[1])      # end - control
+    return _unit(seg[3] - seg[2])          # cubic: end - 2nd control
+
+
+def _tangent_out(node: np.ndarray, seg: tuple) -> np.ndarray:
+    """Unit tangent pointing OUT of the segment's start node."""
+    return _unit(seg[1] - node)            # first control / endpoint - start
+
+
+def _round_corners(start: np.ndarray, segs: list[tuple], seg_corner: list[bool], r: float):
+    """Replace each flagged sharp corner (the start node of segs[j]) with a fillet
+    of radius `r`: trim the incoming and outgoing edges back by r and bridge them
+    with `_fillet_seg`. Quadratic out-segments stay tangent because the trimmed
+    start slides along their own control handle."""
+    nodes = [start] + [(s[1] if s[0] == "L" else s[-1]) for s in segs]
+    new_segs: list[tuple] = []
+    for j, s in enumerate(segs):
+        if seg_corner[j] and new_segs:
+            corner = nodes[j]
+            in_dir = _tangent_in(nodes[j - 1], segs[j - 1])
+            out_dir = _tangent_out(corner, s)
+            # clamp the trim so it never eats more than ~40% of either neighbour
+            len_in = np.hypot(*(corner - nodes[j - 1]))
+            len_out = np.hypot(*(nodes[j + 1] - corner))
+            rr = min(r, 0.4 * len_in, 0.4 * len_out)
+            if rr > 0.5:
+                t_in = corner - rr * in_dir
+                t_out = corner + rr * out_dir
+                prev = new_segs[-1]
+                new_segs[-1] = (*prev[:-1], t_in)   # retarget the incoming edge's end
+                new_segs.append(_fillet_seg(t_in, corner, t_out))
+        new_segs.append(s)
+    return start, new_segs
 
 
 def _longest_true_run_circular(mask: np.ndarray) -> tuple[int, int]:
@@ -70,28 +124,36 @@ def _open_corners(poly: np.ndarray, *, angle_threshold_deg: float = 40.0) -> lis
     return out
 
 
-def _fit_open_segments(pts: np.ndarray, epsilon: float, max_error: float):
+def _fit_open_segments(pts: np.ndarray, epsilon: float, max_error: float, corner_radius: float = 0.0):
     """Fit an open polyline to a start point + list of ('L', p) | ('Q', c, p2).
 
     Curved runs become *quadratic* Béziers — inflection-free by construction — so
-    the mirrored result is convex-only and cannot wobble into an S-curve.
+    the mirrored result is convex-only and cannot wobble into an S-curve. When
+    `corner_radius` > 0 the sharp corners between runs are rounded with that shared
+    radius so this shape's corners match every other segment's.
     """
     simp = rdp(pts, epsilon)
     corner_pts = simp[_open_corners(simp)] if len(simp) > 2 else np.empty((0, 2))
-    cuts = sorted({0, len(pts) - 1} | {
-        int(np.argmin(np.hypot(*(pts - cp).T))) for cp in corner_pts
-    })
+    corner_idx = {int(np.argmin(np.hypot(*(pts - cp).T))) for cp in corner_pts}
+    cuts = sorted({0, len(pts) - 1} | corner_idx)
     segs: list[tuple] = []
+    seg_corner: list[bool] = []      # True where a seg's START node is a sharp corner
     for k in range(len(cuts) - 1):
         sub = pts[cuts[k]:cuts[k + 1] + 1]
         if len(sub) < 2:
             continue
+        at_corner = cuts[k] in corner_idx
         if _segment_is_straight(sub, epsilon):
             segs.append(("L", sub[-1].copy()))
+            seg_corner.append(at_corner)
         else:
-            for b in fit_quadratic_beziers(sub, max_error):
+            for i, b in enumerate(fit_quadratic_beziers(sub, max_error)):
                 segs.append(("Q", b[1].copy(), b[2].copy()))
-    return pts[0].copy(), segs
+                seg_corner.append(at_corner and i == 0)
+    start = pts[0].copy()
+    if corner_radius > 0:
+        start, segs = _round_corners(start, segs, seg_corner, corner_radius)
+    return start, segs
 
 
 def _emit_symmetric(start: np.ndarray, segs: list[tuple], axis_x: float) -> str:
@@ -129,23 +191,21 @@ def _emit_symmetric(start: np.ndarray, segs: list[tuple], axis_x: float) -> str:
     return d + "Z"
 
 
-_FILLET_K = 0.5522847498  # cubic handle for a quarter-circle-ish fillet
-
-
 def rounded_trapezoid_fit(
-    contour: np.ndarray, axis_x: float, *, max_error: float
+    contour: np.ndarray, axis_x: float, *, radius: float, max_error: float
 ) -> Shape | None:
     """Fit a clean, symmetric rounded trapezoid (flat top/bottom, straight
-    tapering sides, filleted corners) when the region is band-like. Returns None
-    if the side isn't a clean straight taper, so genuinely curved regions fall
-    through to `symmetric_fit`.
+    tapering sides, filleted corners) when the region is band-like. The corner
+    `radius` is the shared mark-level value (not a per-segment fraction of height),
+    so every band rounds the same. Returns None if the side isn't a clean straight
+    taper, so genuinely curved regions fall through to `symmetric_fit`.
     """
     pts = np.asarray(contour, dtype=float)
     y_top, y_bot = float(pts[:, 1].min()), float(pts[:, 1].max())
     height = y_bot - y_top
     if height < 10:
         return None
-    r = min(height * 0.22, 0.45 * height)
+    r = min(radius, 0.45 * height)
 
     # right-edge sample points, away from the corner fillets
     sel = (pts[:, 1] > y_top + r) & (pts[:, 1] < y_bot - r) & (pts[:, 0] > axis_x)
@@ -177,11 +237,6 @@ def rounded_trapezoid_fit(
 
     down = np.array([m, 1.0]) / np.hypot(m, 1.0)      # unit vector along the edge (top->bottom)
 
-    def fillet(p_edge_a, corner, p_edge_b):
-        c1 = p_edge_a + _FILLET_K * (corner - p_edge_a)
-        c2 = p_edge_b + _FILLET_K * (corner - p_edge_b)
-        return ("C", c1, c2, p_edge_b)
-
     c0_top = np.array([axis_x + hw_top, y_top])
     c0_bot = np.array([axis_x + hw_bot, y_bot])
     p_top_h = np.array([axis_x + hw_top - r, y_top])   # tangent on the top edge
@@ -192,28 +247,54 @@ def rounded_trapezoid_fit(
     start = np.array([axis_x, y_top])
     segs = [
         ("L", p_top_h),
-        fillet(p_top_h, c0_top, p_top_s),
+        _fillet_seg(p_top_h, c0_top, p_top_s),
         ("L", p_bot_s),
-        fillet(p_bot_s, c0_bot, p_bot_h),
+        _fillet_seg(p_bot_s, c0_bot, p_bot_h),
         ("L", np.array([axis_x, y_bot])),
     ]
     return Shape("path", {"d": _emit_symmetric(start, segs, axis_x)})
 
 
-def _half_ellipse_cap_d(axis_x: float, y_bot: float, rx: float, ry: float) -> str:
-    """Flat-bottomed half-ellipse (dome) as two kappa quarter-arcs + flat base."""
-    y_top = y_bot - ry
+def _half_ellipse_cap_d(axis_x: float, y_bot: float, rx: float, ry: float, r: float = 0.0) -> str:
+    """Flat-bottomed half-ellipse (dome) as two kappa quarter-arcs + flat base.
+
+    With `r` > 0 the two base corners are rounded by that shared radius: the dome
+    becomes the upper half of an ellipse centred `r` above the base (radii rx,
+    ry-r) so its sides still meet the fillets with a vertical tangent, then a
+    quarter-circle fillet drops to the flat base — tangent-continuous, exactly
+    symmetric, and rounded to match every other segment.
+    """
     k = _KAPPA
     f = _fmt
+    left, right = axis_x - rx, axis_x + rx
+    if r <= 0.5:
+        y_top = y_bot - ry
+        return (
+            f"M{f(left)} {f(y_bot)} "
+            f"C{f(left)} {f(y_bot - k * ry)} {f(axis_x - k * rx)} {f(y_top)} {f(axis_x)} {f(y_top)} "
+            f"C{f(axis_x + k * rx)} {f(y_top)} {f(right)} {f(y_bot - k * ry)} {f(right)} {f(y_bot)} "
+            f"Z"
+        )
+    r = min(r, 0.45 * rx, 0.45 * ry)
+    cy = y_bot - r          # centre of the dome ellipse / fillet centres' y
+    ry2 = ry - r
+    y_top = y_bot - ry      # = cy - ry2
     return (
-        f"M{f(axis_x - rx)} {f(y_bot)} "
-        f"C{f(axis_x - rx)} {f(y_bot - k * ry)} {f(axis_x - k * rx)} {f(y_top)} {f(axis_x)} {f(y_top)} "
-        f"C{f(axis_x + k * rx)} {f(y_top)} {f(axis_x + rx)} {f(y_bot - k * ry)} {f(axis_x + rx)} {f(y_bot)} "
+        f"M{f(left)} {f(cy)} "
+        # dome: upper half-ellipse (radii rx, ry2) about (axis, cy)
+        f"C{f(left)} {f(cy - k * ry2)} {f(axis_x - k * rx)} {f(y_top)} {f(axis_x)} {f(y_top)} "
+        f"C{f(axis_x + k * rx)} {f(y_top)} {f(right)} {f(cy - k * ry2)} {f(right)} {f(cy)} "
+        # right base fillet -> flat base -> left base fillet
+        f"C{f(right)} {f(cy + k * r)} {f(right - r + k * r)} {f(y_bot)} {f(right - r)} {f(y_bot)} "
+        f"L{f(left + r)} {f(y_bot)} "
+        f"C{f(left + r - k * r)} {f(y_bot)} {f(left)} {f(cy + k * r)} {f(left)} {f(cy)} "
         f"Z"
     )
 
 
-def half_ellipse_cap_fit(contour: np.ndarray, axis_x: float, *, max_error: float) -> Shape | None:
+def half_ellipse_cap_fit(
+    contour: np.ndarray, axis_x: float, *, corner_radius: float = 0.0, max_error: float
+) -> Shape | None:
     """Primitive-deform: fit a flat-bottomed half-ellipse (dome) to the contour
     via scipy least-squares over (rx, ry), then emit it exactly symmetric. Cleaner
     than the free half-outline fit when the region really is a half-ellipse cap.
@@ -244,15 +325,19 @@ def half_ellipse_cap_fit(contour: np.ndarray, axis_x: float, *, max_error: float
     # convert the algebraic residual to an approximate pixel distance
     if np.abs(resid(sol.x)).max() * min(rx, ry) > max_error * 2.0:
         return None
-    return Shape("path", {"d": _half_ellipse_cap_d(axis_x, y_bot, rx, ry)})
+    return Shape("path", {"d": _half_ellipse_cap_d(axis_x, y_bot, rx, ry, corner_radius)})
 
 
-def symmetric_fit(contour: np.ndarray, axis_x: float, *, epsilon: float, max_error: float) -> Shape | None:
-    """Fit a straddling region's half-outline and mirror it → exactly-symmetric path."""
+def symmetric_fit(
+    contour: np.ndarray, axis_x: float, *, corner_radius: float = 0.0, epsilon: float, max_error: float
+) -> Shape | None:
+    """Fit a straddling region's half-outline and mirror it → exactly-symmetric path.
+    Sharp corners are rounded with the shared `corner_radius` so the cone's corners
+    match the bands and the cap."""
     half = _right_half(contour, axis_x)
     if half is None or len(half) < 3:
         return None
-    start, segs = _fit_open_segments(half, epsilon, max_error)
+    start, segs = _fit_open_segments(half, epsilon, max_error, corner_radius)
     if not segs:
         return None
     start[0] = axis_x                      # pin apex to the axis

@@ -34,7 +34,7 @@ def _tapered_band(H=60, W=120):
 def test_rounded_trapezoid_fit_symmetric_and_rejects_curves():
     from vectormark.refine import rounded_trapezoid_fit
     c = region_contours(_tapered_band())[0]
-    sh = rounded_trapezoid_fit(c, 60.0, max_error=1.5)
+    sh = rounded_trapezoid_fit(c, 60.0, radius=8.0, max_error=1.5)
     assert sh is not None and sh.kind == "path"
     img = render_svg(render_svg_doc(120, 60, [path_svg(sh.params["d"], "#000")]), 120, 60)
     assert _fold_ssim(img, 60) >= 0.999            # exactly symmetric
@@ -43,7 +43,7 @@ def test_rounded_trapezoid_fit_symmetric_and_rejects_curves():
     H, W = 70, 80
     yy, xx = np.ogrid[:H, :W]
     dome = (((xx - 40) ** 2 / 900 + (yy - 55) ** 2 / 2025) <= 1) & (yy <= 55)
-    assert rounded_trapezoid_fit(region_contours(dome)[0], 40.0, max_error=1.0) is None
+    assert rounded_trapezoid_fit(region_contours(dome)[0], 40.0, radius=8.0, max_error=1.0) is None
 
 
 def test_half_ellipse_cap_fit_is_convex_and_symmetric():
@@ -58,6 +58,38 @@ def test_half_ellipse_cap_fit_is_convex_and_symmetric():
     assert d.count("C") == 2 and "Q" not in d
     img = render_svg(render_svg_doc(W, H, [path_svg(d, "#000")]), W, H)
     assert _fold_ssim(img, 40) >= 0.999            # exactly symmetric
+
+
+def test_half_ellipse_cap_fit_rounds_base_corners_when_asked():
+    from vectormark.refine import half_ellipse_cap_fit
+    H, W = 80, 80
+    yy, xx = np.ogrid[:H, :W]
+    dome = (((xx - 40) ** 2 / 900 + (yy - 55) ** 2 / 2025) <= 1) & (yy <= 55)
+    c = region_contours(dome)[0]
+    sharp = half_ellipse_cap_fit(c, 40.0, max_error=1.0)
+    rounded = half_ellipse_cap_fit(c, 40.0, corner_radius=10.0, max_error=1.0)
+    assert sharp.params["d"].count("C") == 2          # dome only, sharp base
+    assert rounded.params["d"].count("C") == 4        # dome + two base fillets
+    img = render_svg(render_svg_doc(W, H, [path_svg(rounded.params["d"], "#000")]), W, H)
+    assert _fold_ssim(img, 40) >= 0.999               # still exactly symmetric
+
+
+def test_symmetric_fit_rounds_sharp_corner_with_shared_radius():
+    """A flat-topped, curved-sided 'cone' gets its top corners filleted by the
+    shared radius (a cubic fillet appears), and stays exactly symmetric."""
+    from vectormark.refine import symmetric_fit
+    H, W = 90, 120
+    m = np.zeros((H, W), bool)
+    for y in range(15, 78):                            # flat top, sides curving to a point
+        t = (y - 15) / 63
+        hw = int(40 * (1 - t * t))
+        m[y, 60 - hw:60 + hw + 1] = True
+    c = region_contours(m)[0]
+    sharp = symmetric_fit(c, 60.0, epsilon=1.5, max_error=1.0)
+    rounded = symmetric_fit(c, 60.0, corner_radius=10.0, epsilon=1.5, max_error=1.0)
+    assert rounded.params["d"].count("C") > sharp.params["d"].count("C")  # fillet(s) added
+    img = render_svg(render_svg_doc(W, H, [path_svg(rounded.params["d"], "#000")]), W, H)
+    assert _fold_ssim(img, 60) >= 0.999
 
 
 def test_half_ellipse_cap_fit_rejects_pointed_tip():
