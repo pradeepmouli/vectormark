@@ -38,6 +38,20 @@ def test_daikonic_structure_and_symmetry():
     assert any(g > 110 and b > 110 and r < 120 for r, g, b in map(_rgb, fills))
 
 
+def test_daikonic_output_is_exactly_symmetric():
+    # the real target: an exactly bilaterally-symmetric vector (the source raster
+    # is only ~0.98 symmetric due to anti-aliasing; the idealized output should
+    # be ~1.0). Search a few columns near centre for the best fold axis.
+    icon = _icon_array()
+    h, w, _ = icon.shape
+    out = render_svg(idealize(icon, options=Options(epsilon=1.8, max_error=1.2)), w, h)
+    best = max(
+        ssim(out[:, x - min(x, w - x):x][:, ::-1], out[:, x:x + min(x, w - x)])
+        for x in range(w // 2 - 3, w // 2 + 4)
+    )
+    assert best >= 0.999, f"output not exactly symmetric: {best:.4f}"
+
+
 def test_daikonic_renders_close_to_source():
     icon = _icon_array()
     h, w, _ = icon.shape

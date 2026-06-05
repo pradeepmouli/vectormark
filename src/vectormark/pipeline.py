@@ -11,6 +11,7 @@ from .color import extract_palette, quantize
 from .contour import region_contours
 from .emit import mirror_use, path_svg, reflect_path_d, render_svg_doc, shape_to_path_d, shape_to_svg
 from .fit import Shape, fit_path, recognize_polygon, recognize_primitive
+from .refine import symmetric_fit
 from .segment import segment
 from .symmetry import classify_regions, detect_axis
 from .types import Axis, Region
@@ -21,6 +22,7 @@ class Options:
     epsilon: float = 1.5          # primitive/polygon recognition tolerance (px)
     max_error: float = 1.0        # Bézier fit tolerance (px)
     max_colors: int = 16
+    min_region_fraction: float = 0.001  # drop regions smaller than this × image area
     flatten: bool = False
     no_symmetry: bool = False
 
@@ -29,14 +31,7 @@ def _fit_region(region: Region, opt: Options, axis: Axis | None) -> Shape | None
     contours = [c for c in region_contours(region.mask) if len(c) >= 3]
     if not contours:
         return None
-    if len(contours) == 1:
-        contour = contours[0]
-        shape = recognize_primitive(contour, epsilon=opt.epsilon)
-        if shape is None:
-            shape = recognize_polygon(contour, epsilon=opt.epsilon)
-        if shape is None:
-            shape = fit_path(contour, epsilon=opt.epsilon, max_error=opt.max_error)
-    else:
+    if len(contours) > 1:
         # holes / counters: outer + inner contours as subpaths, even-odd fill.
         # Skip primitive/polygon recognition (those see the outer ring only and
         # would fill the hole solid).
@@ -44,9 +39,24 @@ def _fit_region(region: Region, opt: Options, axis: Axis | None) -> Shape | None
             fit_path(c, epsilon=opt.epsilon, max_error=opt.max_error).params["d"]
             for c in contours
         )
-        shape = Shape("path", {"d": d, "fill_rule": "evenodd"})
+        return Shape("path", {"d": d, "fill_rule": "evenodd"})
+
+    contour = contours[0]
+    shape = recognize_primitive(contour, epsilon=opt.epsilon)
+    if shape is not None:
+        return _snap_to_axis(shape, axis) if axis is not None else shape
+
+    # Straddling, non-primitive region (dome, tip): fit the half-outline and
+    # mirror it → exactly symmetric. (Pairs arrive with axis=None and are
+    # mirrored via <use> instead; no axis → no symmetry to lock.)
     if axis is not None:
-        shape = _snap_to_axis(shape, axis)
+        sym = symmetric_fit(contour, axis.x, epsilon=opt.epsilon, max_error=opt.max_error)
+        if sym is not None:
+            return sym
+
+    shape = recognize_polygon(contour, epsilon=opt.epsilon)
+    if shape is None:
+        shape = fit_path(contour, epsilon=opt.epsilon, max_error=opt.max_error)
     return shape
 
 
@@ -69,7 +79,8 @@ def idealize(image, *, options: Options | None = None) -> str:
 
     palette = extract_palette(arr, max_colors=opt.max_colors)
     q = quantize(arr, palette)
-    regions = segment(q)
+    min_area = max(16, round(opt.min_region_fraction * h * w))
+    regions = segment(q, min_area=min_area)
 
     if not regions:
         return render_svg_doc(w, h, [])
