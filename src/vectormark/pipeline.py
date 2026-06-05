@@ -110,6 +110,20 @@ def _fit_region(region: Region, opt: Options, axis: Axis | None, corner_radius: 
         # holes / counters: outer + inner contours as subpaths, even-odd fill.
         # Skip primitive/polygon recognition (those see the outer ring only and
         # would fill the hole solid).
+        #
+        # A holed straddler arrives with an axis (post-classification, only
+        # self-symmetric regions carry one), so fit each contour's half-outline
+        # and mirror it → an exactly-symmetric counter. If any contour doesn't
+        # straddle cleanly, fall back to the faithful per-contour fit.
+        if axis is not None:
+            halves = [
+                symmetric_fit(c, axis.x, corner_radius=corner_radius,
+                              epsilon=opt.epsilon, max_error=opt.max_error)
+                for c in contours
+            ]
+            if all(s is not None for s in halves):
+                d = " ".join(s.params["d"] for s in halves)
+                return Shape("path", {"d": d, "fill_rule": "evenodd"})
         d = " ".join(
             fit_path(c, epsilon=opt.epsilon, max_error=opt.max_error).params["d"]
             for c in contours

@@ -1,6 +1,51 @@
 import numpy as np
 from PIL import Image
 from vectormark.pipeline import Options, _segment_image, idealize
+from tests._render import render_svg, ssim
+
+
+def _path_points(d):
+    import re
+
+    toks = re.findall(r"[MLCQZ]|-?\d*\.?\d+", d)
+    counts = {"M": 2, "L": 2, "C": 6, "Q": 4, "Z": 0}
+    pts, i = [], 0
+    while i < len(toks):
+        cmd = toks[i]
+        i += 1
+        n = counts[cmd]
+        nums = [float(t) for t in toks[i:i + n]]
+        i += n
+        pts += [(nums[k], nums[k + 1]) for k in range(0, n, 2)]
+    return pts
+
+
+def test_symmetric_holed_region_emits_exactly_symmetric():
+    # a centered annulus (filled disk with a centered hole) is a self-symmetric
+    # holed straddler; its idealized geometry should be EXACTLY bilaterally
+    # symmetric (built from mirrored halves), not independently-fit contours.
+    import re
+
+    h = w = 120
+    yy, xx = np.ogrid[:h, :w]
+    r2 = (xx - 59.5) ** 2 + (yy - 59.5) ** 2
+    mask = (r2 <= 46 ** 2) & (r2 >= 22 ** 2)
+    img = np.full((h, w, 3), 255, np.uint8)
+    img[mask] = (20, 40, 80)
+    svg = idealize(img, options=Options())
+    assert "evenodd" in svg                                   # the hole survives
+
+    # every control point's mirror about the axis is also a control point —
+    # render-independent proof the geometry is exactly symmetric
+    d = re.search(r'\sd="([^"]*)"', svg).group(1)   # \s avoids matching id="s0"
+    pts = _path_points(d)
+    ax = sum(x for x, _ in pts) / len(pts)
+    for x, y in pts:
+        assert any(abs(mx - (2 * ax - x)) < 0.6 and abs(my - y) < 0.6 for mx, my in pts)
+
+    # and it still renders recognizably to the source (a thin ring is harsh on
+    # SSIM, so this is a sanity floor, not a fidelity assertion)
+    assert ssim(render_svg(svg, w, h), img) >= 0.90
 
 
 def test_area_filter_is_scale_independent():
