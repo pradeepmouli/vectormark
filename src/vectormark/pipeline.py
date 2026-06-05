@@ -301,7 +301,8 @@ def _idealize_rectified(arr: np.ndarray, opt: Options, rho: float, w0: int, h0: 
 def idealize(image, *, options: Options | None = None) -> str:
     opt = options or Options()
     if isinstance(image, str):
-        arr = np.asarray(Image.open(image).convert("RGB"), dtype=np.uint8)
+        with Image.open(image) as im:
+            arr = np.asarray(im.convert("RGB"), dtype=np.uint8)
     else:
         arr = np.asarray(image, dtype=np.uint8)
     h0, w0 = arr.shape[:2]
