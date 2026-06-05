@@ -71,3 +71,23 @@ def test_complete_primitive_rejects_when_own_arc_too_short():
     contour = np.array([[0, 0], [1, 0], [2, 1], [2, 2], [1, 3], [0, 3]], float)
     seam = np.ones(len(contour), bool); seam[0] = False
     assert complete_primitive(contour, seam, max_residual=1.5, min_arc_deg=120.0) is None
+
+
+import re
+from vectormark.occlusion import intersection_lens_d
+
+
+def test_intersection_lens_path_two_arcs_between_crossing_points():
+    a = {"cx": 0.0, "cy": 0.0, "r": 6.0}
+    b = {"cx": 8.0, "cy": 0.0, "r": 6.0}
+    d = intersection_lens_d(a, b)
+    assert d is not None
+    assert d.count("A") == 2 and d.startswith("M") and d.rstrip().endswith("Z")
+    nums = [float(n) for n in re.findall(r"-?\d+\.?\d*", d)]
+    assert any(abs(n - 4.0) < 0.5 for n in nums)          # crossing points at x=4 (midpoint)
+
+
+def test_intersection_lens_none_when_disjoint():
+    a = {"cx": 0.0, "cy": 0.0, "r": 3.0}
+    b = {"cx": 20.0, "cy": 0.0, "r": 3.0}
+    assert intersection_lens_d(a, b) is None

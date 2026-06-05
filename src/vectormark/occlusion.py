@@ -12,6 +12,7 @@ from skimage.measure import CircleModel, EllipseModel
 from skimage.morphology import convex_hull_image
 
 from .contour import region_contours
+from .fit import _fmt
 from .types import Region
 
 
@@ -123,3 +124,30 @@ def complete_primitive(
             if _own_arc_span_deg(fit_pts, xc, yc) >= min_arc_deg:
                 return {"kind": "ellipse", "params": {"cx": xc, "cy": yc, "rx": a, "ry": b}}
     return None
+
+
+def intersection_lens_d(a: dict, b: dict) -> str | None:
+    """SVG path (two A arcs) for the lens = intersection of circles a and b.
+    Returns None if the circles don't properly overlap (disjoint or one contains
+    the other). Params dicts use cx, cy, r."""
+    ax, ay, ar = a["cx"], a["cy"], a["r"]
+    bx, by, br = b["cx"], b["cy"], b["r"]
+    dx, dy = bx - ax, by - ay
+    dist = float(np.hypot(dx, dy))
+    if dist <= abs(ar - br) or dist >= ar + br or dist == 0:
+        return None                                       # nested or disjoint
+    t = (dist * dist + ar * ar - br * br) / (2 * dist)
+    h2 = ar * ar - t * t
+    if h2 <= 0:
+        return None
+    hh = float(np.sqrt(h2))
+    ux, uy = dx / dist, dy / dist                          # unit a->b
+    mx, my = ax + t * ux, ay + t * uy                      # chord midpoint
+    p1 = (mx - hh * (-uy), my - hh * ux)                   # one crossing
+    p2 = (mx + hh * (-uy), my + hh * ux)                   # the other
+    f = _fmt
+    return (
+        f"M{f(p1[0])} {f(p1[1])} "
+        f"A{f(ar)} {f(ar)} 0 0 1 {f(p2[0])} {f(p2[1])} "
+        f"A{f(br)} {f(br)} 0 0 1 {f(p1[0])} {f(p1[1])} Z"
+    )
