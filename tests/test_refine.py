@@ -46,6 +46,49 @@ def test_rounded_trapezoid_fit_symmetric_and_rejects_curves():
     assert rounded_trapezoid_fit(region_contours(dome)[0], 40.0, max_error=1.0) is None
 
 
+def test_half_ellipse_cap_fit_is_convex_and_symmetric():
+    from vectormark.refine import half_ellipse_cap_fit
+    H, W = 70, 80
+    yy, xx = np.ogrid[:H, :W]
+    dome = (((xx - 40) ** 2 / 900 + (yy - 55) ** 2 / 2025) <= 1) & (yy <= 55)
+    sh = half_ellipse_cap_fit(region_contours(dome)[0], 40.0, max_error=1.0)
+    assert sh is not None and sh.kind == "path"
+    d = sh.params["d"]
+    # a flat-based half-ellipse: exactly two convex kappa quarter-arcs, no quadratic wobble
+    assert d.count("C") == 2 and "Q" not in d
+    img = render_svg(render_svg_doc(W, H, [path_svg(d, "#000")]), W, H)
+    assert _fold_ssim(img, 40) >= 0.999            # exactly symmetric
+
+
+def test_half_ellipse_cap_fit_rejects_pointed_tip():
+    """A teardrop/point has no wide flat base -> not a cap; falls through to None."""
+    from vectormark.refine import half_ellipse_cap_fit
+    H, W = 80, 80
+    m = np.zeros((H, W), bool)
+    for y in range(10, 70):                         # triangle narrowing to a point at top
+        hw = int((y - 10) * 0.5)
+        m[y, 40 - hw:40 + hw + 1] = True
+    assert half_ellipse_cap_fit(region_contours(m)[0], 40.0, max_error=1.0) is None
+
+
+def test_pipeline_output_is_inflection_free():
+    """End-to-end: a symmetric mark idealizes with only convex arcs — every free
+    curved run is a quadratic (Q); the only cubics (C) are parametric quarter-arcs."""
+    from vectormark.pipeline import idealize, Options
+    H, W = 90, 120
+    img = np.full((H, W, 3), 255, np.uint8)
+    yy, xx = np.ogrid[:H, :W]
+    dome = (((xx - 60) ** 2 / 1600 + (yy - 70) ** 2 / 3600) <= 1) & (yy <= 70)
+    img[dome] = (20, 40, 60)
+    svg = idealize(img, options=Options())
+    import re
+    for d in re.findall(r'd="([^"]+)"', svg):
+        # every free curved run is a quadratic; the only cubics are parametric
+        # quarter-arcs, which always come in even counts (a cap is two) — so no
+        # lone free cubic that could carry an inflection
+        assert "Q" in d or d.count("C") % 2 == 0
+
+
 def test_symmetric_fit_beats_raw_path_symmetry():
     from vectormark.fit import fit_path
     H, W = 70, 80

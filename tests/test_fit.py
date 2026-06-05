@@ -80,4 +80,5 @@ def test_fit_path_of_dome_uses_curve():
     dome = (((xx - 40) ** 2 / 900 + (yy - 55) ** 2 / 1600) <= 1) & (yy <= 55)
     c = outer_contour(dome)
     shape = fit_path(c, epsilon=1.0, max_error=0.8)
-    assert shape.kind == "path" and "C" in shape.params["d"]   # curved top
+    # curved top -> inflection-free quadratic arcs (Q), never cubic (C)
+    assert shape.kind == "path" and "Q" in shape.params["d"] and "C" not in shape.params["d"]

@@ -8,8 +8,8 @@ from .fit import Shape, _fmt
 from .types import Axis
 
 _KAPPA = 0.5522847498  # cubic-bézier circle constant
-_PATH_TOKEN = re.compile(r"[MLCZ]|-?\d*\.?\d+")
-_COORD_COUNT = {"M": 2, "L": 2, "C": 6, "Z": 0}
+_PATH_TOKEN = re.compile(r"[MLCQZ]|-?\d*\.?\d+")
+_COORD_COUNT = {"M": 2, "L": 2, "C": 6, "Q": 4, "Z": 0}
 
 
 def shape_to_svg(shape: Shape, fill: str, elem_id: str) -> str:

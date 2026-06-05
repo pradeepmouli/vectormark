@@ -1,84 +1,71 @@
-"""Vendored cubic-Bézier curve fitting.
+"""Convex-only (quadratic-Bézier) curve fitting.
 
-Adapted from volkerp/fitCurves (MIT), an implementation of
-Philip J. Schneider, "An Algorithm for Automatically Fitting Digitized Curves",
-Graphics Gems (1990). Returns a list of (4, 2) control-point arrays.
+A quadratic Bézier is an affine image of the parabola ``t -> (t, t**2)``: its
+second derivative is constant, so its curvature never changes sign. It is
+therefore *inflection-free* — it cannot wobble into an S-curve the way a fitted
+cubic can when it chases anti-aliasing noise. We fit each curved run with one or
+more quadratics (subdividing on error), so every emitted free arc is convex.
+
+Structure follows Schneider's cubic fitter (Graphics Gems, 1990) — chord-length
+parameterize, solve for the single interior control point by least squares,
+Newton-reparameterize, recurse on the worst point — but with the quadratic basis,
+which has one free control point instead of two. Returns ``(3, 2)`` arrays.
 """
 
 from __future__ import annotations
 
 import numpy as np
 
-bezier = lambda ctrl, t: (  # noqa: E731 - cubic Bézier point at t
-    (1 - t) ** 3 * ctrl[0]
-    + 3 * (1 - t) ** 2 * t * ctrl[1]
-    + 3 * (1 - t) * t ** 2 * ctrl[2]
-    + t ** 3 * ctrl[3]
+qbezier = lambda ctrl, t: (  # noqa: E731 - quadratic Bézier point at t
+    (1 - t) ** 2 * ctrl[0]
+    + 2 * (1 - t) * t * ctrl[1]
+    + t ** 2 * ctrl[2]
 )
 
 
-def fit_cubic_beziers(points: np.ndarray, max_error: float) -> list[np.ndarray]:
+def fit_quadratic_beziers(points: np.ndarray, max_error: float) -> list[np.ndarray]:
     pts = np.asarray(points, dtype=float)
     if len(pts) < 2:
         return []
-    left_t = _normalize(pts[1] - pts[0])
-    right_t = _normalize(pts[-2] - pts[-1])
-    return _fit_cubic(pts, left_t, right_t, max_error)
+    return _fit_quadratic(pts, max_error)
 
 
-def _normalize(v):
-    n = np.hypot(*v)
-    return v / n if n else v
-
-
-def _fit_cubic(pts, left_t, right_t, error):
+def _fit_quadratic(pts, error):
     if len(pts) == 2:
-        dist = np.hypot(*(pts[0] - pts[1])) / 3.0
-        ctrl = np.array([pts[0], pts[0] + left_t * dist, pts[1] + right_t * dist, pts[1]])
-        return [ctrl]
+        return [np.array([pts[0], (pts[0] + pts[1]) / 2.0, pts[1]])]
     u = _chord_length_parameterize(pts)
-    ctrl = _generate_bezier(pts, u, left_t, right_t)
+    ctrl = _generate_quadratic(pts, u)
     max_err, split = _compute_max_error(pts, ctrl, u)
     if max_err < error:
         return [ctrl]
     if max_err < error * error:
         for _ in range(20):
             u = _reparameterize(pts, u, ctrl)
-            ctrl = _generate_bezier(pts, u, left_t, right_t)
+            ctrl = _generate_quadratic(pts, u)
             max_err, split = _compute_max_error(pts, ctrl, u)
             if max_err < error:
                 return [ctrl]
-    center_t = _normalize(pts[split - 1] - pts[split + 1])
-    left = _fit_cubic(pts[: split + 1], left_t, center_t, error)
-    right = _fit_cubic(pts[split:], -center_t, right_t, error)
+    left = _fit_quadratic(pts[: split + 1], error)
+    right = _fit_quadratic(pts[split:], error)
     return left + right
 
 
-def _generate_bezier(pts, u, left_t, right_t):
-    A = np.zeros((len(u), 2, 2))
-    A[:, 0] = left_t * (3 * (1 - u) ** 2 * u)[:, None]
-    A[:, 1] = right_t * (3 * (1 - u) * u ** 2)[:, None]
-    c = np.zeros((2, 2))
-    x = np.zeros(2)
+def _generate_quadratic(pts, u):
+    """Closed-form least-squares interior control point P1 (endpoints pinned).
+
+    For B(u) = (1-u)^2 P0 + 2(1-u)u P1 + u^2 P2 the only unknown is P1; the
+    residual is linear in P1 with weight w = 2(1-u)u, so P1 minimizing
+    sum |B(u_i) - p_i|^2 is sum(w_i r_i) / sum(w_i^2), per axis.
+    """
     first, last = pts[0], pts[-1]
-    for i, ui in enumerate(u):
-        c[0, 0] += A[i, 0] @ A[i, 0]
-        c[0, 1] += A[i, 0] @ A[i, 1]
-        c[1, 0] = c[0, 1]
-        c[1, 1] += A[i, 1] @ A[i, 1]
-        tmp = pts[i] - bezier(np.array([first, first, last, last]), ui)
-        x[0] += A[i, 0] @ tmp
-        x[1] += A[i, 1] @ tmp
-    det_c = c[0, 0] * c[1, 1] - c[1, 0] * c[0, 1]
-    det_x0 = x[0] * c[1, 1] - c[0, 1] * x[1]
-    det_x1 = c[0, 0] * x[1] - x[0] * c[1, 0]
-    alpha_l = 0.0 if det_c == 0 else det_x0 / det_c
-    alpha_r = 0.0 if det_c == 0 else det_x1 / det_c
-    seg = np.hypot(*(first - last))
-    if alpha_l < 1e-6 * seg or alpha_r < 1e-6 * seg:
-        d = seg / 3.0
-        return np.array([first, first + left_t * d, last + right_t * d, last])
-    return np.array([first, first + left_t * alpha_l, last + right_t * alpha_r, last])
+    w = 2 * (1 - u) * u
+    rhs = pts - ((1 - u) ** 2)[:, None] * first - (u ** 2)[:, None] * last
+    denom = float((w * w).sum())
+    if denom < 1e-12:
+        p1 = (first + last) / 2.0
+    else:
+        p1 = (w[:, None] * rhs).sum(axis=0) / denom
+    return np.array([first, p1, last])
 
 
 def _reparameterize(pts, u, ctrl):
@@ -86,9 +73,9 @@ def _reparameterize(pts, u, ctrl):
 
 
 def _newton(p, u, ctrl):
-    d = bezier(ctrl, u) - p
-    q1 = 3 * (ctrl[1] - ctrl[0]) * (1 - u) ** 2 + 6 * (ctrl[2] - ctrl[1]) * (1 - u) * u + 3 * (ctrl[3] - ctrl[2]) * u ** 2
-    q2 = 6 * (ctrl[2] - 2 * ctrl[1] + ctrl[0]) * (1 - u) + 6 * (ctrl[3] - 2 * ctrl[2] + ctrl[1]) * u
+    d = qbezier(ctrl, u) - p
+    q1 = 2 * (1 - u) * (ctrl[1] - ctrl[0]) + 2 * u * (ctrl[2] - ctrl[1])
+    q2 = 2 * (ctrl[2] - 2 * ctrl[1] + ctrl[0])
     denom = q1 @ q1 + d @ q2
     return u if denom == 0 else u - (d @ q1) / denom
 
@@ -100,6 +87,6 @@ def _chord_length_parameterize(pts):
 
 
 def _compute_max_error(pts, ctrl, u):
-    errs = np.array([np.hypot(*(bezier(ctrl, uu) - p)) ** 2 for p, uu in zip(pts, u)])
+    errs = np.array([np.hypot(*(qbezier(ctrl, uu) - p)) ** 2 for p, uu in zip(pts, u)])
     split = int(errs.argmax())
     return float(errs[split]), max(1, min(split, len(pts) - 2))

@@ -11,9 +11,13 @@ from __future__ import annotations
 
 import numpy as np
 
-from ._fitcurve import fit_cubic_beziers
+from scipy.optimize import least_squares
+
+from ._fitcurve import fit_quadratic_beziers
 from .contour import rdp
 from .fit import Shape, _fmt, _segment_is_straight
+
+_KAPPA = 0.5522847498
 
 
 def _longest_true_run_circular(mask: np.ndarray) -> tuple[int, int]:
@@ -67,7 +71,11 @@ def _open_corners(poly: np.ndarray, *, angle_threshold_deg: float = 40.0) -> lis
 
 
 def _fit_open_segments(pts: np.ndarray, epsilon: float, max_error: float):
-    """Fit an open polyline to a start point + list of ('L', p) | ('C', c1, c2, p3)."""
+    """Fit an open polyline to a start point + list of ('L', p) | ('Q', c, p2).
+
+    Curved runs become *quadratic* Béziers — inflection-free by construction — so
+    the mirrored result is convex-only and cannot wobble into an S-curve.
+    """
     simp = rdp(pts, epsilon)
     corner_pts = simp[_open_corners(simp)] if len(simp) > 2 else np.empty((0, 2))
     cuts = sorted({0, len(pts) - 1} | {
@@ -81,8 +89,8 @@ def _fit_open_segments(pts: np.ndarray, epsilon: float, max_error: float):
         if _segment_is_straight(sub, epsilon):
             segs.append(("L", sub[-1].copy()))
         else:
-            for b in fit_cubic_beziers(sub, max_error):
-                segs.append(("C", b[1].copy(), b[2].copy(), b[3].copy()))
+            for b in fit_quadratic_beziers(sub, max_error):
+                segs.append(("Q", b[1].copy(), b[2].copy()))
     return pts[0].copy(), segs
 
 
@@ -95,13 +103,15 @@ def _emit_symmetric(start: np.ndarray, segs: list[tuple], axis_x: float) -> str:
 
     starts = [start]
     for s in segs:
-        starts.append(s[1] if s[0] == "L" else s[3])
+        starts.append(s[1] if s[0] == "L" else s[-1])
 
     d = f"M{f(start[0])} {f(start[1])} "
     for s in segs:
         if s[0] == "L":
             d += f"L{f(s[1][0])} {f(s[1][1])} "
-        else:
+        elif s[0] == "Q":
+            d += f"Q{f(s[1][0])} {f(s[1][1])} {f(s[2][0])} {f(s[2][1])} "
+        else:  # cubic
             d += (f"C{f(s[1][0])} {f(s[1][1])} {f(s[2][0])} {f(s[2][1])} "
                   f"{f(s[3][0])} {f(s[3][1])} ")
     for i in range(len(segs) - 1, -1, -1):
@@ -109,7 +119,11 @@ def _emit_symmetric(start: np.ndarray, segs: list[tuple], axis_x: float) -> str:
         if s[0] == "L":
             m = mir(p_prev)
             d += f"L{f(m[0])} {f(m[1])} "
-        else:
+        elif s[0] == "Q":
+            # reversing a quadratic swaps endpoints; the single control point stays
+            c, p0 = mir(s[1]), mir(p_prev)
+            d += f"Q{f(c[0])} {f(c[1])} {f(p0[0])} {f(p0[1])} "
+        else:  # cubic
             c2, c1, p0 = mir(s[2]), mir(s[1]), mir(p_prev)
             d += f"C{f(c2[0])} {f(c2[1])} {f(c1[0])} {f(c1[1])} {f(p0[0])} {f(p0[1])} "
     return d + "Z"
@@ -186,6 +200,53 @@ def rounded_trapezoid_fit(
     return Shape("path", {"d": _emit_symmetric(start, segs, axis_x)})
 
 
+def _half_ellipse_cap_d(axis_x: float, y_bot: float, rx: float, ry: float) -> str:
+    """Flat-bottomed half-ellipse (dome) as two kappa quarter-arcs + flat base."""
+    y_top = y_bot - ry
+    k = _KAPPA
+    f = _fmt
+    return (
+        f"M{f(axis_x - rx)} {f(y_bot)} "
+        f"C{f(axis_x - rx)} {f(y_bot - k * ry)} {f(axis_x - k * rx)} {f(y_top)} {f(axis_x)} {f(y_top)} "
+        f"C{f(axis_x + k * rx)} {f(y_top)} {f(axis_x + rx)} {f(y_bot - k * ry)} {f(axis_x + rx)} {f(y_bot)} "
+        f"Z"
+    )
+
+
+def half_ellipse_cap_fit(contour: np.ndarray, axis_x: float, *, max_error: float) -> Shape | None:
+    """Primitive-deform: fit a flat-bottomed half-ellipse (dome) to the contour
+    via scipy least-squares over (rx, ry), then emit it exactly symmetric. Cleaner
+    than the free half-outline fit when the region really is a half-ellipse cap.
+    Returns None if the arc doesn't match an ellipse within tolerance.
+    """
+    pts = np.asarray(contour, dtype=float)
+    y_bot = float(pts[:, 1].max())
+    arc = pts[pts[:, 1] < y_bot - 1.0]               # exclude the flat base
+    if len(arc) < 10:
+        return None
+    # the base must be genuinely flat (wide), else it's a point/teardrop, not a cap
+    base = pts[pts[:, 1] > y_bot - 2.0]
+    base_w = base[:, 0].max() - base[:, 0].min()
+    # the base must be the wide, flat edge of a cap — not a point (teardrop/tip)
+    if base_w < 0.7 * (pts[:, 0].max() - pts[:, 0].min()):
+        return None
+    rx0 = max(base_w / 2.0, 1.0)
+    ry0 = max(y_bot - float(arc[:, 1].min()), 1.0)
+    x = arc[:, 0] - axis_x
+    y = arc[:, 1] - y_bot
+
+    def resid(p):
+        rx, ry = p
+        return np.hypot(x / rx, y / ry) - 1.0        # algebraic ellipse residual
+
+    sol = least_squares(resid, [rx0, ry0], bounds=([1.0, 1.0], [np.inf, np.inf]))
+    rx, ry = float(sol.x[0]), float(sol.x[1])
+    # convert the algebraic residual to an approximate pixel distance
+    if np.abs(resid(sol.x)).max() * min(rx, ry) > max_error * 2.0:
+        return None
+    return Shape("path", {"d": _half_ellipse_cap_d(axis_x, y_bot, rx, ry)})
+
+
 def symmetric_fit(contour: np.ndarray, axis_x: float, *, epsilon: float, max_error: float) -> Shape | None:
     """Fit a straddling region's half-outline and mirror it → exactly-symmetric path."""
     half = _right_half(contour, axis_x)
@@ -196,5 +257,5 @@ def symmetric_fit(contour: np.ndarray, axis_x: float, *, epsilon: float, max_err
         return None
     start[0] = axis_x                      # pin apex to the axis
     last = segs[-1]
-    (last[1] if last[0] == "L" else last[3])[0] = axis_x   # pin bottom to the axis
+    (last[1] if last[0] == "L" else last[-1])[0] = axis_x   # pin bottom to the axis
     return Shape("path", {"d": _emit_symmetric(start, segs, axis_x)})
