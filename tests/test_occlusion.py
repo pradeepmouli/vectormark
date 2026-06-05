@@ -33,7 +33,7 @@ def test_has_bite_crescent_vs_convex():
     assert has_bite(rect) is False
 
 
-from vectormark.occlusion import label_boundary
+from vectormark.occlusion import label_boundary, complete_primitive
 
 
 def test_label_boundary_marks_the_bite_as_seam():
@@ -49,3 +49,25 @@ def test_label_boundary_marks_the_bite_as_seam():
     own_x = contour[~seam][:, 0].mean()
     assert seam_x > own_x                                # the bite is on the +x side
     assert seam.any() and (~seam).any()
+
+
+def test_complete_primitive_recovers_full_disk_from_crescent():
+    H = W = 120
+    yy, xx = np.ogrid[:H, :W]
+    cx0, cy0, r0 = 45.0, 60.0, 34.0
+    disk = (xx - cx0) ** 2 + (yy - cy0) ** 2 <= r0 ** 2
+    occ = (xx - 78) ** 2 + (yy - 60) ** 2 <= 34 ** 2
+    crescent = disk & ~occ
+    other = occ & ~disk
+    contour, seam = label_boundary(_region(1, crescent), [_region(2, other)])
+    prim = complete_primitive(contour, seam, max_residual=1.5, min_arc_deg=120.0)
+    assert prim is not None and prim["kind"] == "circle"
+    assert abs(prim["params"]["cx"] - cx0) < 2.0
+    assert abs(prim["params"]["cy"] - cy0) < 2.0
+    assert abs(prim["params"]["r"] - r0) < 2.0
+
+
+def test_complete_primitive_rejects_when_own_arc_too_short():
+    contour = np.array([[0, 0], [1, 0], [2, 1], [2, 2], [1, 3], [0, 3]], float)
+    seam = np.ones(len(contour), bool); seam[0] = False
+    assert complete_primitive(contour, seam, max_residual=1.5, min_arc_deg=120.0) is None
