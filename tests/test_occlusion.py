@@ -162,3 +162,23 @@ def test_reconstruct_scene_passes_through_non_occluded():
     regions = [_region(1, band, "#062336")]
     reconstructed, remaining = reconstruct_scene(regions, Axis(x=40.0), (H, W))
     assert reconstructed == [] and [r.label for r in remaining] == [1]
+
+
+def test_reconstruct_scene_does_not_drop_members_of_larger_component():
+    """A connected component larger than the canonical (2 crescents + 1 lens) must
+    decline reconstruction WITHOUT dropping any region (regression: the old code
+    consumed the whole transitive group, losing the extra member)."""
+    H, W = 140, 220
+    da, db, cx = _two_disk_mark(H, W)
+    red = da & ~db
+    extra = np.zeros((H, W), bool)
+    extra[66:74, 30:42] = True          # small convex region abutting the red disk's left edge
+    regions = [
+        _region(1, red, "#FF0000"),
+        _region(2, db & ~da, "#FFFF00"),
+        _region(3, da & db, "#FFA500"),
+        _region(4, extra & ~red, "#00FF00"),
+    ]
+    reconstructed, remaining = reconstruct_scene(regions, Axis(x=float(cx)), (H, W))
+    assert reconstructed == []                              # non-canonical group declined
+    assert {r.label for r in remaining} == {1, 2, 3, 4}     # nothing dropped

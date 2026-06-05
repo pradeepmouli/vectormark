@@ -245,6 +245,16 @@ def reconstruct_scene(
             continue                                      # v1 handles the two-disk case
 
         (ra, pa), (rb, pb) = completed
+        # v1 scope: a clean two-disk overlap is EXACTLY the two crescents plus at most
+        # one lens (the distinct-coloured intersection). A larger connected component
+        # (chains, 3+ overlaps) is out of scope — decline rather than risk dropping a
+        # member or mis-picking the lens. (z-order between the two disks needs no
+        # disambiguation here: when a distinct-coloured lens exists it is painted on
+        # top and covers the intersection, so disk paint-order is moot; equal-coloured
+        # overlaps merge into one region upstream and never reach this two-crescent path.)
+        non_completed = [g for g in group_regions if g.label not in {ra.label, rb.label}]
+        if len(non_completed) > 1:
+            continue
         if pa["params"]["cx"] > pb["params"]["cx"]:
             (ra, pa), (rb, pb) = (rb, pb), (ra, pa)
         if axis is not None and pa["kind"] == pb["kind"] == "circle":
@@ -255,7 +265,7 @@ def reconstruct_scene(
             {"kind": pa["kind"], "params": pa["params"], "color": ra.color_hex, "z": 0},
             {"kind": pb["kind"], "params": pb["params"], "color": rb.color_hex, "z": 1},
         ]
-        lens_region = next((g for g in group_regions if g.label not in {ra.label, rb.label}), None)
+        lens_region = non_completed[0] if non_completed else None
         lens = None
         if lens_region is not None and pa["kind"] == pb["kind"] == "circle":
             lens = {"mask_color": lens_region.color_hex, "lens_of": (0, 1)}
@@ -269,7 +279,11 @@ def reconstruct_scene(
             d = intersection_lens_d(pa["params"], pb["params"])
             if d is not None:
                 reconstructed.append(Shape("path", {"d": d, "color_hex": lens_region.color_hex, "z": 2}))
-        consumed.update(g.label for g in group_regions)
+        # consume ONLY what was reconstructed (the guard guarantees the group has no
+        # other members, but be explicit so a stale group can never drop a region)
+        consumed.update({ra.label, rb.label})
+        if lens_region is not None:
+            consumed.add(lens_region.label)
 
     remaining = [r for r in regions if r.label not in consumed]
     return reconstructed, remaining
