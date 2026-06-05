@@ -44,6 +44,9 @@ target; `reference-trace.svg` is the organic-trace baseline for comparison.
 **Non-goals (v1)**
 - Photographic / heavily shaded logos (gradients arrive in v1.1).
 - Wordmark / text reconstruction (treat text regions as opaque shapes or skip).
+- **Regions with holes / enclosed counters** (letter bowls, donuts): v1 keeps the
+  outer contour only. Multi-contour `fill-rule="evenodd"` support is **v1.1** —
+  most real logos with negative space need it, but the Daikonic mark has none.
 - Interactive/GUI editing — output is plain SVG, edited with any tool.
 - Beating a tracer on *arbitrary* raster art; the value is in *logo* structure.
 

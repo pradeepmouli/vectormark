@@ -14,8 +14,17 @@ No model/LLM in the loop. Every stage is a known, deterministic algorithm.
 
 ## Status
 
-🚧 Early development. See the design spec:
-[`docs/superpowers/specs/2026-06-04-vectormark-logo-idealizer-design.md`](docs/superpowers/specs/2026-06-04-vectormark-logo-idealizer-design.md).
+🌱 **v1 pipeline working.** The deterministic A0→B→C pipeline idealizes the
+Daikonic mark end-to-end (SSIM 0.98 / mean ΔE 0.006 vs. source) into a 1.9 KB
+structured SVG with exact bilateral symmetry. See the design spec and plan:
+- spec: [`docs/superpowers/specs/2026-06-04-vectormark-logo-idealizer-design.md`](docs/superpowers/specs/2026-06-04-vectormark-logo-idealizer-design.md)
+- plan: [`docs/superpowers/plans/2026-06-04-vectormark-v1.md`](docs/superpowers/plans/2026-06-04-vectormark-v1.md)
+
+```bash
+uv sync --extra dev
+uv run vectormark path/to/logo.png -o out.svg
+uv run pytest          # 34 tests
+```
 
 ## Pipeline (v1)
 
