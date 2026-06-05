@@ -12,8 +12,8 @@ from skimage.measure import CircleModel, EllipseModel
 from skimage.morphology import convex_hull_image
 
 from .contour import region_contours
-from .fit import _fmt
-from .types import Region
+from .fit import Shape, _fmt
+from .types import Axis, Region
 
 
 @dataclass
@@ -187,3 +187,89 @@ def stack_agreement(prims, lens, regions: list[Region], h: int, w: int) -> float
     if not compare_mask.any():
         return 0.0
     return float((painted[compare_mask] == truth[compare_mask]).mean())
+
+
+_MAX_RESIDUAL = 1.6
+_MIN_ARC_DEG = 110.0
+_GATE_AGREEMENT = 0.97
+
+
+def _snap_pair(p_left: dict, p_right: dict, axis_x: float) -> tuple[dict, dict]:
+    """Force two completed circles to be exact mirror images about x = axis_x."""
+    r = (p_left["params"]["r"] + p_right["params"]["r"]) / 2
+    cy = (p_left["params"]["cy"] + p_right["params"]["cy"]) / 2
+    off = (abs(p_left["params"]["cx"] - axis_x) + abs(p_right["params"]["cx"] - axis_x)) / 2
+    left = {"kind": "circle", "params": {"cx": axis_x - off, "cy": cy, "r": r}}
+    right = {"kind": "circle", "params": {"cx": axis_x + off, "cy": cy, "r": r}}
+    return left, right
+
+
+def reconstruct_scene(
+    regions: list[Region], axis: Axis | None, shape_hw: tuple[int, int]
+) -> tuple[list, list[Region]]:
+    """Return (reconstructed, remaining). `reconstructed` mixes ScenePrimitive and
+    lens Shape objects in paint order; `remaining` are regions to fit the old way.
+    Only adjacent groups that pass the consistency gate are reconstructed."""
+    h, w = shape_hw
+    by_label = {r.label: r for r in regions}
+    adj = region_adjacency(regions)
+    reconstructed: list = []
+    consumed: set[int] = set()
+
+    for r in regions:
+        if r.label in consumed or not has_bite(r.mask):
+            continue
+        # transitive connected component (crescents touch only through the lens)
+        group: set[int] = set()
+        stack = [r.label]
+        while stack:
+            lab = stack.pop()
+            if lab in group:
+                continue
+            group.add(lab)
+            stack.extend(adj[lab] - group)
+        group_regions = [by_label[l] for l in sorted(group) if l not in consumed]
+        if len(group_regions) < 2:
+            continue
+
+        completed: list[tuple[Region, dict]] = []
+        for gr in group_regions:
+            if not has_bite(gr.mask):
+                continue
+            others = [o for o in group_regions if o.label != gr.label]
+            contour, seam = label_boundary(gr, others)
+            prim = complete_primitive(contour, seam, max_residual=_MAX_RESIDUAL, min_arc_deg=_MIN_ARC_DEG)
+            if prim is not None:
+                completed.append((gr, prim))
+        if len(completed) != 2:
+            continue                                      # v1 handles the two-disk case
+
+        (ra, pa), (rb, pb) = completed
+        if pa["params"]["cx"] > pb["params"]["cx"]:
+            (ra, pa), (rb, pb) = (rb, pb), (ra, pa)
+        if axis is not None and pa["kind"] == pb["kind"] == "circle":
+            snapped_l, snapped_r = _snap_pair(pa, pb, axis.x)
+            pa["params"], pb["params"] = snapped_l["params"], snapped_r["params"]
+
+        prims = [
+            {"kind": pa["kind"], "params": pa["params"], "color": ra.color_hex, "z": 0},
+            {"kind": pb["kind"], "params": pb["params"], "color": rb.color_hex, "z": 1},
+        ]
+        lens_region = next((g for g in group_regions if g.label not in {ra.label, rb.label}), None)
+        lens = None
+        if lens_region is not None and pa["kind"] == pb["kind"] == "circle":
+            lens = {"mask_color": lens_region.color_hex, "lens_of": (0, 1)}
+
+        if stack_agreement(prims, lens, group_regions, h, w) < _GATE_AGREEMENT:
+            continue                                      # reject -> regions stay in `remaining`
+
+        reconstructed.append(ScenePrimitive(pa["kind"], pa["params"], ra.color_hex, 0))
+        reconstructed.append(ScenePrimitive(pb["kind"], pb["params"], rb.color_hex, 1))
+        if lens is not None:
+            d = intersection_lens_d(pa["params"], pb["params"])
+            if d is not None:
+                reconstructed.append(Shape("path", {"d": d, "color_hex": lens_region.color_hex, "z": 2}))
+        consumed.update(g.label for g in group_regions)
+
+    remaining = [r for r in regions if r.label not in consumed]
+    return reconstructed, remaining

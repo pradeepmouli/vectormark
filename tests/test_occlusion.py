@@ -123,3 +123,42 @@ def test_stack_agreement_low_for_wrong_reconstruction():
     regions = [_region(1, da, "#FF0000")]
     prims = [{"kind": "circle", "params": {"cx": 38.0, "cy": 50.0, "r": 45.0}, "color": "#FF0000", "z": 0}]
     assert stack_agreement(prims, None, regions, H, W) < 0.9   # oversized disk disagrees
+
+
+from vectormark.types import Axis
+from vectormark.fit import Shape
+from vectormark.occlusion import reconstruct_scene
+
+
+def _two_disk_mark(H=140, W=200, gap=24, r=44):
+    yy, xx = np.ogrid[:H, :W]
+    cx = W // 2
+    da = (xx - (cx - gap)) ** 2 + (yy - H // 2) ** 2 <= r ** 2
+    db = (xx - (cx + gap)) ** 2 + (yy - H // 2) ** 2 <= r ** 2
+    return da, db, cx
+
+
+def test_reconstruct_scene_two_disks_with_lens():
+    H, W = 140, 200
+    da, db, cx = _two_disk_mark(H, W)
+    regions = [
+        _region(1, da & ~db, "#FF0000"),
+        _region(2, db & ~da, "#FFFF00"),
+        _region(3, da & db, "#FFA500"),
+    ]
+    reconstructed, remaining = reconstruct_scene(regions, Axis(x=float(cx)), (H, W))
+    prims = [e for e in reconstructed if isinstance(e, ScenePrimitive)]
+    lenses = [e for e in reconstructed if isinstance(e, Shape)]
+    assert len(prims) == 2 and len(lenses) == 1
+    assert abs(prims[0].params["r"] - prims[1].params["r"]) < 1.0
+    assert abs((prims[0].params["cx"] + prims[1].params["cx"]) / 2 - cx) < 1.0
+    assert remaining == []
+
+
+def test_reconstruct_scene_passes_through_non_occluded():
+    H = W = 80
+    yy, xx = np.ogrid[:H, :W]
+    band = np.zeros((H, W), bool); band[20:40, 10:70] = True     # convex, no bite
+    regions = [_region(1, band, "#062336")]
+    reconstructed, remaining = reconstruct_scene(regions, Axis(x=40.0), (H, W))
+    assert reconstructed == [] and [r.label for r in remaining] == [1]
