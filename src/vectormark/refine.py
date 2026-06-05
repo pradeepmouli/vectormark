@@ -338,12 +338,18 @@ def symmetric_polygon_fit(contour: np.ndarray, axis_x: float, *, epsilon: float,
     if half is None or len(half) < 2:
         return None
     simp = rdp(half, epsilon).astype(float)
-    if not (2 <= len(simp) <= max_vertices):
+    if not (3 <= len(simp) <= max_vertices):
         return None
-    # A real polygon edge is straight to sub-pixel; a curve approximated by a
-    # polyline deviates up to ~epsilon. Gate on a TIGHT tolerance (not epsilon) so
-    # a gentle arc isn't mistaken for a many-sided polygon and faceted.
-    if _max_point_to_polyline(half, simp) > 0.8:
+    # A real polygon edge deviates only by anti-aliasing noise (well under epsilon);
+    # a curve approximated by a polyline sits at the rdp epsilon ceiling. Gate at a
+    # fraction of epsilon so a high-curvature arc isn't faceted into a polygon.
+    # (Measured: polygon edges ~0.8px, curves ~1.2-1.5px at epsilon=1.5.)
+    if _max_point_to_polyline(half, simp) > 0.65 * epsilon:
+        return None
+    # ...but a SMALL gentle arc can also sit under that bar, so additionally require
+    # every interior vertex to be a genuine SHARP corner. A diamond has one sharp
+    # turn; a faceted curve spreads many ~25° turns — which fail this gate.
+    if len(_open_corners(simp, angle_threshold_deg=30.0)) != len(simp) - 2:
         return None
     simp[0, 0] = axis_x          # pin the top axis-crossing
     simp[-1, 0] = axis_x         # pin the bottom axis-crossing
