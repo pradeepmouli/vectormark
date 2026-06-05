@@ -121,6 +121,29 @@ def test_pipeline_output_is_inflection_free():
         assert "Q" in d or d.count("C") % 2 == 0
 
 
+def test_symmetric_polygon_fit_keeps_diamond_sharp():
+    """A straddling diamond stays a straight-edged, sharp-cornered, exactly
+    symmetric polygon — not curve-fit into a petal."""
+    from vectormark.refine import symmetric_polygon_fit
+    H, W = 120, 100
+    yy, xx = np.ogrid[:H, :W]
+    diamond = (np.abs(xx - 50) / 30 + np.abs(yy - 60) / 50) <= 1
+    sh = symmetric_polygon_fit(region_contours(diamond)[0], 50.0, epsilon=1.5)
+    assert sh is not None and sh.kind == "path"
+    assert "C" not in sh.params["d"] and "Q" not in sh.params["d"]   # straight edges only
+    img = render_svg(render_svg_doc(W, H, [path_svg(sh.params["d"], "#000")]), W, H)
+    assert _fold_ssim(img, 50) >= 0.999                              # exactly symmetric
+
+
+def test_symmetric_polygon_fit_rejects_curved_region():
+    """A dome is curved, not polygonal -> None, so it falls through to the curve fits."""
+    from vectormark.refine import symmetric_polygon_fit
+    H, W = 70, 80
+    yy, xx = np.ogrid[:H, :W]
+    dome = (((xx - 40) ** 2 / 900 + (yy - 55) ** 2 / 2025) <= 1) & (yy <= 55)
+    assert symmetric_polygon_fit(region_contours(dome)[0], 40.0, epsilon=1.5) is None
+
+
 def test_symmetric_fit_beats_raw_path_symmetry():
     from vectormark.fit import fit_path
     H, W = 70, 80

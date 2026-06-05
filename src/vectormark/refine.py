@@ -15,7 +15,7 @@ from scipy.optimize import least_squares
 
 from ._fitcurve import fit_quadratic_beziers
 from .contour import rdp
-from .fit import Shape, _fmt, _segment_is_straight
+from .fit import Shape, _fmt, _max_point_to_polyline, _segment_is_straight
 
 _KAPPA = 0.5522847498
 _FILLET_K = 0.5522847498  # cubic handle for a quarter-circle-ish fillet
@@ -326,6 +326,28 @@ def half_ellipse_cap_fit(
     if np.abs(resid(sol.x)).max() * min(rx, ry) > max_error * 2.0:
         return None
     return Shape("path", {"d": _half_ellipse_cap_d(axis_x, y_bot, rx, ry, corner_radius)})
+
+
+def symmetric_polygon_fit(contour: np.ndarray, axis_x: float, *, epsilon: float, max_vertices: int = 10) -> Shape | None:
+    """Exactly-symmetric straight-edged polygon: simplify the right-half outline to
+    line segments and mirror it. Keeps SHARP corners (a diamond stays a diamond),
+    unlike `symmetric_fit` which curve-fits every run. Returns None when the half-
+    outline isn't cleanly polygonal, so genuinely curved regions fall through.
+    """
+    half = _right_half(contour, axis_x)
+    if half is None or len(half) < 2:
+        return None
+    simp = rdp(half, epsilon).astype(float)
+    if not (2 <= len(simp) <= max_vertices):
+        return None
+    # every dense point within ε of the simplified edges ⇒ the sides are straight
+    if _max_point_to_polyline(half, simp) > epsilon:
+        return None
+    simp[0, 0] = axis_x          # pin the top axis-crossing
+    simp[-1, 0] = axis_x         # pin the bottom axis-crossing
+    start = simp[0].copy()
+    segs = [("L", p.copy()) for p in simp[1:]]
+    return Shape("path", {"d": _emit_symmetric(start, segs, axis_x)})
 
 
 def symmetric_fit(

@@ -11,7 +11,7 @@ from .color import extract_palette, quantize
 from .contour import region_contours
 from .emit import mirror_use, path_svg, reflect_path_d, render_svg_doc, shape_to_path_d, shape_to_svg
 from .fit import Shape, fit_path, recognize_polygon, recognize_primitive
-from .refine import half_ellipse_cap_fit, rounded_trapezoid_fit, symmetric_fit
+from .refine import half_ellipse_cap_fit, rounded_trapezoid_fit, symmetric_fit, symmetric_polygon_fit
 from .segment import segment
 from .symmetry import classify_regions, detect_axis
 from .types import Axis, Region
@@ -120,6 +120,11 @@ def _fit_region(region: Region, opt: Options, axis: Axis | None, corner_radius: 
         trap = rounded_trapezoid_fit(contour, axis.x, radius=corner_radius, max_error=opt.max_error)
         if trap is not None:
             return trap
+        # sharp-edged symmetric polygon (a diamond, an arrow)? keep it crisp —
+        # straight edges + sharp corners — instead of letting symmetric_fit curve it.
+        poly = symmetric_polygon_fit(contour, axis.x, epsilon=opt.epsilon)
+        if poly is not None:
+            return poly
         # flat-based dome cap? a parametric half-ellipse (two convex kappa arcs)
         # beats the free half-outline fit and is inflection-free by construction.
         cap = half_ellipse_cap_fit(contour, axis.x, corner_radius=corner_radius, max_error=opt.max_error)
