@@ -6,6 +6,7 @@ from dataclasses import dataclass
 
 import numpy as np
 from PIL import Image
+from scipy import ndimage as ndi
 
 from .color import extract_palette, quantize
 from .contour import region_contours
@@ -14,7 +15,7 @@ from .fit import Shape, fit_path, recognize_polygon, recognize_primitive
 from .occlusion import ScenePrimitive, reconstruct_scene
 from .refine import half_ellipse_cap_fit, rounded_trapezoid_fit, symmetric_fit, symmetric_polygon_fit
 from .segment import segment
-from .symmetry import classify_regions, detect_axis
+from .symmetry import classify_regions, detect_axis, detect_symmetry_rotation
 from .types import Axis, Region
 
 
@@ -151,30 +152,25 @@ def _snap_to_axis(shape: Shape, axis: Axis) -> Shape:
     return shape
 
 
-def idealize(image, *, options: Options | None = None) -> str:
-    opt = options or Options()
-    if isinstance(image, str):
-        arr = np.asarray(Image.open(image).convert("RGB"), dtype=np.uint8)
-    else:
-        arr = np.asarray(image, dtype=np.uint8)
+def _segment_image(arr: np.ndarray, opt: Options) -> tuple[int, int, list[Region]]:
+    """Quantize + segment an RGB array into flat-color regions."""
     h, w, _ = arr.shape
-
     palette = extract_palette(arr, max_colors=opt.max_colors)
     q = quantize(arr, palette)
     min_area = max(16, round(opt.min_region_fraction * h * w))
-    regions = segment(q, min_area=min_area)
+    return w, h, segment(q, min_area=min_area)
 
-    if not regions:
-        return render_svg_doc(w, h, [])
 
+def _render_body(w: int, h: int, regions: list[Region], opt: Options) -> list[str]:
+    """Detect symmetry, reconstruct occlusion, fit and emit every region in
+    z-order. Operates entirely in the frame of `regions` (which may be a rectified
+    frame) so the caller can wrap the result in an inverse transform."""
     silhouette = np.any([r.mask for r in regions], axis=0)
     axis = None if opt.no_symmetry else detect_axis(silhouette)
     corner_radius = opt.corner_radius if opt.corner_radius is not None else _mark_corner_radius(regions, axis)
 
     reconstructed, regions = reconstruct_scene(regions, axis, (h, w))
 
-    straddlers: list[Region]
-    pairs: list[tuple[Region, Region]]
     if axis is not None:
         straddlers, pairs = classify_regions(regions, axis)
     else:
@@ -215,4 +211,49 @@ def idealize(image, *, options: Options | None = None) -> str:
                 body.append(mirror_use(elem_id, axis))
         eid += 1
 
-    return render_svg_doc(w, h, body)
+    return body
+
+
+def _idealize_rectified(arr: np.ndarray, opt: Options, rho: float, w0: int, h0: int) -> str | None:
+    """Rotate the image so the tilted mirror axis is vertical, idealize in that
+    frame, and wrap the body in the inverse rotation. Returns None (so the caller
+    falls back to upright) if the rectified frame yields no usable regions or its
+    vertical symmetry no longer registers — never worth the resample then."""
+    rot = ndi.rotate(arr.astype(float), -rho, reshape=True, order=1, cval=255.0)
+    rot = np.clip(rot, 0.0, 255.0).astype(np.uint8)
+    rw, rh, regions = _segment_image(rot, opt)
+    if not regions:
+        return None
+    if detect_axis(np.any([r.mask for r in regions], axis=0)) is None:
+        return None
+    body = _render_body(rw, rh, regions, opt)
+    wrap = (f'<g transform="translate({w0 / 2} {h0 / 2}) '
+            f'rotate({-rho}) translate({-rw / 2} {-rh / 2})">')
+    return render_svg_doc(w0, h0, [wrap, *body, "</g>"])
+
+
+def idealize(image, *, options: Options | None = None) -> str:
+    opt = options or Options()
+    if isinstance(image, str):
+        arr = np.asarray(Image.open(image).convert("RGB"), dtype=np.uint8)
+    else:
+        arr = np.asarray(image, dtype=np.uint8)
+    h0, w0 = arr.shape[:2]
+
+    w, h, regions = _segment_image(arr, opt)
+    if not regions:
+        return render_svg_doc(w, h, [])
+
+    # Any-axis symmetry: if the mark has no *vertical* mirror but a tilted one,
+    # rectify it upright, idealize there, and wrap the body back into place — so
+    # the existing vertical machinery (<use> mirror, pair dedup) does the work.
+    if not opt.no_symmetry:
+        silhouette = np.any([r.mask for r in regions], axis=0)
+        if detect_axis(silhouette) is None:
+            rho = detect_symmetry_rotation(silhouette)
+            if rho is not None:
+                rectified = _idealize_rectified(arr, opt, rho, w0, h0)
+                if rectified is not None:
+                    return rectified
+
+    return render_svg_doc(w, h, _render_body(w, h, regions, opt))

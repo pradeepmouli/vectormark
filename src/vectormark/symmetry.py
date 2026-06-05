@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import numpy as np
+from scipy import ndimage as ndi
 
 from .types import Axis, Region
 
@@ -38,6 +39,69 @@ def detect_axis(silhouette: np.ndarray, *, tol: float = 0.10) -> Axis | None:
     scored = [(float(_mismatch(silhouette, a)), float(a)) for a in candidates]
     best_mismatch, best_x = min(scored)
     return Axis(x=best_x) if best_mismatch <= tol else None
+
+
+def _axis_mismatch(
+    fg_xy: tuple[np.ndarray, np.ndarray], cx: float, cy: float, theta: float,
+    dist: np.ndarray, *, tol_px: float = 1.5,
+) -> float:
+    """Fraction of foreground points whose reflection across the line through
+    (cx, cy) at angle `theta` lands off the shape (farther than `tol_px`).
+
+    Resampling-free: it reflects point *coordinates* exactly and looks each up in
+    the precomputed distance transform of the background, so it does not inherit the
+    staircasing a whole-raster rotation would. Reflection preserves area, so
+    "reflected ⊆ shape (within tol)" already implies bilateral symmetry about the
+    line — no need to also test the reverse direction.
+    """
+    xs, ys = fg_xy
+    dx, dy = np.cos(theta), np.sin(theta)
+    vx, vy = xs - cx, ys - cy
+    t = vx * dx + vy * dy                       # projection onto the axis direction
+    rx = cx + (2.0 * t * dx - vx)               # reflect: keep along-axis, flip ⟂
+    ry = cy + (2.0 * t * dy - vy)
+    h, w = dist.shape
+    ri = np.clip(np.rint(ry).astype(int), 0, h - 1)
+    ci = np.clip(np.rint(rx).astype(int), 0, w - 1)
+    return float((dist[ri, ci] > tol_px).mean())
+
+
+def detect_symmetry_rotation(silhouette: np.ndarray, *, tol: float = 0.10) -> float | None:
+    """Degrees of rotation that bring a *tilted* mirror axis to vertical, or None.
+
+    For an off-axis bilaterally-symmetric mark the mirror line is one of the two PCA
+    principal axes — but which one is not known a priori (the long axis is the
+    mirror line for a beet, the short axis for a fat lens). Score *each* principal
+    axis with a resampling-free reflection test (refining the angle locally), keep
+    the better, and accept only if its off-shape fraction is within `tol`.
+
+    The returned angle `rho` is applied as `ndi.rotate(arr, -rho)` to rectify and
+    inverted in SVG as `rotate(-rho)` to wrap the emitted body back into place.
+    """
+    ys, xs = np.nonzero(silhouette)
+    if xs.size < 3:
+        return None
+    cx, cy = float(xs.mean()), float(ys.mean())
+    pts = np.column_stack([xs - cx, ys - cy]).astype(float)
+    _evals, evecs = np.linalg.eigh(pts.T @ pts / len(pts))
+    dist = ndi.distance_transform_edt(~silhouette)
+    fg_xy = (xs.astype(float), ys.astype(float))
+    best: tuple[float, float] | None = None
+    for i in range(2):
+        base = float(np.arctan2(evecs[1, i], evecs[0, i]))
+        # local refinement: PCA is coarse on noisy boundaries
+        for dth in np.radians(np.arange(-5.0, 5.0 + 0.5, 0.5)):
+            theta = base + dth
+            mm = _axis_mismatch(fg_xy, cx, cy, theta, dist)
+            if best is None or mm < best[0]:
+                best = (mm, theta)
+    if best is None or best[0] > tol:
+        return None
+    # `best[1]` is the mirror-axis angle φ; rotating the image by ndi.rotate(-rho)
+    # with rho = -(φ + 90) brings that axis vertical (the 90° accounts for ndi's
+    # CCW-in-array sign convention vs the atan2 line angle). The ±180° freedom in φ
+    # only flips the rectified mark top-for-bottom — still vertically symmetric.
+    return float(-(np.degrees(best[1]) + 90.0))
 
 
 def _iou(a: np.ndarray, b: np.ndarray) -> float:
