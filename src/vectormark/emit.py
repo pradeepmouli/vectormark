@@ -27,7 +27,8 @@ def shape_to_svg(shape: Shape, fill: str, elem_id: str) -> str:
         pts = " ".join(f"{_fmt(x)},{_fmt(y)}" for x, y in p["points"])
         return f'<polygon {common} points="{pts}"/>'
     if shape.kind == "path":
-        return f'<path {common} d="{p["d"]}"/>'
+        rule = f' fill-rule="{p["fill_rule"]}"' if p.get("fill_rule") else ""
+        return f'<path {common}{rule} d="{p["d"]}"/>'
     raise ValueError(f"unknown shape kind: {shape.kind}")
 
 
@@ -91,8 +92,9 @@ def reflect_path_d(d: str, axis_x: float) -> str:
     return " ".join(out)
 
 
-def path_svg(d: str, fill: str) -> str:
-    return f'<path fill="{fill}" d="{d}"/>'
+def path_svg(d: str, fill: str, fill_rule: str | None = None) -> str:
+    rule = f' fill-rule="{fill_rule}"' if fill_rule else ""
+    return f'<path fill="{fill}"{rule} d="{d}"/>'
 
 
 def render_svg_doc(width: int, height: int, body: list[str]) -> str:

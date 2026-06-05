@@ -33,6 +33,18 @@ def test_gradient_image_does_not_crash():
     assert svg.startswith("<svg")
 
 
+def test_region_with_hole_uses_evenodd_and_renders_hole():
+    from tests._render import render_svg
+    img = np.full((60, 60, 3), 255, np.uint8)
+    img[10:50, 10:50] = (6, 35, 54)      # navy square
+    img[24:36, 24:36] = (255, 255, 255)  # white counter (hole)
+    svg = idealize(img)
+    assert 'fill-rule="evenodd"' in svg
+    out = render_svg(svg, 60, 60)
+    assert out[30, 30].min() > 200       # hole renders as background (light)
+    assert int(out[15, 30].sum()) < 200  # frame renders navy (dark)
+
+
 def test_flatten_emits_only_paths():
     img = np.full((60, 80, 3), 255, np.uint8)
     img[8:26, 12:68] = (6, 35, 54)

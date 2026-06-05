@@ -1,5 +1,14 @@
 import numpy as np
-from vectormark.contour import outer_contour, rdp, corner_indices
+from vectormark.contour import outer_contour, rdp, corner_indices, region_contours, _polygon_area
+
+
+def test_region_contours_finds_hole_outer_first():
+    mask = np.zeros((40, 40), bool)
+    mask[8:32, 8:32] = True       # square
+    mask[16:24, 16:24] = False    # hole / counter
+    cs = region_contours(mask)
+    assert len(cs) == 2                                  # outer + hole
+    assert _polygon_area(cs[0]) > _polygon_area(cs[1])   # outer first
 
 
 def test_outer_contour_of_square_is_closed_xy():
