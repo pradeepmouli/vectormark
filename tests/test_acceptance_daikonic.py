@@ -62,3 +62,20 @@ def test_daikonic_renders_close_to_source():
     de = mean_delta_e(icon, out)
     assert score >= 0.90, f"SSIM too low: {score:.3f}"
     assert de <= 0.05, f"mean ΔE too high: {de:.3f}"
+
+
+def test_daikonic_corner_radius_is_measured_tight_and_padded():
+    """Auto radius is MEASURED from the band corners + the de-antialiasing pad —
+    tight (matches the reference) and far below the old fraction-of-height value."""
+    from vectormark.pipeline import _mark_corner_radius, _DEANTIALIAS_PAD
+    from vectormark.color import extract_palette, quantize
+    from vectormark.segment import segment
+    from vectormark.symmetry import detect_axis
+
+    icon = _icon_array()
+    h, w, _ = icon.shape
+    pal = extract_palette(icon, max_colors=16)
+    regions = segment(quantize(icon, pal), min_area=max(16, round(0.001 * h * w)))
+    axis = detect_axis(np.any([r.mask for r in regions], axis=0))
+    r = _mark_corner_radius(regions, axis)
+    assert _DEANTIALIAS_PAD <= r <= 7.0          # tight, matches the ref (not the old ~12.8)

@@ -17,11 +17,46 @@ from .symmetry import classify_regions, detect_axis
 from .types import Axis, Region
 
 
-# Single mark-level corner radius = this fraction of the median segment height.
-# It is computed ONCE per mark and shared by every segment, so the bands, the cap,
-# and the cone all round identically — instead of each segment picking its own
-# radius from its own height (which made tall segments round more than short ones).
+# The shared mark-level corner radius is MEASURED from the band geometry (so it
+# tracks whatever mark you feed it) and applied to every segment, instead of each
+# segment picking its own radius from its own height.
+#
+# De-antialiasing collapses the soft AA edge that carried part of the corner's
+# roundness, so the hardened mask under-reads the radius by ~the AA half-width; we
+# add it back as a constant pad so the emitted radius matches the *perceived*
+# source rounding. The fraction-of-height value is only a fallback when no band-
+# like (straight-sided) segment is measurable.
 _CORNER_RADIUS_FRACTION = 0.22
+_DEANTIALIAS_PAD = 2.0
+
+
+def _band_fillet_radius(contour: np.ndarray, axis_x: float) -> list[float] | None:
+    """Measured corner-fillet radii (top, bottom) of a band-like region, or None
+    if its right side isn't a clean straight taper. The fillet inset = how far the
+    flat edge falls short of the sharp corner where the side-line meets it."""
+    pts = np.asarray(contour, dtype=float)
+    y_top, y_bot = pts[:, 1].min(), pts[:, 1].max()
+    height = y_bot - y_top
+    if height < 12:
+        return None
+    margin = min(height * 0.30, 16)
+    sel = (pts[:, 1] > y_top + margin) & (pts[:, 1] < y_bot - margin) & (pts[:, 0] > axis_x)
+    edge = pts[sel]
+    if len(edge) < 6:
+        return None
+    A = np.column_stack([edge[:, 1], np.ones(len(edge))])
+    (m, b), *_ = np.linalg.lstsq(A, edge[:, 0], rcond=None)
+    if np.abs(edge[:, 0] - (m * edge[:, 1] + b)).max() > 2.5:
+        return None                                  # side isn't a straight taper
+    out: list[float] = []
+    for edge_y in (y_top, y_bot):
+        corner_x = m * edge_y + b
+        near = pts[np.abs(pts[:, 1] - edge_y) < 1.5]
+        if len(near):
+            rr = corner_x - near[:, 0].max()
+            if 0 <= rr < 0.25 * height:              # a real corner fillet, not a curved cap
+                out.append(float(rr))
+    return out or None
 
 
 @dataclass
@@ -32,15 +67,29 @@ class Options:
     min_region_fraction: float = 0.001  # drop regions smaller than this × image area
     flatten: bool = False
     no_symmetry: bool = False
+    corner_radius: float | None = None  # shared fillet radius; None = auto from geometry
 
 
-def _mark_corner_radius(regions: list[Region]) -> float:
-    """One shared fillet radius for the whole mark, from the median segment height."""
+def _mark_corner_radius(regions: list[Region], axis: Axis | None) -> float:
+    """One shared fillet radius for the whole mark: the median measured band-corner
+    radius plus the de-antialiasing pad. Falls back to a fraction of the median
+    segment height when no band-like segment is measurable (or no axis)."""
+    if axis is not None:
+        measured: list[float] = []
+        for region in regions:
+            cs = region_contours(region.mask)
+            if cs:
+                m = _band_fillet_radius(cs[0], axis.x)
+                if m:
+                    measured.extend(m)
+        if measured:
+            measured.sort()
+            median_r = measured[len(measured) // 2]
+            return round(median_r + _DEANTIALIAS_PAD, 1)
     heights = sorted(float(r.mask.any(axis=1).sum()) for r in regions if r.area > 0)
     if not heights:
         return 0.0
-    median_h = heights[len(heights) // 2]
-    return round(_CORNER_RADIUS_FRACTION * median_h, 1)
+    return round(_CORNER_RADIUS_FRACTION * heights[len(heights) // 2], 1)
 
 
 def _fit_region(region: Region, opt: Options, axis: Axis | None, corner_radius: float) -> Shape | None:
@@ -114,7 +163,7 @@ def idealize(image, *, options: Options | None = None) -> str:
 
     silhouette = np.any([r.mask for r in regions], axis=0)
     axis = None if opt.no_symmetry else detect_axis(silhouette)
-    corner_radius = _mark_corner_radius(regions)
+    corner_radius = opt.corner_radius if opt.corner_radius is not None else _mark_corner_radius(regions, axis)
 
     straddlers: list[Region]
     pairs: list[tuple[Region, Region]]

@@ -53,3 +53,21 @@ def test_flatten_emits_only_paths():
     assert "<path" in flat
     for elem in ("<rect", "<ellipse", "<circle", "<polygon", "<use"):
         assert elem not in flat
+
+
+def _tapered_band_img(H=90, W=120, axis=60):
+    img = np.full((H, W, 3), 255, np.uint8)
+    m = np.zeros((H, W), bool)
+    for y in range(20, 70):
+        hw = int(40 - (y - 20) * 0.2)        # straight taper -> rounded_trapezoid path, not <rect>
+        m[y, axis - hw:axis + hw] = True
+    img[m] = (6, 35, 54)
+    return img
+
+
+def test_corner_radius_override_changes_output():
+    img = _tapered_band_img()
+    sharp = idealize(img, options=Options(corner_radius=0.0))
+    rounded = idealize(img, options=Options(corner_radius=10.0))
+    assert "<rect" not in rounded                  # tapered band -> rounded-trapezoid path
+    assert sharp != rounded                        # the shared radius actually drives geometry
