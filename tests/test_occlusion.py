@@ -31,3 +31,21 @@ def test_has_bite_crescent_vs_convex():
     assert has_bite(disk) is False                      # convex
     rect = np.zeros((H, W), bool); rect[10:70, 10:40] = True
     assert has_bite(rect) is False
+
+
+from vectormark.occlusion import label_boundary
+
+
+def test_label_boundary_marks_the_bite_as_seam():
+    H = W = 90
+    yy, xx = np.ogrid[:H, :W]
+    disk = (xx - 38) ** 2 + (yy - 45) ** 2 <= 30 ** 2
+    occ = (xx - 66) ** 2 + (yy - 45) ** 2 <= 30 ** 2
+    crescent = disk & ~occ
+    other = occ & ~disk                                  # the occluding region's visible part
+    contour, seam = label_boundary(_region(1, crescent), [_region(2, other)])
+    assert contour.shape[1] == 2 and seam.dtype == bool and len(seam) == len(contour)
+    seam_x = contour[seam][:, 0].mean()
+    own_x = contour[~seam][:, 0].mean()
+    assert seam_x > own_x                                # the bite is on the +x side
+    assert seam.any() and (~seam).any()
