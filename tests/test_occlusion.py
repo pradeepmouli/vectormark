@@ -91,3 +91,35 @@ def test_intersection_lens_none_when_disjoint():
     a = {"cx": 0.0, "cy": 0.0, "r": 3.0}
     b = {"cx": 20.0, "cy": 0.0, "r": 3.0}
     assert intersection_lens_d(a, b) is None
+
+
+from vectormark.occlusion import primitive_mask, stack_agreement
+
+
+def test_primitive_mask_circle():
+    m = primitive_mask({"kind": "circle", "params": {"cx": 10.0, "cy": 10.0, "r": 5.0}}, 20, 20)
+    assert m[10, 10] and not m[10, 17] and m.dtype == bool
+
+
+def test_stack_agreement_high_for_true_reconstruction():
+    H = W = 100
+    yy, xx = np.ogrid[:H, :W]
+    da = (xx - 38) ** 2 + (yy - 50) ** 2 <= 30 ** 2
+    db = (xx - 62) ** 2 + (yy - 50) ** 2 <= 30 ** 2
+    red = da & ~db; yellow = db & ~da; lens = da & db
+    regions = [_region(1, red, "#FF0000"), _region(2, yellow, "#FFFF00"), _region(3, lens, "#FFA500")]
+    prims = [
+        {"kind": "circle", "params": {"cx": 38.0, "cy": 50.0, "r": 30.0}, "color": "#FF0000", "z": 0},
+        {"kind": "circle", "params": {"cx": 62.0, "cy": 50.0, "r": 30.0}, "color": "#FFFF00", "z": 1},
+    ]
+    lens_shape = {"mask_color": "#FFA500", "lens_of": (0, 1)}
+    assert stack_agreement(prims, lens_shape, regions, H, W) > 0.97
+
+
+def test_stack_agreement_low_for_wrong_reconstruction():
+    H = W = 100
+    yy, xx = np.ogrid[:H, :W]
+    da = (xx - 38) ** 2 + (yy - 50) ** 2 <= 30 ** 2
+    regions = [_region(1, da, "#FF0000")]
+    prims = [{"kind": "circle", "params": {"cx": 38.0, "cy": 50.0, "r": 45.0}, "color": "#FF0000", "z": 0}]
+    assert stack_agreement(prims, None, regions, H, W) < 0.9   # oversized disk disagrees

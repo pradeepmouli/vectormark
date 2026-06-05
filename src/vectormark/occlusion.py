@@ -151,3 +151,39 @@ def intersection_lens_d(a: dict, b: dict) -> str | None:
         f"A{f(ar)} {f(ar)} 0 0 1 {f(p2[0])} {f(p2[1])} "
         f"A{f(br)} {f(br)} 0 0 1 {f(p1[0])} {f(p1[1])} Z"
     )
+
+
+def primitive_mask(prim: dict, h: int, w: int) -> np.ndarray:
+    """Boolean mask of a completed circle/ellipse on an (h, w) grid."""
+    yy, xx = np.ogrid[:h, :w]
+    p = prim["params"]
+    if prim["kind"] == "circle":
+        return (xx - p["cx"]) ** 2 + (yy - p["cy"]) ** 2 <= p["r"] ** 2
+    return ((xx - p["cx"]) / p["rx"]) ** 2 + ((yy - p["cy"]) / p["ry"]) ** 2 <= 1.0
+
+
+def stack_agreement(prims, lens, regions: list[Region], h: int, w: int) -> float:
+    """Paint prims (then the lens) in z-order into a colour-label image and compare,
+    over the union of the regions and any pixels painted by the stack, to each
+    region's own colour. Returns [0, 1]."""
+    BG = "\x00"
+    painted = np.full((h, w), BG, dtype=object)
+    painted_any = np.zeros((h, w), bool)
+    for prim in sorted(prims, key=lambda p: p["z"]):
+        m = primitive_mask(prim, h, w)
+        painted[m] = prim["color"]
+        painted_any |= m
+    if lens is not None:
+        a, b = (prims[lens["lens_of"][0]], prims[lens["lens_of"][1]])
+        lm = primitive_mask(a, h, w) & primitive_mask(b, h, w)
+        painted[lm] = lens["mask_color"]
+        painted_any |= lm
+    truth = np.full((h, w), BG, dtype=object)
+    region_union = np.zeros((h, w), bool)
+    for r in regions:
+        truth[r.mask] = r.color_hex
+        region_union |= r.mask
+    compare_mask = region_union | painted_any
+    if not compare_mask.any():
+        return 0.0
+    return float((painted[compare_mask] == truth[compare_mask]).mean())
