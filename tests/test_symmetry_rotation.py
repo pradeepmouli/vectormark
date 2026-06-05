@@ -95,3 +95,23 @@ def test_idealize_leaves_upright_mark_unrotated():
 def test_no_symmetry_disables_rectification():
     svg = idealize(_render(_arch(45.0)), options=Options(no_symmetry=True))
     assert "rotate(" not in svg
+
+
+def test_flatten_bakes_rotation_into_coordinates():
+    # flatten discards the <use> symmetry, so the rectifying rotation is vestigial:
+    # it must be baked into the path coordinates, leaving no transform at all.
+    arr = _render(_arch(45.0))
+    svg = idealize(arr, options=Options(flatten=True))
+    assert "transform" not in svg and "rotate(" not in svg
+    assert ssim(render_svg(svg, 240, 240), arr) >= 0.95
+
+
+def test_rectified_wrapper_floats_are_rounded():
+    # the non-flatten wrapper keeps the rotation, but its angle must be tidy
+    import re
+
+    svg = idealize(_render(_arch(45.0)))
+    angle = re.search(r"rotate\(([-\d.]+)\)", svg)
+    assert angle is not None
+    frac = angle.group(1).split(".")[1] if "." in angle.group(1) else ""
+    assert len(frac) <= 3, f"un-rounded angle {angle.group(1)}"

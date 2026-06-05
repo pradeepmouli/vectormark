@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 import re
 
 from .fit import Shape, _fmt
@@ -10,6 +11,7 @@ from .types import Axis
 _KAPPA = 0.5522847498  # cubic-bézier circle constant
 _PATH_TOKEN = re.compile(r"[MLCQZ]|-?\d*\.?\d+")
 _COORD_COUNT = {"M": 2, "L": 2, "C": 6, "Q": 4, "Z": 0}
+_AFFINE_TOKEN = re.compile(r"[MLCQAZ]|-?\d*\.?\d+")
 
 
 def shape_to_svg(shape: Shape, fill: str, elem_id: str) -> str:
@@ -89,6 +91,43 @@ def reflect_path_d(d: str, axis_x: float) -> str:
         for j, c in enumerate(coords):
             v = 2 * axis_x - float(c) if j % 2 == 0 else float(c)
             out.append(_fmt(v))
+    return " ".join(out)
+
+
+def transform_path_d(d: str, m: tuple[float, float, float, float, float, float]) -> str:
+    """Apply the SVG affine `m = (a, b, c, d, e, f)` to every point of an absolute
+    path, so the transform can be *baked* into the geometry instead of carried on a
+    wrapping `<g transform>`. Handles M/L/C/Q/Z exactly; for an elliptical-arc `A`
+    only the endpoint moves and the x-axis-rotation advances by the affine's
+    rotation — valid because the transforms we bake are rigid (rotation +
+    translation), which leave `rx`, `ry`, and the arc flags invariant."""
+    a, b, c, dd, e, f = m
+    rot_deg = math.degrees(math.atan2(b, a))
+
+    def pt(x: float, y: float) -> tuple[float, float]:
+        return a * x + c * y + e, b * x + dd * y + f
+
+    toks = _AFFINE_TOKEN.findall(d)
+    out: list[str] = []
+    i = 0
+    while i < len(toks):
+        cmd = toks[i]
+        out.append(cmd)
+        i += 1
+        if cmd == "Z":
+            continue
+        if cmd == "A":
+            rx, ry, xrot, large, sweep, x, y = toks[i:i + 7]
+            i += 7
+            nx, ny = pt(float(x), float(y))
+            out += [rx, ry, _fmt(float(xrot) + rot_deg), large, sweep, _fmt(nx), _fmt(ny)]
+            continue
+        n = _COORD_COUNT[cmd]
+        nums = [float(t) for t in toks[i:i + n]]
+        i += n
+        for k in range(0, n, 2):
+            nx, ny = pt(nums[k], nums[k + 1])
+            out += [_fmt(nx), _fmt(ny)]
     return " ".join(out)
 
 

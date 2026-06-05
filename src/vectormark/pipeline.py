@@ -10,8 +10,16 @@ from scipy import ndimage as ndi
 
 from .color import extract_palette, quantize
 from .contour import region_contours
-from .emit import mirror_use, path_svg, reflect_path_d, render_svg_doc, shape_to_path_d, shape_to_svg
-from .fit import Shape, fit_path, recognize_polygon, recognize_primitive
+from .emit import (
+    mirror_use,
+    path_svg,
+    reflect_path_d,
+    render_svg_doc,
+    shape_to_path_d,
+    shape_to_svg,
+    transform_path_d,
+)
+from .fit import Shape, _fmt, fit_path, recognize_polygon, recognize_primitive
 from .occlusion import ScenePrimitive, reconstruct_scene
 from .refine import half_ellipse_cap_fit, rounded_trapezoid_fit, symmetric_fit, symmetric_polygon_fit
 from .segment import segment
@@ -161,10 +169,19 @@ def _segment_image(arr: np.ndarray, opt: Options) -> tuple[int, int, list[Region
     return w, h, segment(q, min_area=min_area)
 
 
-def _render_body(w: int, h: int, regions: list[Region], opt: Options) -> list[str]:
+Affine = tuple[float, float, float, float, float, float]
+
+
+def _render_body(
+    w: int, h: int, regions: list[Region], opt: Options, *, bake: Affine | None = None,
+) -> list[str]:
     """Detect symmetry, reconstruct occlusion, fit and emit every region in
     z-order. Operates entirely in the frame of `regions` (which may be a rectified
-    frame) so the caller can wrap the result in an inverse transform."""
+    frame) so the caller can wrap the result in an inverse transform.
+
+    When `bake` is given (only in flatten mode), the inverse transform is applied
+    directly to each path's coordinates instead — flatten emits pure baked geometry
+    with no wrapping `<g transform>`."""
     silhouette = np.any([r.mask for r in regions], axis=0)
     axis = None if opt.no_symmetry else detect_axis(silhouette)
     corner_radius = opt.corner_radius if opt.corner_radius is not None else _mark_corner_radius(regions, axis)
@@ -176,6 +193,9 @@ def _render_body(w: int, h: int, regions: list[Region], opt: Options) -> list[st
     else:
         straddlers, pairs = list(regions), []
 
+    def emit(d: str, fill: str, rule: str | None = None) -> str:
+        return path_svg(transform_path_d(d, bake) if bake is not None else d, fill, rule)
+
     body: list[str] = []
     eid = 0
 
@@ -184,11 +204,11 @@ def _render_body(w: int, h: int, regions: list[Region], opt: Options) -> list[st
         if isinstance(elem, ScenePrimitive):
             shape = Shape(elem.kind, dict(elem.params))
             if opt.flatten:
-                body.append(path_svg(shape_to_path_d(shape), elem.color_hex))
+                body.append(emit(shape_to_path_d(shape), elem.color_hex))
             else:
                 body.append(shape_to_svg(shape, elem.color_hex, f"s{eid}"))
         else:  # lens Shape("path", {"d", "color_hex", "z"})
-            body.append(path_svg(elem.params["d"], elem.params["color_hex"]))
+            body.append(emit(elem.params["d"], elem.params["color_hex"]))
         eid += 1
 
     # 2) everything else through the existing per-region path
@@ -201,9 +221,9 @@ def _render_body(w: int, h: int, regions: list[Region], opt: Options) -> list[st
         if opt.flatten:
             d = shape_to_path_d(shape)
             rule = shape.params.get("fill_rule")
-            body.append(path_svg(d, region.color_hex, rule))
+            body.append(emit(d, region.color_hex, rule))
             if is_pair and axis is not None:
-                body.append(path_svg(reflect_path_d(d, axis.x), region.color_hex, rule))
+                body.append(emit(reflect_path_d(d, axis.x), region.color_hex, rule))
         else:
             elem_id = f"s{eid}"
             body.append(shape_to_svg(shape, region.color_hex, elem_id))
@@ -214,11 +234,25 @@ def _render_body(w: int, h: int, regions: list[Region], opt: Options) -> list[st
     return body
 
 
+def _rectify_affine(rho: float, w0: int, h0: int, rw: int, rh: int) -> Affine:
+    """The SVG affine (a, b, c, d, e, f) that maps a point in the rectified frame
+    back to the original: translate(-rw/2,-rh/2) → rotate(-rho) → translate(w0/2,h0/2)."""
+    th = np.radians(-rho)
+    cos, sin = np.cos(th), np.sin(th)
+    rot = np.array([[cos, -sin, 0.0], [sin, cos, 0.0], [0.0, 0.0, 1.0]])
+    to_centre = np.array([[1.0, 0.0, w0 / 2], [0.0, 1.0, h0 / 2], [0.0, 0.0, 1.0]])
+    from_centre = np.array([[1.0, 0.0, -rw / 2], [0.0, 1.0, -rh / 2], [0.0, 0.0, 1.0]])
+    m = to_centre @ rot @ from_centre
+    return (m[0, 0], m[1, 0], m[0, 1], m[1, 1], m[0, 2], m[1, 2])
+
+
 def _idealize_rectified(arr: np.ndarray, opt: Options, rho: float, w0: int, h0: int) -> str | None:
-    """Rotate the image so the tilted mirror axis is vertical, idealize in that
-    frame, and wrap the body in the inverse rotation. Returns None (so the caller
-    falls back to upright) if the rectified frame yields no usable regions or its
-    vertical symmetry no longer registers — never worth the resample then."""
+    """Rotate the image so the tilted mirror axis is vertical and idealize there.
+    Non-flatten output keeps the symmetry (`<use>` mirror about the vertical axis)
+    and is wrapped in one inverse-rotation `<g>`; flatten output bakes that same
+    rotation into the path coordinates so no transform survives. Returns None (so
+    the caller falls back to upright) if the rectified frame yields no usable
+    regions or its vertical symmetry no longer registers."""
     rot = ndi.rotate(arr.astype(float), -rho, reshape=True, order=1, cval=255.0)
     rot = np.clip(rot, 0.0, 255.0).astype(np.uint8)
     rw, rh, regions = _segment_image(rot, opt)
@@ -226,9 +260,12 @@ def _idealize_rectified(arr: np.ndarray, opt: Options, rho: float, w0: int, h0: 
         return None
     if detect_axis(np.any([r.mask for r in regions], axis=0)) is None:
         return None
+    if opt.flatten:
+        body = _render_body(rw, rh, regions, opt, bake=_rectify_affine(rho, w0, h0, rw, rh))
+        return render_svg_doc(w0, h0, body)
     body = _render_body(rw, rh, regions, opt)
-    wrap = (f'<g transform="translate({w0 / 2} {h0 / 2}) '
-            f'rotate({-rho}) translate({-rw / 2} {-rh / 2})">')
+    wrap = (f'<g transform="translate({_fmt(w0 / 2)} {_fmt(h0 / 2)}) '
+            f'rotate({_fmt(round(-rho, 3))}) translate({_fmt(-rw / 2)} {_fmt(-rh / 2)})">')
     return render_svg_doc(w0, h0, [wrap, *body, "</g>"])
 
 
