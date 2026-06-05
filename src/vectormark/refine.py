@@ -146,9 +146,19 @@ def rounded_trapezoid_fit(
 
     hw_top = (m * y_top + b) - axis_x
     hw_bot = (m * y_bot + b) - axis_x
-    if min(hw_top, hw_bot) < r:
+    if min(hw_top, hw_bot) <= r:
         return None
-    if r >= min(hw_top, hw_bot):
+
+    # require BOTH a flat top and a flat bottom edge (a trapezoid), not a rounded
+    # apex or a point (dome, tip) — those collapse one extreme row to ~zero width
+    # while the other stays full. Compare the two edge widths to each other.
+    near_top = pts[pts[:, 1] < y_top + 2.0]
+    near_bot = pts[pts[:, 1] > y_bot - 2.0]
+    if len(near_top) == 0 or len(near_bot) == 0:
+        return None
+    top_w = near_top[:, 0].max() - near_top[:, 0].min()
+    bot_w = near_bot[:, 0].max() - near_bot[:, 0].min()
+    if min(top_w, bot_w) < 0.5 * max(top_w, bot_w):   # one edge is a point -> not a trapezoid
         return None
 
     down = np.array([m, 1.0]) / np.hypot(m, 1.0)      # unit vector along the edge (top->bottom)
