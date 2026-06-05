@@ -189,9 +189,9 @@ def _render_body(
     reconstructed, regions = reconstruct_scene(regions, axis, (h, w))
 
     if axis is not None:
-        straddlers, pairs = classify_regions(regions, axis)
+        straddlers, pairs, loners = classify_regions(regions, axis)
     else:
-        straddlers, pairs = list(regions), []
+        straddlers, pairs, loners = list(regions), [], []
 
     def emit(d: str, fill: str, rule: str | None = None) -> str:
         return path_svg(transform_path_d(d, bake) if bake is not None else d, fill, rule)
@@ -211,11 +211,17 @@ def _render_body(
             body.append(emit(elem.params["d"], elem.params["color_hex"]))
         eid += 1
 
-    # 2) everything else through the existing per-region path
-    drawn = [(r, False) for r in straddlers] + [(canon, True) for canon, _ in pairs]
+    # 2) everything else through the existing per-region path. Straddlers fit
+    # half-and-mirror about the axis; pairs fit once + <use> mirror; loners
+    # (asymmetric, unpaired) fit as-is with no axis so they aren't force-mirrored.
+    drawn = (
+        [(r, axis, False) for r in straddlers]
+        + [(canon, None, True) for canon, _ in pairs]
+        + [(r, None, False) for r in loners]
+    )
     drawn.sort(key=lambda rp: rp[0].area, reverse=True)
-    for region, is_pair in drawn:
-        shape = _fit_region(region, opt, axis if not is_pair else None, corner_radius)
+    for region, fit_axis, is_pair in drawn:
+        shape = _fit_region(region, opt, fit_axis, corner_radius)
         if shape is None:
             continue
         if opt.flatten:

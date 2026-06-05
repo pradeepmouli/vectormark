@@ -111,10 +111,17 @@ def _iou(a: np.ndarray, b: np.ndarray) -> float:
 
 def classify_regions(
     regions: list[Region], axis: Axis, *, pair_iou: float = 0.6, straddle_iou: float = 0.5,
-) -> tuple[list[Region], list[tuple[Region, Region]]]:
-    """Split regions into straddlers (self-symmetric) and mirror pairs."""
+) -> tuple[list[Region], list[tuple[Region, Region]], list[Region]]:
+    """Split regions into self-symmetric straddlers, mirror pairs, and lone
+    asymmetric leftovers.
+
+    The three categories must be fit differently, so they are kept distinct: a
+    straddler is fit half-and-mirrored about the axis, a pair is fit once and
+    `<use>`-mirrored, and a loner is fit as-is with no symmetry (forcing the
+    half-outline mirror onto a genuinely asymmetric region would distort it)."""
     straddlers: list[Region] = []
     pairs: list[tuple[Region, Region]] = []
+    loners: list[Region] = []
     used: set[int] = set()
     for r in regions:
         if r.label in used:
@@ -140,6 +147,6 @@ def classify_regions(
             pairs.append((canon, mirror))
             used.update({r.label, partner.label})
         else:
-            straddlers.append(r)  # lone asymmetric region: fit as-is
+            loners.append(r)  # asymmetric and unpaired: fit as-is, no forced mirror
             used.add(r.label)
-    return straddlers, pairs
+    return straddlers, pairs, loners
