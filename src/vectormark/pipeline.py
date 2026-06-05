@@ -11,6 +11,7 @@ from .color import extract_palette, quantize
 from .contour import region_contours
 from .emit import mirror_use, path_svg, reflect_path_d, render_svg_doc, shape_to_path_d, shape_to_svg
 from .fit import Shape, fit_path, recognize_polygon, recognize_primitive
+from .occlusion import ScenePrimitive, reconstruct_scene
 from .refine import half_ellipse_cap_fit, rounded_trapezoid_fit, symmetric_fit, symmetric_polygon_fit
 from .segment import segment
 from .symmetry import classify_regions, detect_axis
@@ -170,6 +171,8 @@ def idealize(image, *, options: Options | None = None) -> str:
     axis = None if opt.no_symmetry else detect_axis(silhouette)
     corner_radius = opt.corner_radius if opt.corner_radius is not None else _mark_corner_radius(regions, axis)
 
+    reconstructed, regions = reconstruct_scene(regions, axis, (h, w))
+
     straddlers: list[Region]
     pairs: list[tuple[Region, Region]]
     if axis is not None:
@@ -177,18 +180,29 @@ def idealize(image, *, options: Options | None = None) -> str:
     else:
         straddlers, pairs = list(regions), []
 
-    # back-to-front: paint larger regions first
     body: list[str] = []
+    eid = 0
+
+    # 1) reconstructed occlusion primitives + lenses, painted in their own z-order
+    for elem in sorted(reconstructed, key=lambda e: e.z if isinstance(e, ScenePrimitive) else e.params["z"]):
+        if isinstance(elem, ScenePrimitive):
+            shape = Shape(elem.kind, dict(elem.params))
+            if opt.flatten:
+                body.append(path_svg(shape_to_path_d(shape), elem.color_hex))
+            else:
+                body.append(shape_to_svg(shape, elem.color_hex, f"s{eid}"))
+        else:  # lens Shape("path", {"d", "color_hex", "z"})
+            body.append(path_svg(elem.params["d"], elem.params["color_hex"]))
+        eid += 1
+
+    # 2) everything else through the existing per-region path
     drawn = [(r, False) for r in straddlers] + [(canon, True) for canon, _ in pairs]
     drawn.sort(key=lambda rp: rp[0].area, reverse=True)
-    eid = 0
     for region, is_pair in drawn:
         shape = _fit_region(region, opt, axis if not is_pair else None, corner_radius)
         if shape is None:
             continue
         if opt.flatten:
-            # everything becomes a <path>; the mirror is baked as a reflected
-            # path (no <use>, no basic shapes) for maximum portability
             d = shape_to_path_d(shape)
             rule = shape.params.get("fill_rule")
             body.append(path_svg(d, region.color_hex, rule))
