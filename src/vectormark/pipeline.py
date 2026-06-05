@@ -74,7 +74,7 @@ class Options:
     epsilon: float = 1.5          # primitive/polygon recognition tolerance (px)
     max_error: float = 1.0        # Bézier fit tolerance (px)
     max_colors: int = 16
-    min_region_fraction: float = 0.001  # drop regions smaller than this × image area
+    min_region_fraction: float = 0.02  # drop regions smaller than this × largest region
     flatten: bool = False
     no_symmetry: bool = False
     corner_radius: float | None = None  # shared fillet radius; None = auto from geometry
@@ -161,12 +161,21 @@ def _snap_to_axis(shape: Shape, axis: Axis) -> Shape:
 
 
 def _segment_image(arr: np.ndarray, opt: Options) -> tuple[int, int, list[Region]]:
-    """Quantize + segment an RGB array into flat-color regions."""
+    """Quantize + segment an RGB array into flat-color regions, dropping ones too
+    small to be intentional.
+
+    The size threshold is taken relative to the *largest region* (a proxy for the
+    mark's scale), not the canvas, so it is resolution-independent: padding the
+    image or feeding a higher-res copy does not change which regions survive. A
+    small absolute floor first removes single-pixel quantization noise."""
     h, w, _ = arr.shape
     palette = extract_palette(arr, max_colors=opt.max_colors)
     q = quantize(arr, palette)
-    min_area = max(16, round(opt.min_region_fraction * h * w))
-    return w, h, segment(q, min_area=min_area)
+    regions = segment(q, min_area=16)
+    if regions:
+        cut = opt.min_region_fraction * max(r.area for r in regions)
+        regions = [r for r in regions if r.area >= cut]
+    return w, h, regions
 
 
 Affine = tuple[float, float, float, float, float, float]

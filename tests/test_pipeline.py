@@ -1,6 +1,24 @@
 import numpy as np
 from PIL import Image
-from vectormark.pipeline import Options, idealize
+from vectormark.pipeline import Options, _segment_image, idealize
+
+
+def test_area_filter_is_scale_independent():
+    # a big block + a small-but-intentional block; padding the canvas with more
+    # background must NOT drop the small block (the old canvas-fraction filter did,
+    # because its threshold grew with the canvas — it should track the mark).
+    # same colour for both (so palette quantization keeps it regardless of how
+    # rare the small block becomes); disconnected, so they are two components.
+    def scene(pad):
+        a = np.full((90 + pad, 90 + pad, 3), 255, np.uint8)
+        a[10:60, 10:60] = (0, 0, 0)       # 2500-px block
+        a[10:20, 70:80] = (0, 0, 0)       # 100-px block (4% of the largest)
+        return a
+
+    tight = _segment_image(scene(0), Options())[2]
+    padded = _segment_image(scene(400), Options())[2]   # 4× more background
+    assert len(tight) == 2
+    assert len(padded) == 2, "small region dropped only because the canvas grew"
 
 
 def _two_band_logo(path):
