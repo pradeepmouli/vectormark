@@ -75,9 +75,11 @@ def shape_to_path_d(shape: Shape) -> str:
 
 
 def reflect_path_d(d: str, axis_x: float) -> str:
-    """Reflect every x-coordinate of an absolute M/L/C/Z path about x = axis_x.
-    (Our paths use only absolute M/L/C/Z, so a per-coordinate x flip is exact —
-    no arc-sweep flags to invert.)"""
+    """Reflect every x-coordinate of an absolute M/L/C/Q/Z path about x = axis_x.
+
+    Assumes one explicit command per coordinate set (no implicit-repeat tokens like
+    ``M0 0 10 0``) and no arc ``A`` flags to invert — which is exactly what this
+    package's emitters produce. A per-coordinate x flip is then exact."""
     toks = _PATH_TOKEN.findall(d)
     out: list[str] = []
     i = 0

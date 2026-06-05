@@ -150,6 +150,8 @@ def test_symmetric_fit_beats_raw_path_symmetry():
     yy, xx = np.ogrid[:H, :W]
     dome = (((xx - 40) ** 2 / 900 + (yy - 55) ** 2 / 2025) <= 1) & (yy <= 55)
     c = region_contours(dome)[0]
-    sym = render_svg(render_svg_doc(W, H, [path_svg(symmetric_fit(c, 40.0, epsilon=1.5, max_error=1.0).params["d"], "#000")]), W, H)
+    sym_shape = symmetric_fit(c, 40.0, epsilon=1.5, max_error=1.0)
+    assert sym_shape is not None
+    sym = render_svg(render_svg_doc(W, H, [path_svg(sym_shape.params["d"], "#000")]), W, H)
     raw = render_svg(render_svg_doc(W, H, [path_svg(fit_path(c, epsilon=1.5, max_error=1.0).params["d"], "#000")]), W, H)
     assert _fold_ssim(sym, 40) > _fold_ssim(raw, 40)
