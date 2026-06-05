@@ -21,8 +21,9 @@ def _icon_array():
 
 def test_daikonic_structure_and_symmetry():
     svg = idealize(_icon_array(), options=Options(epsilon=1.8, max_error=1.2))
-    # at least the two colour bands recognized as native rect/polygon
-    assert svg.count("<rect") + svg.count("<polygon") >= 1
+    # the mark is built from a handful of shapes (bands are rounded trapezoids =
+    # paths, not sharp rects), and the leaves are a <use> mirror
+    assert svg.count("<path") >= 4
     # bilateral symmetry: the leaves emit a <use> mirror
     assert "<use" in svg
     # unified palette: exactly one navy hex present (AA navies collapsed)
@@ -38,6 +39,20 @@ def test_daikonic_structure_and_symmetry():
     assert any(g > 110 and b > 110 and r < 120 for r, g, b in map(_rgb, fills))
 
 
+def test_daikonic_output_is_exactly_symmetric():
+    # the real target: an exactly bilaterally-symmetric vector (the source raster
+    # is only ~0.98 symmetric due to anti-aliasing; the idealized output should
+    # be ~1.0). Search a few columns near centre for the best fold axis.
+    icon = _icon_array()
+    h, w, _ = icon.shape
+    out = render_svg(idealize(icon, options=Options(epsilon=1.8, max_error=1.2)), w, h)
+    best = max(
+        ssim(out[:, x - min(x, w - x):x][:, ::-1], out[:, x:x + min(x, w - x)])
+        for x in range(w // 2 - 3, w // 2 + 4)
+    )
+    assert best >= 0.999, f"output not exactly symmetric: {best:.4f}"
+
+
 def test_daikonic_renders_close_to_source():
     icon = _icon_array()
     h, w, _ = icon.shape
@@ -47,3 +62,20 @@ def test_daikonic_renders_close_to_source():
     de = mean_delta_e(icon, out)
     assert score >= 0.90, f"SSIM too low: {score:.3f}"
     assert de <= 0.05, f"mean ΔE too high: {de:.3f}"
+
+
+def test_daikonic_corner_radius_is_measured_tight_and_padded():
+    """Auto radius is MEASURED from the band corners + the de-antialiasing pad —
+    tight (matches the reference) and far below the old fraction-of-height value."""
+    from vectormark.pipeline import _mark_corner_radius, _DEANTIALIAS_PAD
+    from vectormark.color import extract_palette, quantize
+    from vectormark.segment import segment
+    from vectormark.symmetry import detect_axis
+
+    icon = _icon_array()
+    h, w, _ = icon.shape
+    pal = extract_palette(icon, max_colors=16)
+    regions = segment(quantize(icon, pal), min_area=max(16, round(0.001 * h * w)))
+    axis = detect_axis(np.any([r.mask for r in regions], axis=0))
+    r = _mark_corner_radius(regions, axis)
+    assert _DEANTIALIAS_PAD <= r <= 7.0          # tight, matches the ref (not the old ~12.8)

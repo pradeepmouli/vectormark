@@ -8,7 +8,7 @@ import numpy as np
 from shapely.geometry import Polygon
 from skimage.measure import CircleModel, EllipseModel
 
-from ._fitcurve import fit_cubic_beziers
+from ._fitcurve import fit_quadratic_beziers
 from .contour import corner_indices, rdp
 
 
@@ -46,7 +46,11 @@ def recognize_primitive(contour: np.ndarray, *, epsilon: float) -> Shape | None:
         if _max_residual(em, pts) <= epsilon and (abs(theta) < 0.08 or abs(abs(theta) - np.pi) < 0.08):
             return Shape("ellipse", {"cx": xc, "cy": yc, "rx": a, "ry": b})
 
-    # axis-aligned rectangle: bbox fill ratio near 1 and rotated-rect ~ axis-aligned
+    # axis-aligned rectangle: bbox fill ratio near 1, rotated-rect ~ axis-aligned,
+    # AND genuinely four sharp corners. The corner check is what stops a *rounded
+    # trapezoid* (tapered sides + filleted corners) from being flattened to a
+    # rect — those simplify to >4 vertices and fall through to the symmetry-locked
+    # path fit, which keeps their true shape.
     minx, miny, maxx, maxy = poly.bounds
     bbox_area = (maxx - minx) * (maxy - miny)
     rot = poly.minimum_rotated_rectangle
@@ -54,7 +58,11 @@ def recognize_primitive(contour: np.ndarray, *, epsilon: float) -> Shape | None:
     edge_angles = np.arctan2(np.diff(ry), np.diff(rx))
     axis_aligned = np.all(np.minimum(np.abs(edge_angles % (np.pi / 2)),
                                      np.pi / 2 - np.abs(edge_angles % (np.pi / 2))) < 0.06)
-    if bbox_area > 0 and poly.area / bbox_area > 0.96 and axis_aligned:
+    simp = rdp(pts, epsilon)
+    if np.allclose(simp[0], simp[-1]):
+        simp = simp[:-1]
+    four_corners = len(simp) == 4
+    if bbox_area > 0 and poly.area / bbox_area > 0.985 and axis_aligned and four_corners:
         return Shape("rect", {"x": minx, "y": miny, "w": maxx - minx, "h": maxy - miny})
 
     return None
@@ -124,8 +132,7 @@ def fit_path(contour: np.ndarray, *, epsilon: float, max_error: float) -> Shape:
         if _segment_is_straight(seg, epsilon):
             d += f"L{_fmt(seg[-1][0])} {_fmt(seg[-1][1])} "
         else:
-            for b in fit_cubic_beziers(seg, max_error):
-                d += (f"C{_fmt(b[1][0])} {_fmt(b[1][1])} {_fmt(b[2][0])} {_fmt(b[2][1])} "
-                      f"{_fmt(b[3][0])} {_fmt(b[3][1])} ")
+            for b in fit_quadratic_beziers(seg, max_error):
+                d += f"Q{_fmt(b[1][0])} {_fmt(b[1][1])} {_fmt(b[2][0])} {_fmt(b[2][1])} "
     d += "Z"
     return Shape("path", {"d": d})

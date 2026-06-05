@@ -24,11 +24,26 @@ def test_detect_axis_finds_center():
 def test_classify_straddle_vs_pair():
     regions = _sym_masks()
     axis = detect_axis(np.any([r.mask for r in regions], axis=0))
-    straddlers, pairs = classify_regions(regions, axis)
+    straddlers, pairs, loners = classify_regions(regions, axis)
     assert len(straddlers) == 1 and straddlers[0].label == 1       # the dome
     assert len(pairs) == 1                                          # left+right as one pair
+    assert loners == []                                            # nothing asymmetric+unpaired
     canon, _mirror = pairs[0]
     assert {canon.label, _mirror.label} == {2, 3}
+
+
+def test_classify_isolates_lone_asymmetric_region():
+    # an asymmetric region with no mirror partner must NOT be treated as a
+    # self-symmetric straddler (else _fit_region would force-mirror it).
+    regions = _sym_masks()
+    asym = np.zeros((40, 40), bool)
+    asym[6:10, 6:9] = True
+    asym[8:10, 6:16] = True                                        # an L — not self-symmetric
+    regions.append(Region(4, asym, "#ff0000"))                    # unique colour ⇒ no partner
+    axis = detect_axis(np.any([r.mask for r in regions], axis=0))
+    straddlers, pairs, loners = classify_regions(regions, axis)
+    assert [r.label for r in loners] == [4]
+    assert 4 not in [r.label for r in straddlers]
 
 
 def test_no_symmetry_returns_none():

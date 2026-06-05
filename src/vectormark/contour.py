@@ -6,6 +6,22 @@ import numpy as np
 from skimage.measure import find_contours
 
 
+def _polygon_area(c: np.ndarray) -> float:
+    """Absolute shoelace area of an (N, 2) closed polygon."""
+    x, y = c[:, 0], c[:, 1]
+    return float(abs(np.dot(x, np.roll(y, 1)) - np.dot(y, np.roll(x, 1))) / 2.0)
+
+
+def region_contours(mask: np.ndarray) -> list[np.ndarray]:
+    """All sub-pixel contours of `mask` (outer boundary + any holes), each an
+    (N, 2) (x, y) array, sorted by enclosed area descending (outer first)."""
+    padded = np.pad(mask.astype(float), 1)
+    contours = find_contours(padded, 0.5)               # (row, col) == (y, x)
+    out = [np.column_stack([c[:, 1] - 1, c[:, 0] - 1]) for c in contours]  # -> (x,y), unpad
+    out.sort(key=_polygon_area, reverse=True)
+    return out
+
+
 def outer_contour(mask: np.ndarray) -> np.ndarray:
     """Longest sub-pixel contour of `mask`, as an (N, 2) array of (x, y) points."""
     padded = np.pad(mask.astype(float), 1)

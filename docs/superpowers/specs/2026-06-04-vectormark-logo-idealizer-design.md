@@ -29,17 +29,21 @@ No model/LLM is in the loop. Every stage is a known, deterministic algorithm.
 (`tests/fixtures/daikonic/source.png`) end-to-end is a gating requirement, not
 just a fixture. The output must:
 - render within tolerance of the source (SSIM ≥ target / pixel-ΔE ≤ target);
-- emit the two color bands as native `<rect>` / `<polygon>` (the tapering band
-  is a trapezoid), and the dome (half-ellipse: flat bottom + elliptic-arc top),
-  the tip, and the two leaf sprouts as clean **parametric `<path>`s** (line +
-  elliptic-arc / Bézier segments) — i.e. whole-region primitives where the
-  region *is* one, segment-fitted paths otherwise;
-- be **exactly bilaterally symmetric** (leaves emitted as a `<use>` mirror);
+- emit each region as a clean **parametric `<path>`** that captures its TRUE
+  shape — the bands are **rounded trapezoids** (slight taper + filleted corners),
+  NOT sharp rectangles; the dome is a half-ellipse cap; the tip and leaves are
+  petal/teardrop paths. Whole-region native primitives (`<rect>`/`<ellipse>`/…)
+  are emitted only when a region genuinely *is* one (sharp, untapered);
+- be **exactly bilaterally symmetric** — axis-straddling regions (dome, bands,
+  tip) are fit by their half-outline and mirrored (`refine.symmetric_fit`); the
+  leaf pair is a `<use>` mirror. Fold-SSIM about the axis ≈ 1.0;
 - use the unified flat palette (the three anti-aliased "navies" collapsed to one);
-- be re-editable (tweaking `rx`/`ry` re-renders deterministically).
+- be re-editable (deterministic re-render).
 
-The hand-built `tests/fixtures/daikonic/reference-geometric.svg` is the visual
-target; `reference-trace.svg` is the organic-trace baseline for comparison.
+The reference SVGs in `tests/fixtures/daikonic/` are loose artifacts, NOT the
+target — and SSIM-against-the-source-raster only sets a floor (it rewards
+matching anti-aliasing). The real quality bar is exact symmetry + faithful,
+clean shapes.
 
 **Non-goals (v1)**
 - Photographic / heavily shaded logos (gradients arrive in v1.1).
