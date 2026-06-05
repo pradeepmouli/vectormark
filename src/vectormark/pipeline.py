@@ -11,7 +11,7 @@ from .color import extract_palette, quantize
 from .contour import region_contours
 from .emit import mirror_use, path_svg, reflect_path_d, render_svg_doc, shape_to_path_d, shape_to_svg
 from .fit import Shape, fit_path, recognize_polygon, recognize_primitive
-from .refine import symmetric_fit
+from .refine import rounded_trapezoid_fit, symmetric_fit
 from .segment import segment
 from .symmetry import classify_regions, detect_axis
 from .types import Axis, Region
@@ -50,6 +50,11 @@ def _fit_region(region: Region, opt: Options, axis: Axis | None) -> Shape | None
     # mirror it → exactly symmetric. (Pairs arrive with axis=None and are
     # mirrored via <use> instead; no axis → no symmetry to lock.)
     if axis is not None:
+        # band-like? a clean rounded trapezoid (straight tapering sides + flat
+        # top/bottom + filleted corners) beats the free half-outline fit.
+        trap = rounded_trapezoid_fit(contour, axis.x, max_error=opt.max_error)
+        if trap is not None:
+            return trap
         sym = symmetric_fit(contour, axis.x, epsilon=opt.epsilon, max_error=opt.max_error)
         if sym is not None:
             return sym

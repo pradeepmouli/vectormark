@@ -115,6 +115,67 @@ def _emit_symmetric(start: np.ndarray, segs: list[tuple], axis_x: float) -> str:
     return d + "Z"
 
 
+_FILLET_K = 0.5522847498  # cubic handle for a quarter-circle-ish fillet
+
+
+def rounded_trapezoid_fit(
+    contour: np.ndarray, axis_x: float, *, max_error: float
+) -> Shape | None:
+    """Fit a clean, symmetric rounded trapezoid (flat top/bottom, straight
+    tapering sides, filleted corners) when the region is band-like. Returns None
+    if the side isn't a clean straight taper, so genuinely curved regions fall
+    through to `symmetric_fit`.
+    """
+    pts = np.asarray(contour, dtype=float)
+    y_top, y_bot = float(pts[:, 1].min()), float(pts[:, 1].max())
+    height = y_bot - y_top
+    if height < 10:
+        return None
+    r = min(height * 0.22, 0.45 * height)
+
+    # right-edge sample points, away from the corner fillets
+    sel = (pts[:, 1] > y_top + r) & (pts[:, 1] < y_bot - r) & (pts[:, 0] > axis_x)
+    edge = pts[sel]
+    if len(edge) < 5:
+        return None
+    # least-squares right edge as x = m*y + b
+    A = np.column_stack([edge[:, 1], np.ones(len(edge))])
+    (m, b), *_ = np.linalg.lstsq(A, edge[:, 0], rcond=None)
+    if np.abs(edge[:, 0] - (m * edge[:, 1] + b)).max() > max_error * 1.6:
+        return None                                  # side isn't a clean straight line
+
+    hw_top = (m * y_top + b) - axis_x
+    hw_bot = (m * y_bot + b) - axis_x
+    if min(hw_top, hw_bot) < r:
+        return None
+    if r >= min(hw_top, hw_bot):
+        return None
+
+    down = np.array([m, 1.0]) / np.hypot(m, 1.0)      # unit vector along the edge (top->bottom)
+
+    def fillet(p_edge_a, corner, p_edge_b):
+        c1 = p_edge_a + _FILLET_K * (corner - p_edge_a)
+        c2 = p_edge_b + _FILLET_K * (corner - p_edge_b)
+        return ("C", c1, c2, p_edge_b)
+
+    c0_top = np.array([axis_x + hw_top, y_top])
+    c0_bot = np.array([axis_x + hw_bot, y_bot])
+    p_top_h = np.array([axis_x + hw_top - r, y_top])   # tangent on the top edge
+    p_top_s = c0_top + r * down                        # tangent on the side (below top corner)
+    p_bot_s = c0_bot - r * down                        # tangent on the side (above bottom corner)
+    p_bot_h = np.array([axis_x + hw_bot - r, y_bot])   # tangent on the bottom edge
+
+    start = np.array([axis_x, y_top])
+    segs = [
+        ("L", p_top_h),
+        fillet(p_top_h, c0_top, p_top_s),
+        ("L", p_bot_s),
+        fillet(p_bot_s, c0_bot, p_bot_h),
+        ("L", np.array([axis_x, y_bot])),
+    ]
+    return Shape("path", {"d": _emit_symmetric(start, segs, axis_x)})
+
+
 def symmetric_fit(contour: np.ndarray, axis_x: float, *, epsilon: float, max_error: float) -> Shape | None:
     """Fit a straddling region's half-outline and mirror it → exactly-symmetric path."""
     half = _right_half(contour, axis_x)
