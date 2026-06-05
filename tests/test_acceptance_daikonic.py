@@ -21,8 +21,9 @@ def _icon_array():
 
 def test_daikonic_structure_and_symmetry():
     svg = idealize(_icon_array(), options=Options(epsilon=1.8, max_error=1.2))
-    # at least the two colour bands recognized as native rect/polygon
-    assert svg.count("<rect") + svg.count("<polygon") >= 1
+    # the mark is built from a handful of shapes (bands are rounded trapezoids =
+    # paths, not sharp rects), and the leaves are a <use> mirror
+    assert svg.count("<path") >= 4
     # bilateral symmetry: the leaves emit a <use> mirror
     assert "<use" in svg
     # unified palette: exactly one navy hex present (AA navies collapsed)
