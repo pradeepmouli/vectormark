@@ -8,6 +8,7 @@ from dataclasses import dataclass
 
 import numpy as np
 from scipy.ndimage import binary_dilation
+from skimage.morphology import convex_hull_image
 
 from .types import Region
 
@@ -19,6 +20,16 @@ class ScenePrimitive:
     params: dict
     color_hex: str
     z: int
+
+
+def has_bite(mask: np.ndarray, *, max_solidity: float = 0.92) -> bool:
+    """True when the region is non-convex enough to be a plausible occluded fragment
+    (a crescent), i.e. its solidity (area / convex-hull area) is below the bar."""
+    area = int(mask.sum())
+    if area == 0:
+        return False
+    hull = int(convex_hull_image(mask).sum())
+    return hull > 0 and (area / hull) < max_solidity
 
 
 def region_adjacency(regions: list[Region]) -> dict[int, set[int]]:

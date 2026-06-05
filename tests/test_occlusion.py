@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: MIT
 import numpy as np
 from vectormark.types import Region
-from vectormark.occlusion import ScenePrimitive, region_adjacency
+from vectormark.occlusion import ScenePrimitive, region_adjacency, has_bite
 
 
 def _region(label, mask, color="#000000"):
@@ -19,3 +19,15 @@ def test_region_adjacency_touching_vs_separate():
     c = np.zeros((20, 30), bool); c[5:15, 26:29] = True   # gap from b
     adj = region_adjacency([_region(1, a), _region(2, b), _region(3, c)])
     assert adj[1] == {2} and adj[2] == {1} and adj[3] == set()
+
+
+def test_has_bite_crescent_vs_convex():
+    H = W = 80
+    yy, xx = np.ogrid[:H, :W]
+    disk = (xx - 35) ** 2 + (yy - 40) ** 2 <= 28 ** 2
+    occ = (xx - 60) ** 2 + (yy - 40) ** 2 <= 28 ** 2
+    crescent = disk & ~occ
+    assert has_bite(crescent) is True
+    assert has_bite(disk) is False                      # convex
+    rect = np.zeros((H, W), bool); rect[10:70, 10:40] = True
+    assert has_bite(rect) is False
