@@ -340,8 +340,10 @@ def symmetric_polygon_fit(contour: np.ndarray, axis_x: float, *, epsilon: float,
     simp = rdp(half, epsilon).astype(float)
     if not (2 <= len(simp) <= max_vertices):
         return None
-    # every dense point within ε of the simplified edges ⇒ the sides are straight
-    if _max_point_to_polyline(half, simp) > epsilon:
+    # A real polygon edge is straight to sub-pixel; a curve approximated by a
+    # polyline deviates up to ~epsilon. Gate on a TIGHT tolerance (not epsilon) so
+    # a gentle arc isn't mistaken for a many-sided polygon and faceted.
+    if _max_point_to_polyline(half, simp) > 0.8:
         return None
     simp[0, 0] = axis_x          # pin the top axis-crossing
     simp[-1, 0] = axis_x         # pin the bottom axis-crossing
