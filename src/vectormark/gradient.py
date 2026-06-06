@@ -25,17 +25,25 @@ def _hex_to_oklab(hex_colors: list[str]) -> np.ndarray:
     return srgb_to_oklab(rgb / 255.0)
 
 
+def _principal_axis(vectors: np.ndarray, *, eps: float) -> np.ndarray | None:
+    """Mean-centre `vectors` and return the unit principal direction (top SVD right-
+    singular vector), or None if the spread is below `eps` (degenerate/flat)."""
+    centred = vectors - vectors.mean(axis=0)
+    if np.abs(centred).max() < eps:
+        return None
+    _, _, vt = np.linalg.svd(centred, full_matrices=False)
+    return vt[0]
+
+
 def _is_ramp(colors_oklab: np.ndarray) -> bool:
     """True if >=3 colours and they lie on a single line in OKLab within _RAMP_TOL."""
     if len(colors_oklab) < _MIN_BANDS:
         return False
-    mean = colors_oklab.mean(axis=0)
-    centred = colors_oklab - mean
-    if np.abs(centred).max() < 1e-6:
+    axis = _principal_axis(colors_oklab, eps=1e-6)
+    if axis is None:
         return False                                   # all equal -> flat, not a ramp
-    _, _, vt = np.linalg.svd(centred, full_matrices=False)
-    line = vt[0]                                        # principal colour direction
-    proj = np.outer(centred @ line, line)
+    centred = colors_oklab - colors_oklab.mean(axis=0)
+    proj = np.outer(centred @ axis, axis)
     resid = np.linalg.norm(centred - proj, axis=1).max()
     return resid <= _RAMP_TOL
 
@@ -113,6 +121,55 @@ def _reduce_stops(stops: list[tuple[float, str]], *, max_delta_e: float) -> list
                 changed = True
                 break
     return kept
+
+
+def _radial_spread(pts: np.ndarray, oklab: np.ndarray, c: np.ndarray, nbins: int = 16) -> float:
+    """Mean within-bin colour variance when binning pixels by distance from c. Lower =
+    more concentric (a better radial centre)."""
+    r = np.hypot(pts[:, 0] - c[0], pts[:, 1] - c[1])
+    rmax = r.max()
+    if rmax < 1e-6:
+        return np.inf
+    bins = np.clip((r / rmax * nbins).astype(int), 0, nbins - 1)
+    total, count = 0.0, 0
+    for b in range(nbins):
+        sel = bins == b
+        if sel.sum() >= 2:
+            total += float(np.var(oklab[sel], axis=0).sum())
+            count += 1
+    return total / count if count else np.inf
+
+
+def _fit_radial(pts: np.ndarray, oklab: np.ndarray, rgb: np.ndarray) -> dict | None:
+    """Fit a radial gradient: estimate the centre as the centroid of the extreme along
+    the principal colour axis (try both ends; keep the more concentric), then fit stops
+    vs normalized radius. The centroid-of-extreme heuristic can yield a slightly-off
+    centre for clipped or asymmetric footprints; the Task 6 consistency gate is the
+    backstop that rejects fits that don't re-render faithfully."""
+    axis = _principal_axis(oklab, eps=1e-8)
+    if axis is None:
+        return None
+    s = (oklab - oklab.mean(axis=0)) @ axis             # 1-D colour coordinate
+    order = np.argsort(s)
+    k = max(3, len(s) // 10)
+    best_c, best_spread = None, np.inf
+    for idx in (order[-k:], order[:k]):                 # inner-extreme and outer-extreme clusters
+        c = pts[idx].mean(axis=0)
+        spread = _radial_spread(pts, oklab, c)
+        if spread < best_spread:
+            best_spread, best_c = spread, c
+    if best_c is None:
+        return None
+    c = best_c
+    r = np.hypot(pts[:, 0] - c[0], pts[:, 1] - c[1])
+    rmax = float(r.max())
+    if rmax < 1e-6:
+        return None
+    tn = r / rmax
+    stops = _reduce_stops(_fit_stops(tn, rgb), max_delta_e=_GATE_DELTA_E)
+    return {"kind": "radial",
+            "geometry": {"cx": float(c[0]), "cy": float(c[1]), "r": rmax},
+            "stops": stops}
 
 
 def _fit_linear(pts: np.ndarray, oklab: np.ndarray, rgb: np.ndarray) -> dict | None:

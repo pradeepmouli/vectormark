@@ -122,3 +122,30 @@ def test_reduce_stops_drops_redundant_midpoints():
              (0.75, "#bfbfbf"), (1.0, "#ffffff")]
     reduced = _reduce_stops(stops, max_delta_e=0.02)
     assert len(reduced) < len(stops) and reduced[0][0] == 0.0 and reduced[-1][0] == 1.0
+
+
+def _radial_gradient_image(h, w, c, r, stops_rgb):
+    yy, xx = np.mgrid[:h, :w]
+    t = (np.hypot(xx - c[0], yy - c[1]) / r).clip(0, 1)
+    offs = np.array([o for o, _ in stops_rgb]); cols = np.array([col for _, col in stops_rgb], float)
+    img = np.empty((h, w, 3))
+    for ch in range(3):
+        img[:, :, ch] = np.interp(t, offs, cols[:, ch])
+    return img.round().astype(np.uint8)
+
+
+def test_fit_radial_recovers_center():
+    from vectormark.gradient import _fit_radial
+    h, w = 120, 120
+    c, r = (60, 60), 50
+    img = _radial_gradient_image(h, w, c, r, [(0.0, (125, 211, 252)), (1.0, (29, 78, 216))])
+    ys, xs = np.mgrid[:h, :w]
+    # restrict to the disc so background doesn't dominate the fit
+    inside = np.hypot(xs - c[0], ys - c[1]) <= r
+    pts = np.column_stack([xs[inside], ys[inside]]).astype(float)
+    oklab = _OKLAB(img[inside])
+    model = _fit_radial(pts, oklab, img[inside].reshape(-1, 3))
+    assert model is not None and model["kind"] == "radial"
+    g = model["geometry"]
+    assert abs(g["cx"] - 60) < 6 and abs(g["cy"] - 60) < 6
+    assert g["r"] > 30
