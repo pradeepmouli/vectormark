@@ -20,7 +20,7 @@ from .types import Axis, Region
 @dataclass
 class ScenePrimitive:
     """A completed shape that may be partially occluded by higher-z primitives."""
-    kind: str                 # "circle" | "ellipse" | "annulus"
+    kind: str                 # "circle" | "ellipse" | "annulus" | "polygon"
     params: dict
     color_hex: str
     z: int

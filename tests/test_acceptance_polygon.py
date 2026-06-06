@@ -10,24 +10,12 @@ import re
 import numpy as np
 
 from vectormark import Options, idealize
-from tests._render import render_svg, ssim
-
-
-def _paint(layers, h, w):
-    img = np.full((h, w, 3), 255, np.uint8)
-    for mask, color in layers:
-        img[mask] = color
-    return img
+from tests._render import disk as _disk, paint as _paint, render_svg, ssim
 
 
 def _diamond(cx, cy, r, h, w):
     yy, xx = np.ogrid[:h, :w]
     return (np.abs(xx - cx) + np.abs(yy - cy)) <= r
-
-
-def _disk(cx, cy, r, h, w):
-    yy, xx = np.ogrid[:h, :w]
-    return (xx - cx) ** 2 + (yy - cy) ** 2 <= r ** 2
 
 
 def _polygon_points(svg):
