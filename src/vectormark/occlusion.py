@@ -180,6 +180,9 @@ def primitive_mask(prim: dict, h: int, w: int) -> np.ndarray:
     p = prim["params"]
     if prim["kind"] == "circle":
         return (xx - p["cx"]) ** 2 + (yy - p["cy"]) ** 2 <= p["r"] ** 2
+    if prim["kind"] == "annulus":
+        d2 = (xx - p["cx"]) ** 2 + (yy - p["cy"]) ** 2
+        return (d2 <= p["r_outer"] ** 2) & (d2 >= p["r_inner"] ** 2)
     return ((xx - p["cx"]) / p["rx"]) ** 2 + ((yy - p["cy"]) / p["ry"]) ** 2 <= 1.0
 
 

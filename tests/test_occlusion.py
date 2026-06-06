@@ -224,3 +224,12 @@ def test_fit_circle_rejects_short_arc():
     contour = np.column_stack([50 + 30 * np.cos(th), 60 + 30 * np.sin(th)])
     seam = np.zeros(len(contour), bool)
     assert _fit_circle(contour, seam, max_residual=1.6, min_arc_deg=110.0) is None
+
+
+# --- Task 4: primitive_mask annulus ---
+def test_primitive_mask_annulus():
+    prim = {"kind": "annulus", "params": {"cx": 60, "cy": 60, "r_outer": 40, "r_inner": 22}}
+    m = primitive_mask(prim, 120, 120)
+    assert not m[60, 60]            # hole
+    assert m[60, 60 - 31]          # on the band (31 px out, between 22 and 40)
+    assert not m[60, 60 - 50]      # outside the outer radius
