@@ -19,7 +19,7 @@ from .types import Axis, Region
 @dataclass
 class ScenePrimitive:
     """A completed shape that may be partially occluded by higher-z primitives."""
-    kind: str                 # "circle" | "ellipse"
+    kind: str                 # "circle" | "ellipse" | "annulus"
     params: dict
     color_hex: str
     z: int
@@ -373,18 +373,24 @@ def reconstruct_scene(
             for i in range(len(completed))
         ]
 
-        # Mastercard: exactly two circles + one distinct-coloured lens -> snap + lens
+        # Mastercard: exactly two circles + one distinct-coloured lens -> snap + lens.
+        # Snap first (it moves the circles), then derive the lens path; only treat the
+        # leftover as a lens if that path is real, so we never consume a region we can't
+        # emit (degenerate / non-overlapping circles fall through and the gate decides).
         lens = None
         lens_region = None
+        lens_d = None
         if (len(completed) == 2 and prim_list[0]["kind"] == prim_list[1]["kind"] == "circle"
                 and len(leftover) == 1):
-            lens_region = leftover[0]
             if axis is not None:
                 lo, hi = (0, 1) if prim_list[0]["params"]["cx"] <= prim_list[1]["params"]["cx"] else (1, 0)
                 sl, sr = _snap_pair(prim_list[lo], prim_list[hi], axis.x)
                 prims[lo]["params"] = sl["params"]
                 prims[hi]["params"] = sr["params"]
-            lens = {"mask_color": lens_region.color_hex, "lens_of": (0, 1)}
+            lens_d = intersection_lens_d(prims[0]["params"], prims[1]["params"])
+            if lens_d is not None:
+                lens_region = leftover[0]
+                lens = {"mask_color": lens_region.color_hex, "lens_of": (0, 1)}
 
         if stack_agreement(prims, lens, group_regions, h, w) < _GATE_AGREEMENT:
             continue
@@ -392,10 +398,8 @@ def reconstruct_scene(
         for p in sorted(prims, key=lambda p: p["z"]):
             reconstructed.append(ScenePrimitive(p["kind"], p["params"], p["color"], p["z"]))
         if lens is not None:
-            d = intersection_lens_d(prims[0]["params"], prims[1]["params"])
-            if d is not None:
-                reconstructed.append(Shape("path", {"d": d, "color_hex": lens["mask_color"],
-                                                    "z": len(prims)}))
+            reconstructed.append(Shape("path", {"d": lens_d, "color_hex": lens["mask_color"],
+                                                "z": len(prims)}))
         consumed.update(completed_labels)
         if lens_region is not None:
             consumed.add(lens_region.label)
