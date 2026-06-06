@@ -455,6 +455,29 @@ def test_complete_polygon_recovers_diamond_with_two_corners_bitten():
         assert min(np.hypot(px - tx, py - ty) for px, py in pts) <= 2.5
 
 
+def test_complete_polygon_recovers_diamond_with_midedge_bite():
+    # An occluder biting the MIDDLE of one edge (touching neither corner) splits that
+    # edge into two collinear fitted segments (one each side of the bite). They land at
+    # the start and end of the single own run, so the cyclic wrap pairs them — two
+    # collinear lines whose intersection is None. complete_polygon must COALESCE the
+    # collinear (incl. wraparound) pair before intersecting, else it declines a valid
+    # "every edge partly visible" case. (Codex P2: split collinear edge runs.)
+    from vectormark.occlusion import complete_polygon, _MAX_RESIDUAL, _MAX_VERTICES
+    h, w = 180, 180
+    cx, cy, r = 90, 90, 50
+    bite = _disk_mask(115, 65, 14, h, w)     # midpoint of edge T(90,40)-R(140,90); reaches no corner
+    diamond = _diamond_mask(cx, cy, r, h, w) & ~bite
+    region = Region(label=1, mask=diamond, color_hex="#3366cc")
+    other = Region(label=2, mask=bite, color_hex="#cc3333")
+    prim = complete_polygon(region, [other], max_residual=_MAX_RESIDUAL, max_vertices=_MAX_VERTICES)
+    assert prim is not None and prim["kind"] == "polygon"
+    pts = prim["params"]["points"]
+    assert len(pts) == 4
+    truth = [(cx, cy - r), (cx + r, cy), (cx, cy + r), (cx - r, cy)]
+    for tx, ty in truth:
+        assert min(np.hypot(px - tx, py - ty) for px, py in pts) <= 2.5
+
+
 # --- Task 4 (polygon branch): primitive_mask polygon case ---
 def test_primitive_mask_polygon_membership():
     from vectormark.occlusion import primitive_mask

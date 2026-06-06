@@ -266,6 +266,32 @@ def _subseq_indices(pts: np.ndarray, sub: np.ndarray) -> list[int]:
     return idxs
 
 
+def _collinear(l1: tuple, l2: tuple) -> bool:
+    """True if two normalized-normal lines (a,b,c) describe the same line — parallel
+    normals and matching offset (the SVD normal sign is arbitrary, so align it)."""
+    a1, b1, c1 = l1[0], l1[1], l1[2]
+    a2, b2, c2 = l2[0], l2[1], l2[2]
+    if abs(a1 * b2 - a2 * b1) > _COLLINEAR_SIN_TOL:        # normals not parallel
+        return False
+    s = 1.0 if (a1 * a2 + b1 * b2) >= 0 else -1.0          # align normal directions
+    return abs(c1 - s * c2) <= _COLLINEAR_OFFSET_TOL
+
+
+def _coalesce_collinear(lines: list[tuple]) -> list[tuple]:
+    """Drop consecutive (and wraparound) collinear duplicates from a cyclic line list,
+    so one polygon edge split by a mid-edge bite into two collinear fits becomes a
+    single supporting line (else their intersection is parallel -> None)."""
+    if len(lines) < 2:
+        return lines
+    merged = [lines[0]]
+    for ln in lines[1:]:
+        if not _collinear(merged[-1], ln):
+            merged.append(ln)
+    while len(merged) > 2 and _collinear(merged[-1], merged[0]):
+        merged.pop()
+    return merged
+
+
 def complete_polygon(
     region: Region, others: list[Region], *, max_residual: float, max_vertices: int,
     boundary: tuple[np.ndarray, np.ndarray] | None = None,
@@ -296,6 +322,7 @@ def complete_polygon(
             if ln is None or ln[3] > max_residual:
                 return None
             lines.append(ln)
+    lines = _coalesce_collinear(lines)                 # merge one edge split by a mid-edge bite
     if len(lines) < 3 or len(lines) > max_vertices:
         return None
     verts: list[tuple[float, float]] = []
@@ -411,6 +438,11 @@ _CONCENTRIC_TOL = 2.0
 _MIN_OVERLAP_PX = 12
 _OVERLAP_OWNERSHIP = 0.5
 _PARALLEL_TOL = 1e-9  # |det| of two unit normals == sin(angle); ~1e-7 deg, i.e. exact-parallel only
+# Two fits of the SAME polygon edge (split by a mid-edge bite) agree to within these:
+# normals near-parallel (sin ~< 4.6 deg, well under any real convex exterior angle) and
+# offsets within a couple px. Genuinely distinct edges differ by far more on one or both.
+_COLLINEAR_SIN_TOL = 0.08
+_COLLINEAR_OFFSET_TOL = 2.0
 
 
 def _pair_constraint(
