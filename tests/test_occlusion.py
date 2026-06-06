@@ -312,3 +312,47 @@ def test_reconstruct_declines_weave():
     reconstructed, remaining = reconstruct_scene(regions, None, (h, w))
     assert reconstructed == []                    # cyclic -> declined
     assert len(remaining) == 3
+
+
+# --- Task 1 (polygon completer): geometry helpers ---
+
+
+def test_fit_line_recovers_horizontal_line():
+    from vectormark.occlusion import _fit_line
+    pts = np.array([[0.0, 5.0], [2.0, 5.0], [4.0, 5.0], [6.0, 5.0]])
+    a, b, c, resid = _fit_line(pts)
+    # line is y == 5  ->  normal is (0, 1), offset c == 5
+    assert resid < 1e-6
+    assert abs(a * 3.0 + b * 5.0 - c) < 1e-6      # a point on the line satisfies ax+by=c
+    assert abs(a * 3.0 + b * 9.0 - c) > 3.0       # a point 4px off has large signed distance
+
+
+def test_fit_line_reports_residual_for_noisy_points():
+    from vectormark.occlusion import _fit_line
+    pts = np.array([[0.0, 0.0], [2.0, 0.0], [4.0, 3.0], [6.0, 0.0]])  # one 3px outlier
+    _, _, _, resid = _fit_line(pts)
+    assert resid > 1.0
+
+
+def test_line_intersect_crossing_lines():
+    from vectormark.occlusion import _fit_line, _line_intersect
+    horiz = _fit_line(np.array([[0.0, 4.0], [8.0, 4.0]]))
+    vert = _fit_line(np.array([[5.0, 0.0], [5.0, 9.0]]))
+    p = _line_intersect(horiz, vert)
+    assert p is not None
+    assert abs(p[0] - 5.0) < 1e-6 and abs(p[1] - 4.0) < 1e-6
+
+
+def test_line_intersect_parallel_returns_none():
+    from vectormark.occlusion import _fit_line, _line_intersect
+    l1 = _fit_line(np.array([[0.0, 0.0], [8.0, 0.0]]))
+    l2 = _fit_line(np.array([[0.0, 3.0], [8.0, 3.0]]))
+    assert _line_intersect(l1, l2) is None
+
+
+def test_is_convex_accepts_square_rejects_arrow():
+    from vectormark.occlusion import _is_convex
+    square = [(0.0, 0.0), (4.0, 0.0), (4.0, 4.0), (0.0, 4.0)]
+    assert _is_convex(square)
+    concave = [(0.0, 0.0), (4.0, 0.0), (2.0, 2.0), (4.0, 4.0), (0.0, 4.0)]  # arrowhead notch
+    assert not _is_convex(concave)

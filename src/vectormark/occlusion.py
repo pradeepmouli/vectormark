@@ -78,6 +78,57 @@ def _own_arc_span_deg(own_pts: np.ndarray, cx: float, cy: float) -> float:
     return float(np.degrees(2 * np.pi - gaps.max()))     # span covered = full minus largest gap
 
 
+def _fit_line(pts: np.ndarray) -> tuple[float, float, float, float] | None:
+    """Total-least-squares line through `pts`. Returns (a, b, c, max_residual) for
+    the line a*x + b*y = c with a**2 + b**2 == 1 (so a*x + b*y - c is signed
+    perpendicular distance), or None for fewer than 2 points."""
+    pts = np.asarray(pts, float)
+    if len(pts) < 2 or np.allclose(pts, pts[0]):
+        return None
+    mean = pts.mean(axis=0)
+    _, _, vt = np.linalg.svd(pts - mean)
+    direction = vt[0]                                  # principal axis of the points
+    a, b = float(-direction[1]), float(direction[0])   # unit normal
+    c = a * mean[0] + b * mean[1]
+    resid = float(np.abs(pts @ np.array([a, b]) - c).max())
+    return a, b, c, resid
+
+
+def _line_intersect(
+    l1: tuple[float, float, float, float],
+    l2: tuple[float, float, float, float],
+) -> tuple[float, float] | None:
+    """Intersection of lines (a1,b1,c1) and (a2,b2,c2); None if (near-)parallel."""
+    a1, b1, c1 = l1[0], l1[1], l1[2]
+    a2, b2, c2 = l2[0], l2[1], l2[2]
+    det = a1 * b2 - a2 * b1
+    if abs(det) < _PARALLEL_TOL:
+        return None
+    return ((c1 * b2 - c2 * b1) / det, (a1 * c2 - a2 * c1) / det)
+
+
+def _is_convex(pts: list[tuple[float, float]]) -> bool:
+    """True if the closed vertex ring turns consistently one way (all cross products
+    share a sign). Rejects concave or self-intersecting rings."""
+    n = len(pts)
+    if n < 3:
+        return False
+    sign = 0
+    for i in range(n):
+        ax, ay = pts[i]
+        bx, by = pts[(i + 1) % n]
+        cx, cy = pts[(i + 2) % n]
+        cross = (bx - ax) * (cy - by) - (by - ay) * (cx - bx)
+        if abs(cross) < 1e-9:
+            continue
+        s = 1 if cross > 0 else -1
+        if sign == 0:
+            sign = s
+        elif s != sign:
+            return False
+    return sign != 0
+
+
 def _fit_candidate_pts(own: np.ndarray) -> np.ndarray:
     """Return the convex-hull vertices of `own` when feasible, else `own` itself.
     Using the convex hull isolates the outer perimeter, discarding inner concave arcs
@@ -261,6 +312,7 @@ _GATE_AGREEMENT = 0.96
 _CONCENTRIC_TOL = 2.0
 _MIN_OVERLAP_PX = 12
 _OVERLAP_OWNERSHIP = 0.5
+_PARALLEL_TOL = 1e-9  # |det| of two unit normals == sin(angle); ~1e-7 deg, i.e. exact-parallel only
 
 
 def _pair_constraint(
