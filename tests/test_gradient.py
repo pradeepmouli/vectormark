@@ -203,3 +203,38 @@ def test_expand_footprint_bounds_to_contiguous_region():
     assert expanded[:, 50:60].all()                # contiguous matching strip recovered
     assert not expanded[:, 71:].any()              # matching pixels PAST the gap stay out (bounded)
     assert not expanded[:, 60:71].any()            # the black gap itself is never absorbed
+
+
+def test_detect_gradients_dissolves_unfittable_group_back_to_flats():
+    from vectormark.color import oklab_to_srgb, srgb_to_oklab
+    from vectormark.gradient import _ramp_groups, detect_gradients
+    from vectormark.types import Region
+    # Six flat bands whose colours are collinear AND have distinct projections in OKLab,
+    # so _ramp_groups accepts them (group IS found). But the SPATIAL layout is a
+    # high-frequency zig-zag along the colour line (offsets 0, 1, .2, .8, .4, .6), so no
+    # single linear OR radial model reproduces the solid blocks within _GATE_DELTA_E
+    # (empirically dE_lin~0.117, dE_rad~0.098 >> 0.05) -> fit_gradient returns None and
+    # detect_gradients dissolves the bands back into `remaining` via its `continue`.
+    l0 = srgb_to_oklab(np.array([20, 50, 250])[None] / 255.0)[0]
+    l1 = srgb_to_oklab(np.array([250, 20, 90])[None] / 255.0)[0]
+
+    def hex_at(o):
+        rgb = (np.clip(oklab_to_srgb((l0 + o * (l1 - l0))[None])[0], 0, 1) * 255).round().astype(int)
+        return "#%02x%02x%02x" % tuple(rgb)
+
+    spatial = [0.0, 1.0, 0.2, 0.8, 0.4, 0.6]               # zig-zag, not monotone in space
+    h, band_w = 40, 18
+    w = band_w * len(spatial)
+    img = np.zeros((h, w, 3), np.uint8)
+    regions = []
+    for i, o in enumerate(spatial):
+        hx = hex_at(o)
+        m = np.zeros((h, w), bool)
+        m[:, i * band_w:(i + 1) * band_w] = True
+        img[m] = (int(hx[1:3], 16), int(hx[3:5], 16), int(hx[5:7], 16))
+        regions.append(Region(label=i + 1, mask=m, color_hex=hx))
+
+    assert len(_ramp_groups(regions)) == 1                 # the group IS found
+    fills, remaining = detect_gradients(regions, img)
+    assert fills == []                                     # but no model fits -> rejected
+    assert {r.label for r in remaining} == {1, 2, 3, 4, 5, 6}  # all bands fall back to flats
