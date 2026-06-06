@@ -23,7 +23,7 @@ structured SVG with exact bilateral symmetry. See the design spec and plan:
 ```bash
 uv sync --extra dev
 uv run vectormark path/to/logo.png -o out.svg
-uv run pytest          # 34 tests
+uv run pytest
 ```
 
 ## Pipeline (v1)

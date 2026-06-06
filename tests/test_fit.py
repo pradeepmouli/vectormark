@@ -54,7 +54,7 @@ def test_recognizes_trapezoid_as_polygon():
 
 
 def test_polygon_rejects_curved_region():
-    c = outer_contour(_disk := _disk_local())
+    c = outer_contour(_disk_local())
     assert recognize_polygon(c, epsilon=1.2) is None
 
 
