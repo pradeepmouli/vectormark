@@ -11,7 +11,7 @@ from scipy.ndimage import binary_dilation, binary_erosion
 from skimage.measure import CircleModel, EllipseModel
 from skimage.morphology import convex_hull_image
 
-from .contour import region_contours
+from .contour import rdp, region_contours
 from .fit import Shape, _fmt
 from .types import Axis, Region
 
@@ -246,6 +246,49 @@ def complete_annulus(
             "params": {"cx": cx, "cy": cy, "r_outer": outer["r"], "r_inner": inner["r"]}}
 
 
+def complete_polygon(
+    region: Region, others: list[Region], *, max_residual: float, max_vertices: int
+) -> dict | None:
+    """Recover a convex polygon from a partially-occluded fragment. Fit a line to each
+    visible (own-boundary) edge, then intersect consecutive lines cyclically — the
+    wrap-around intersection of the last and first line recovers the corner hidden
+    behind the occluder. Returns {"kind":"polygon","params":{"points":[(x,y),...]}}
+    or None when the fragment is curved, under-constrained, or non-convex."""
+    contour, seam = label_boundary(region, others)
+    if len(contour) == 0 or not seam.any():
+        return None                                    # no occlusion -> not this completer
+    runs = _own_runs(contour, seam)
+    if not runs:
+        return None
+    poly = max(runs, key=len)                          # the visible boundary arc
+    simp = rdp(poly, max_residual)
+    if len(simp) < 4:                                  # need >= 3 edges (incl. the 2 seam stubs)
+        return None
+    # map interior RDP vertices back to indices in `poly`; the two ends are the stubs
+    idxs = [0]
+    for v in simp[1:-1]:
+        idxs.append(int(np.argmin(np.hypot(poly[:, 0] - v[0], poly[:, 1] - v[1]))))
+    idxs.append(len(poly) - 1)
+    lines = []
+    for i in range(len(idxs) - 1):
+        seg = poly[idxs[i]: idxs[i + 1] + 1]
+        ln = _fit_line(seg)
+        if ln is None or ln[3] > max_residual:
+            return None
+        lines.append(ln)
+    if len(lines) < 3 or len(lines) > max_vertices:
+        return None
+    verts: list[tuple[float, float]] = []
+    for i in range(len(lines)):
+        p = _line_intersect(lines[i], lines[(i + 1) % len(lines)])
+        if p is None:
+            return None
+        verts.append(p)
+    if not _is_convex(verts):
+        return None
+    return {"kind": "polygon", "params": {"points": verts}}
+
+
 def _complete_member(region: Region, others: list[Region]) -> dict | None:
     """Complete a group member as an annulus if it has a hole, else as a circle/ellipse."""
     ann = complete_annulus(region, others, max_residual=_MAX_RESIDUAL,
@@ -329,6 +372,7 @@ def stack_agreement(prims, lens, regions: list[Region], h: int, w: int) -> float
 
 
 _MAX_RESIDUAL = 1.6
+_MAX_VERTICES = 8
 _MIN_ARC_DEG = 110.0
 # With the 1px-boundary-tolerant gate, correct reconstructions score ~0.97–1.0 and a
 # wrong one (filled hole, wrong radius) ~0.7, so 0.96 separates them with wide margin.

@@ -390,3 +390,42 @@ def test_own_runs_two_disjoint_arcs():
     assert len(runs) == 2
     lengths = sorted(len(r) for r in runs)
     assert lengths == [2, 3]   # runs [1,2] and [5,6,7]
+
+
+def _diamond_mask(cx, cy, r, h, w):
+    yy, xx = np.ogrid[:h, :w]
+    return (np.abs(xx - cx) + np.abs(yy - cy)) <= r          # L1 ball == axis-aligned diamond
+
+
+def _disk_mask(cx, cy, r, h, w):
+    yy, xx = np.ogrid[:h, :w]
+    return (xx - cx) ** 2 + (yy - cy) ** 2 <= r ** 2
+
+
+def test_complete_polygon_recovers_occluded_diamond():
+    from vectormark.occlusion import complete_polygon, _MAX_RESIDUAL, _MAX_VERTICES
+    h, w = 160, 220
+    cx, cy, r = 80, 80, 46
+    diamond = _diamond_mask(cx, cy, r, h, w) & ~_disk_mask(126, 80, 30, h, w)  # right corner bitten
+    occluder = _disk_mask(126, 80, 30, h, w)
+    region = Region(label=1, mask=diamond, color_hex="#3366cc")
+    other = Region(label=2, mask=occluder, color_hex="#cc3333")
+    prim = complete_polygon(region, [other], max_residual=_MAX_RESIDUAL, max_vertices=_MAX_VERTICES)
+    assert prim is not None and prim["kind"] == "polygon"
+    pts = prim["params"]["points"]
+    assert len(pts) == 4
+    # the four recovered corners are each within tolerance of a true diamond corner
+    truth = [(cx, cy - r), (cx + r, cy), (cx, cy + r), (cx - r, cy)]
+    for tx, ty in truth:
+        assert min(np.hypot(px - tx, py - ty) for px, py in pts) <= 2.5
+
+
+def test_complete_polygon_rejects_curved_disk_fragment():
+    from vectormark.occlusion import complete_polygon, _MAX_RESIDUAL, _MAX_VERTICES
+    h, w = 160, 200
+    disk = _disk_mask(90, 80, 50, h, w) & ~_disk_mask(150, 80, 28, h, w)   # big disk, small bite
+    occluder = _disk_mask(150, 80, 28, h, w)
+    region = Region(label=1, mask=disk, color_hex="#3366cc")
+    other = Region(label=2, mask=occluder, color_hex="#cc3333")
+    # a curved boundary RDP-splits into more than _MAX_VERTICES straight edges -> rejected
+    assert complete_polygon(region, [other], max_residual=_MAX_RESIDUAL, max_vertices=_MAX_VERTICES) is None
