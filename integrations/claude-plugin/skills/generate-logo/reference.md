@@ -61,8 +61,8 @@ If `vectormark` is not found:
 # From a checkout of the repo (recommended; pulls dev extras)
 uv sync --extra dev          # then use: uv run vectormark ...
 
-# Or install the package into the current environment
-uv pip install vectormark    # or: pip install vectormark
+# Or install from the repo checkout into the current environment (editable)
+uv pip install -e .          # or: pip install -e .
 ```
 
 If installation isn't possible in the environment, **stop and tell the user**

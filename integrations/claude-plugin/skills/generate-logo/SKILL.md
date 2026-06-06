@@ -8,9 +8,9 @@ description: Use when the user wants to generate, create, design, or make a logo
 Turn a logo idea into a clean, structured, editable SVG. This is a two-stage
 pipeline:
 
-1. **Generate** a raster (PNG) logo using whatever image-generation tool you
-   have available (an image model/API, the Canva MCP, a diffusion endpoint —
-   tool-agnostic).
+1. **Generate** a raster (PNG) logo using a raster image-generation tool or
+   model you have available (an image-generation model/API, a diffusion
+   endpoint, etc. — tool-agnostic).
 2. **Idealize** that raster into a clean SVG by piping it through the
    `vectormark` CLI. vectormark recognizes structure (palette, symmetry, ideal
    primitives) instead of emitting anonymous `<path>` soup, so the output is a
@@ -37,7 +37,8 @@ style (geometric, wordmark, mascot, abstract), color palette, and whether
 bilateral symmetry is desired. Keep it tight — one clarifying round, then build.
 
 ### Stage 1 — Generate the raster
-Use the best image-generation tool you have. Prompt for logo-friendly output:
+Use the best raster image-generation tool or model you have. Prompt for
+logo-friendly output:
 
 - **Flat colors, few colors** (vectormark is built for flat-color segmented
   marks; gradients/photoreal degrade the idealization).
@@ -46,9 +47,11 @@ Use the best image-generation tool you have. Prompt for logo-friendly output:
 - **Centered, high contrast, no text effects/bevels/shadows** unless requested.
 - **Square canvas, generous resolution** (≥ 1024×1024 is ideal).
 
-Save the result to a known path, e.g. `./logo-raster.png`. If your generation
-tool returns a URL or an asset id, download/export it to a local PNG first —
-vectormark needs a local raster file path.
+Save the result to a **unique** local path — derive a slug from the brief
+(e.g. `./fox-logo.png`) or add a timestamp — so re-runs don't overwrite an
+earlier raster; don't clobber an existing file without asking. If your
+generation tool returns a URL or an asset id, download/export it to a local PNG
+first — vectormark needs a local raster file path.
 
 If no image-generation tool is available, say so and ask the user to provide a
 raster, or paste/attach one. Do not fabricate an SVG by hand.
@@ -57,13 +60,13 @@ raster, or paste/attach one. Do not fabricate an SVG by hand.
 Run the CLI to produce the SVG:
 
 ```bash
-vectormark ./logo-raster.png -o ./logo.svg
+vectormark ./fox-logo.png -o ./fox-logo.svg
 ```
 
 If `vectormark` is not on PATH, use the repo runner:
 
 ```bash
-uv run vectormark ./logo-raster.png -o ./logo.svg
+uv run vectormark ./fox-logo.png -o ./fox-logo.svg
 ```
 
 Common flags (see `reference.md` for the full surface):
@@ -77,7 +80,7 @@ Common flags (see `reference.md` for the full surface):
   lower for fidelity.
 
 ### Stage 3 — Verify and deliver
-- Confirm `./logo.svg` exists and is non-empty.
+- Confirm the output SVG exists and is non-empty.
 - Sanity-check it opens (it's an SVG; you can inspect the markup — expect
   named shapes / a small file, not thousands of path points).
 - Report the saved path to the user and offer one refinement loop (e.g.
@@ -93,6 +96,6 @@ blocked and how to install it.
 
 ## Details
 
-For the full CLI reference, generation-tool guidance (including Canva MCP
-specifics), troubleshooting, and the exact handoff contract, read
+For the full CLI reference, raster generation-tool guidance, troubleshooting,
+and the exact handoff contract, read
 [`reference.md`](reference.md).

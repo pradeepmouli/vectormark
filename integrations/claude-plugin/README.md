@@ -2,8 +2,8 @@
 
 A Claude Code plugin that wires up a **generate → idealize** logo pipeline:
 
-1. **Generate** a raster logo with whatever image-generation tooling the agent
-   has (an image model/API, the Canva MCP, a local diffusion endpoint — it's
+1. **Generate** a raster logo with a raster image-generation tool or model the
+   agent has (an image-generation model/API, a diffusion endpoint — it's
    tool-agnostic).
 2. **Idealize** that raster into a clean, structured, exactly-symmetric SVG by
    piping it through the [`vectormark`](../../README.md) CLI.
@@ -28,8 +28,8 @@ integrations/claude-plugin/
 ## Requirements
 
 - **Claude Code** (or another agent runtime that loads Claude Code plugins/skills).
-- An **image-generation tool** available to the agent (optional but expected —
-  without one, the agent will ask you to supply a raster).
+- A **raster image-generation tool or model** available to the agent (optional
+  but expected — without one, the agent will ask you to supply a raster).
 - The **`vectormark` CLI** installed, or a checkout of this repo so the agent
   can run `uv run vectormark`.
 
@@ -38,45 +38,47 @@ Install vectormark:
 ```bash
 # from a checkout of this repo
 uv sync --extra dev          # then: uv run vectormark ...
-# or into the active environment
-uv pip install vectormark    # or: pip install vectormark
+# or install the checkout into the active environment (editable)
+uv pip install -e .          # or: pip install -e .
 ```
 
 ## Install the plugin
 
-This plugin ships inside the vectormark repo at `integrations/claude-plugin/`.
-You can use it a few ways:
+This plugin ships inside the vectormark repo at `integrations/claude-plugin/`,
+and the repo doubles as a **plugin marketplace** (a `.claude-plugin/marketplace.json`
+at the repo root lists it).
 
-**A. Local / dev (point Claude Code at the directory)**
+**A. Marketplace (recommended)**
 
-Add it to your Claude Code plugins config (or symlink it under your plugins
-dir) so the skill and command are discovered:
+Add the marketplace, then install the plugin:
+
+```text
+/plugin marketplace add pradeepmouli/vectormark
+/plugin install vectormark-logo-pipeline@vectormark
+```
+
+For a reproducible install, pin the marketplace to a published release tag
+rather than tracking the default branch, e.g.:
+
+```text
+/plugin marketplace add pradeepmouli/vectormark@vectormark-logo-pipeline-v0.1.0
+```
+
+(Release tags are cut per plugin version; tracking the default branch always
+pulls the latest, which may change under you.)
+
+**B. Local / dev (run against the working tree)**
+
+Point Claude Code at the plugin directory so the skill and command are
+discovered from your checkout without installing:
 
 ```bash
-# example: symlink into your user plugins cache layout
-ln -s "$(pwd)/integrations/claude-plugin" ~/.claude/plugins/cache/vectormark-logo-pipeline
+claude --plugin-dir ./integrations/claude-plugin
 ```
 
-**B. Marketplace entry (recommended for distribution)**
-
-Publish a `marketplace.json` that points at this subdirectory, then
-`/plugin marketplace add <url>` and install `vectormark-logo-pipeline`. Example
-marketplace entry source block:
-
-```json
-{
-  "name": "vectormark-logo-pipeline",
-  "source": {
-    "source": "git-subdir",
-    "url": "https://github.com/pradeepmouli/vectormark.git",
-    "path": "integrations/claude-plugin",
-    "ref": "main"
-  }
-}
-```
-
-> See **Open decisions** below — bundled-subdir vs. its own repo vs. a
-> marketplace entry is a packaging choice the maintainer should ratify.
+(Symlinking into `~/.claude/plugins/cache/` does **not** register a plugin —
+that cache holds copies written by the installer, so use `--plugin-dir` or the
+marketplace flow above.)
 
 ## Usage
 
@@ -84,7 +86,8 @@ Once installed, either:
 
 - Just ask: *"Generate a minimal two-color fox logo as an SVG."* The
   `generate-logo` skill triggers automatically.
-- Or run the slash command: `/generate-logo a minimal two-color fox, geometric`
+- Or run the slash command. When installed as a plugin it is namespaced by the
+  plugin: `/vectormark-logo-pipeline:generate-logo a minimal two-color fox, geometric`
 
 The agent will generate a raster, run `vectormark <raster> -o <out>.svg`, and
 hand you the saved SVG path. It targets **flat-color segmented marks** (logos,
@@ -92,26 +95,16 @@ icons, emblems), not photos or full illustrations.
 
 ## How the handoff works
 
-The skill writes a local raster (e.g. `./logo-raster.png`) then runs:
+The skill writes a raster to a **unique** local path (a slug from the brief,
+e.g. `./fox-logo.png` — not a fixed name, so re-runs don't overwrite), then runs:
 
 ```bash
-vectormark ./logo-raster.png -o ./logo.svg        # or: uv run vectormark ...
+vectormark ./fox-logo.png -o ./fox-logo.svg        # or: uv run vectormark ...
 ```
 
 Useful flags: `--colors N`, `--no-symmetry`, `--flatten`, `--epsilon`,
 `--max-error`. Full details live in
 [`skills/generate-logo/reference.md`](skills/generate-logo/reference.md).
-
-## Open decisions (for the maintainer)
-
-- **Packaging**: bundled here as `integrations/claude-plugin/` (default).
-  Alternatives: extract to its own repo, or only expose via a marketplace entry.
-- **Default generation tool**: intentionally tool-agnostic. If you want a
-  canonical default (e.g. the Canva MCP), say so and the skill can lead with it.
-- **Slash command**: included (`/generate-logo`) as a thin wrapper; drop it if
-  you prefer skill-only triggering.
-- **Distribution**: no `marketplace.json` is committed yet; add one when you
-  decide on the channel.
 
 ## License
 
