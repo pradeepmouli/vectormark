@@ -73,3 +73,14 @@ def test_three_ring_consistent_stack_reconstructs():
     svg = idealize(img, options=Options())
     assert _annulus_paths(svg) == 3
     assert ssim(render_svg(svg, w, h), img) >= 0.93
+
+
+def test_flattened_annulus_keeps_its_hole():
+    # --flatten bakes the annulus to a path; its two same-winding circles only cut a
+    # hole under even-odd fill, so the flattened path must carry fill-rule="evenodd".
+    h, w = 160, 200
+    img = _paint([(_ring(70, 70, 45, 25, h, w), _BLUE),
+                  (_disk(135, 70, 38, h, w), _RED)], h, w)
+    svg = idealize(img, options=Options(flatten=True))
+    out = render_svg(svg, w, h)
+    assert tuple(int(v) for v in out[70, 70]) != _BLUE   # centre is the hole, not filled
