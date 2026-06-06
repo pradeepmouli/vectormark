@@ -344,6 +344,14 @@ def _dominant_blob_fraction(mask: np.ndarray) -> float:
     return float(sizes.max()) / total
 
 
+def _union_mask(regions: list[Region], shape: tuple[int, int]) -> np.ndarray:
+    """Boolean OR of the masks of `regions`, as an all-False array of `shape` if empty."""
+    m = np.zeros(shape, bool)
+    for r in regions:
+        m |= r.mask
+    return m
+
+
 def detect_gradients(
     regions: list[Region], rgb_image: np.ndarray
 ) -> tuple[list[tuple[Region, dict]], list[Region]]:
@@ -352,9 +360,7 @@ def detect_gradients(
     fills: list[tuple[Region, dict]] = []
     consumed: set[int] = set()
     for group in _ramp_groups(regions):
-        mask = np.zeros(rgb_image.shape[:2], bool)
-        for m in group:
-            mask |= m.mask
+        mask = _union_mask(group, rgb_image.shape[:2])
         model = fit_gradient(mask, rgb_image)
         if model is None:
             continue                                   # dissolve back into flat bands
@@ -363,5 +369,21 @@ def detect_gradients(
         footprint = Region(label=rep.label, mask=mask, color_hex=rep.color_hex)
         fills.append((footprint, model))
         consumed.update(m.label for m in group)
+    # smooth-gradient path: band-grouping only fires on posterized ramps (≥3 adjacent bands).
+    # A smooth ramp collapses to ~1 region at palette extraction, so test the leftover mark as
+    # a single gradient blob fit to the ORIGINAL pixels (see the design spec). Guard with a
+    # dominant-connected-blob check so multi-glyph wordmarks can't be fit as one gradient.
+    # NB: the smooth footprint mask and a band footprint mask are not guaranteed disjoint
+    # (an _expand_footprint-grown band mask can overlap leftover pixels). z-order painting
+    # makes that benign, so a future change must not assume the footprints are disjoint.
+    leftover = [r for r in regions if r.label not in consumed]
+    if leftover:
+        sil = _union_mask(leftover, rgb_image.shape[:2])
+        if _dominant_blob_fraction(sil) >= _BLOB_DOMINANCE:
+            model = fit_gradient(sil, rgb_image)
+            if model is not None:
+                rep = max(leftover, key=lambda r: r.area)
+                fills.append((Region(label=rep.label, mask=sil, color_hex=rep.color_hex), model))
+                consumed.update(r.label for r in leftover)
     remaining = [r for r in regions if r.label not in consumed]
     return fills, remaining
