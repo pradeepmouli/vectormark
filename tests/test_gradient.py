@@ -37,3 +37,38 @@ def test_render_svg_doc_wraps_defs():
     assert out.index("<defs>") < out.index("<rect/>")     # defs before body
     out2 = render_svg_doc(100, 100, ['<rect/>'])
     assert "<defs>" not in out2                            # no defs block when none given
+
+
+def _hstrip_regions(colors_hex, h=40, band_w=12):
+    """Adjacent vertical bands left→right, one per color (a quantized ramp)."""
+    from vectormark.types import Region
+    w = band_w * len(colors_hex)
+    regions = []
+    for i, c in enumerate(colors_hex):
+        m = np.zeros((h, w), bool)
+        m[:, i * band_w:(i + 1) * band_w] = True
+        regions.append(Region(label=i + 1, mask=m, color_hex=c))
+    return regions
+
+
+def test_ramp_groups_groups_a_monotonic_ramp():
+    from vectormark.gradient import _ramp_groups
+    # 4 adjacent bands stepping blue->magenta (a clear OKLab ramp)
+    regions = _hstrip_regions(["#2563eb", "#7b3fc4", "#b13a9e", "#db2777"])
+    groups = _ramp_groups(regions)
+    assert len(groups) == 1 and len(groups[0]) == 4
+
+
+def test_ramp_groups_rejects_flat_and_too_few():
+    from vectormark.gradient import _ramp_groups
+    flat = _hstrip_regions(["#2563eb", "#2563eb", "#2563eb"])   # no variation
+    assert _ramp_groups(flat) == []
+    two = _hstrip_regions(["#2563eb", "#db2777"])               # only 2 -> not a gradient
+    assert _ramp_groups(two) == []
+
+
+def test_ramp_groups_rejects_nonramp_colors():
+    from vectormark.gradient import _ramp_groups
+    # adjacent but colors are not collinear in OKLab (zig-zag hues)
+    regions = _hstrip_regions(["#ff0000", "#00ff00", "#0000ff", "#00ff00"])
+    assert _ramp_groups(regions) == []
