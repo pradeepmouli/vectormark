@@ -28,6 +28,9 @@ def shape_to_svg(shape: Shape, fill: str, elem_id: str) -> str:
     if shape.kind == "polygon":
         pts = " ".join(f"{_fmt(x)},{_fmt(y)}" for x, y in p["points"])
         return f'<polygon {common} points="{pts}"/>'
+    if shape.kind == "annulus":
+        d = _annulus_path_d(p["cx"], p["cy"], p["r_outer"], p["r_inner"])
+        return f'<path {common} fill-rule="evenodd" d="{d}"/>'
     if shape.kind == "path":
         rule = f' fill-rule="{p["fill_rule"]}"' if p.get("fill_rule") else ""
         return f'<path {common}{rule} d="{p["d"]}"/>'
@@ -52,6 +55,12 @@ def _ellipse_path_d(cx: float, cy: float, rx: float, ry: float) -> str:
     )
 
 
+def _annulus_path_d(cx: float, cy: float, r_outer: float, r_inner: float) -> str:
+    """Two concentric circle subpaths (outer + inner); under even-odd fill the
+    inner subpath cuts the hole."""
+    return _ellipse_path_d(cx, cy, r_outer, r_outer) + " " + _ellipse_path_d(cx, cy, r_inner, r_inner)
+
+
 def shape_to_path_d(shape: Shape) -> str:
     """Convert any fitted shape to a path `d` string using only M/L/C/Z, so a
     flattened SVG has no basic-shape elements and mirrors are a plain x-reflection."""
@@ -71,6 +80,8 @@ def shape_to_path_d(shape: Shape) -> str:
         f = _fmt
         body = " ".join(f"L{f(x)} {f(y)}" for x, y in pts[1:])
         return f"M{f(pts[0][0])} {f(pts[0][1])} {body} Z"
+    if shape.kind == "annulus":
+        return _annulus_path_d(p["cx"], p["cy"], p["r_outer"], p["r_inner"])
     raise ValueError(f"unknown shape kind: {shape.kind}")
 
 
