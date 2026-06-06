@@ -129,6 +129,30 @@ def _is_convex(pts: list[tuple[float, float]]) -> bool:
     return sign != 0
 
 
+def _own_runs(contour: np.ndarray, seam: np.ndarray) -> list[np.ndarray]:
+    """Maximal contiguous runs of own (non-seam) contour points, each as an open
+    (M, 2) polyline. The contour is cyclic, so a run may wrap across index 0.
+    Precondition: len(seam) == len(contour)."""
+    n = len(seam)
+    own = ~np.asarray(seam, bool)
+    if n == 0 or not own.any():
+        return []
+    if own.all():
+        return [np.asarray(contour, float)]
+    # a run starts at an own point whose predecessor (cyclically) is a seam point
+    starts = [i for i in range(n) if own[i] and not own[(i - 1) % n]]
+    runs: list[np.ndarray] = []
+    c = np.asarray(contour, float)
+    for s in starts:
+        idx = []
+        i = s
+        while own[i % n] and len(idx) < n:
+            idx.append(i % n)
+            i += 1
+        runs.append(c[idx])
+    return runs
+
+
 def _fit_candidate_pts(own: np.ndarray) -> np.ndarray:
     """Return the convex-hull vertices of `own` when feasible, else `own` itself.
     Using the convex hull isolates the outer perimeter, discarding inner concave arcs

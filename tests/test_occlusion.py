@@ -356,3 +356,37 @@ def test_is_convex_accepts_square_rejects_arrow():
     assert _is_convex(square)
     concave = [(0.0, 0.0), (4.0, 0.0), (2.0, 2.0), (4.0, 4.0), (0.0, 4.0)]  # arrowhead notch
     assert not _is_convex(concave)
+
+
+def test_own_runs_single_contiguous_arc():
+    from vectormark.occlusion import _own_runs
+    contour = np.array([[float(i), 0.0] for i in range(10)])
+    seam = np.array([False, False, False, True, True, True, False, False, False, False])
+    runs = _own_runs(contour, seam)
+    assert len(runs) == 1                       # the seam splits the cyclic loop into one own arc
+    assert len(runs[0]) == 7                     # indices 6,7,8,9,0,1,2 wrap across 0
+
+
+def test_own_runs_no_seam_returns_whole_contour():
+    from vectormark.occlusion import _own_runs
+    contour = np.array([[float(i), 0.0] for i in range(5)])
+    seam = np.zeros(5, bool)
+    runs = _own_runs(contour, seam)
+    assert len(runs) == 1 and len(runs[0]) == 5
+
+
+def test_own_runs_all_seam_returns_empty():
+    from vectormark.occlusion import _own_runs
+    contour = np.array([[float(i), 0.0] for i in range(5)])
+    runs = _own_runs(contour, np.ones(5, bool))
+    assert runs == []
+
+
+def test_own_runs_two_disjoint_arcs():
+    from vectormark.occlusion import _own_runs
+    contour = np.array([[float(i), 0.0] for i in range(10)])
+    seam = np.array([True, False, False, True, True, False, False, False, True, True])
+    runs = _own_runs(contour, seam)
+    assert len(runs) == 2
+    lengths = sorted(len(r) for r in runs)
+    assert lengths == [2, 3]   # runs [1,2] and [5,6,7]
