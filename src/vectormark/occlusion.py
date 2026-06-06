@@ -249,7 +249,10 @@ def stack_agreement(prims, lens, regions: list[Region], h: int, w: int) -> float
 
 _MAX_RESIDUAL = 1.6
 _MIN_ARC_DEG = 110.0
-_GATE_AGREEMENT = 0.97
+# A thin annulus band has high perimeter-to-area, so even a ~0.4px radial fit error
+# shows up as a few percent of boundary mismatch — 0.97 over-rejects clean rings while
+# a wrong reconstruction still scores well below 0.9, so the safety bar holds at 0.96.
+_GATE_AGREEMENT = 0.96
 _CONCENTRIC_TOL = 2.0
 _MIN_OVERLAP_PX = 12
 _OVERLAP_OWNERSHIP = 0.5
@@ -308,7 +311,8 @@ def reconstruct_scene(
 ) -> tuple[list, list[Region]]:
     """Return (reconstructed, remaining). `reconstructed` mixes ScenePrimitive and
     lens Shape objects in paint order; `remaining` are regions to fit the old way.
-    Only adjacent groups that pass the consistency gate are reconstructed."""
+    Only adjacent groups that complete, admit a global paint order, and pass the
+    consistency gate are reconstructed."""
     h, w = shape_hw
     by_label = {r.label: r for r in regions}
     adj = region_adjacency(regions)
@@ -318,7 +322,6 @@ def reconstruct_scene(
     for r in regions:
         if r.label in consumed or not has_bite(r.mask):
             continue
-        # transitive connected component (crescents touch only through the lens)
         group: set[int] = set()
         stack = [r.label]
         while stack:
@@ -333,54 +336,62 @@ def reconstruct_scene(
 
         completed: list[tuple[Region, dict]] = []
         for gr in group_regions:
-            if not has_bite(gr.mask):
-                continue
             others = [o for o in group_regions if o.label != gr.label]
-            contour, seam = label_boundary(gr, others)
-            prim = complete_primitive(contour, seam, max_residual=_MAX_RESIDUAL, min_arc_deg=_MIN_ARC_DEG)
+            prim = _complete_member(gr, others)
             if prim is not None:
                 completed.append((gr, prim))
-        if len(completed) != 2:
-            continue                                      # v1 handles the two-disk case
-
-        (ra, pa), (rb, pb) = completed
-        # v1 scope: a clean two-disk overlap is EXACTLY the two crescents plus at most
-        # one lens (the distinct-coloured intersection). A larger connected component
-        # (chains, 3+ overlaps) is out of scope — decline rather than risk dropping a
-        # member or mis-picking the lens. (z-order between the two disks needs no
-        # disambiguation here: when a distinct-coloured lens exists it is painted on
-        # top and covers the intersection, so disk paint-order is moot; equal-coloured
-        # overlaps merge into one region upstream and never reach this two-crescent path.)
-        non_completed = [g for g in group_regions if g.label not in {ra.label, rb.label}]
-        if len(non_completed) > 1:
+        if len(completed) < 2:
             continue
-        if pa["params"]["cx"] > pb["params"]["cx"]:
-            (ra, pa), (rb, pb) = (rb, pb), (ra, pa)
-        if axis is not None and pa["kind"] == pb["kind"] == "circle":
-            snapped_l, snapped_r = _snap_pair(pa, pb, axis.x)
-            pa["params"], pb["params"] = snapped_l["params"], snapped_r["params"]
+
+        reg_list = [cr for cr, _ in completed]
+        prim_list = [p for _, p in completed]
+        completed_labels = {cr.label for cr in reg_list}
+        leftover = [gr for gr in group_regions if gr.label not in completed_labels]
+
+        # global paint order from pairwise overlap ownership
+        edges: list[tuple[int, int]] = []
+        for i in range(len(completed)):
+            for j in range(i + 1, len(completed)):
+                cons = _pair_constraint(prim_list[i], reg_list[i], prim_list[j], reg_list[j], h, w)
+                if cons == "i_over_j":
+                    edges.append((j, i))          # under=j, over=i
+                elif cons == "j_over_i":
+                    edges.append((i, j))
+        order = _topo_order(len(completed), edges)
+        if order is None:
+            continue                              # cyclic -> weave -> decline
+        z_of = {idx: k for k, idx in enumerate(order)}
 
         prims = [
-            {"kind": pa["kind"], "params": pa["params"], "color": ra.color_hex, "z": 0},
-            {"kind": pb["kind"], "params": pb["params"], "color": rb.color_hex, "z": 1},
+            {"kind": prim_list[i]["kind"], "params": prim_list[i]["params"],
+             "color": reg_list[i].color_hex, "z": z_of[i]}
+            for i in range(len(completed))
         ]
-        lens_region = non_completed[0] if non_completed else None
+
+        # Mastercard: exactly two circles + one distinct-coloured lens -> snap + lens
         lens = None
-        if lens_region is not None and pa["kind"] == pb["kind"] == "circle":
+        lens_region = None
+        if (len(completed) == 2 and prim_list[0]["kind"] == prim_list[1]["kind"] == "circle"
+                and len(leftover) == 1):
+            lens_region = leftover[0]
+            if axis is not None:
+                lo, hi = (0, 1) if prim_list[0]["params"]["cx"] <= prim_list[1]["params"]["cx"] else (1, 0)
+                sl, sr = _snap_pair(prim_list[lo], prim_list[hi], axis.x)
+                prims[lo]["params"] = sl["params"]
+                prims[hi]["params"] = sr["params"]
             lens = {"mask_color": lens_region.color_hex, "lens_of": (0, 1)}
 
         if stack_agreement(prims, lens, group_regions, h, w) < _GATE_AGREEMENT:
-            continue                                      # reject -> regions stay in `remaining`
+            continue
 
-        reconstructed.append(ScenePrimitive(pa["kind"], pa["params"], ra.color_hex, 0))
-        reconstructed.append(ScenePrimitive(pb["kind"], pb["params"], rb.color_hex, 1))
+        for p in sorted(prims, key=lambda p: p["z"]):
+            reconstructed.append(ScenePrimitive(p["kind"], p["params"], p["color"], p["z"]))
         if lens is not None:
-            d = intersection_lens_d(pa["params"], pb["params"])
+            d = intersection_lens_d(prims[0]["params"], prims[1]["params"])
             if d is not None:
-                reconstructed.append(Shape("path", {"d": d, "color_hex": lens_region.color_hex, "z": 2}))
-        # consume ONLY what was reconstructed (the guard guarantees the group has no
-        # other members, but be explicit so a stale group can never drop a region)
-        consumed.update({ra.label, rb.label})
+                reconstructed.append(Shape("path", {"d": d, "color_hex": lens["mask_color"],
+                                                    "z": len(prims)}))
+        consumed.update(completed_labels)
         if lens_region is not None:
             consumed.add(lens_region.label)
 

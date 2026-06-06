@@ -285,3 +285,30 @@ def test_pair_constraint_from_overlap_ownership():
 def test_topo_order_linear_and_cycle():
     assert _topo_order(3, [(0, 1), (1, 2)]) == [0, 1, 2]      # 0 under 1 under 2
     assert _topo_order(3, [(0, 1), (1, 2), (2, 0)]) is None   # cycle -> decline
+
+
+# --- Task 7: N-shape reconstruct_scene ---
+def test_reconstruct_ring_plus_disk():
+    ring, occ = _occluded_ring()
+    reconstructed, remaining = reconstruct_scene([ring, occ], None, (160, 200))
+    kinds = sorted(p.kind for p in reconstructed if hasattr(p, "kind"))
+    assert kinds == ["annulus", "circle"]
+    assert remaining == []                       # both consumed
+
+
+def test_reconstruct_declines_weave():
+    # three mutually-interlocked rings whose overlap ownership is cyclic. Construct it
+    # exactly: each ring keeps everything EXCEPT where the NEXT ring overlaps it
+    # (A loses to C, B loses to A, C loses to B) -> A-over-B, B-over-C, C-over-A.
+    h = w = 180
+    yy, xx = np.ogrid[:h, :w]
+    def ring(cx, cy):
+        d2 = (xx - cx) ** 2 + (yy - cy) ** 2
+        return (d2 <= 40 ** 2) & (d2 >= 24 ** 2)
+    a, b, c = ring(75, 75), ring(110, 75), ring(92, 110)
+    regions = [Region(1, a & ~c, "#1111ee"),
+               Region(2, b & ~a, "#eeee11"),
+               Region(3, c & ~b, "#11aa11")]
+    reconstructed, remaining = reconstruct_scene(regions, None, (h, w))
+    assert reconstructed == []                    # cyclic -> declined
+    assert len(remaining) == 3
