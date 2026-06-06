@@ -455,3 +455,48 @@ def test_complete_member_dispatches_diamond_to_polygon():
     other = Region(label=2, mask=occluder, color_hex="#cc3333")
     prim = _complete_member(region, [other])
     assert prim is not None and prim["kind"] == "polygon"
+
+
+# --- Task 7: gate declines polygon with whole edge hidden ---
+def test_reconstruct_scene_declines_polygon_with_whole_edge_hidden():
+    """Safety-contract test: when a WHOLE edge of a polygon is hidden, complete_polygon
+    recovers a wrong corner; the consistency gate (stack_agreement < _GATE_AGREEMENT)
+    must detect the disagreement and decline the group, leaving the region in remaining.
+
+    Fixture: a regular pentagon (5 vertices) whose top-right edge (corner[0]→corner[1])
+    is completely covered by a disk occluder. The disk creates a concave bite, so
+    has_bite is True and a group forms. The two visible edges flanking the seam are
+    non-parallel, so complete_polygon does return *some* polygon — but it is wrong
+    (the recovered corner replaces the two hidden corners with a single intersection
+    point outside the true shape). The gate rejects this and leaves label 1 in remaining.
+    """
+    from skimage.draw import polygon2mask
+    from vectormark.occlusion import _complete_member
+
+    h, w = 200, 240
+    cx, cy, r_pent = 100, 100, 65
+    # Five vertices of a regular pentagon: top first, then clockwise in image coords (y-down).
+    angles = [np.pi / 2 - 2 * np.pi * k / 5 for k in range(5)]
+    pts_xy = [(cx + r_pent * np.cos(a), cy - r_pent * np.sin(a)) for a in angles]
+    # polygon2mask wants (row, col) == (y, x) for each vertex.
+    pentagon = polygon2mask((h, w), np.array([(y, x) for x, y in pts_xy])).astype(bool)
+
+    # Disk occluder centred on the midpoint of the top-right edge (corner 0 → corner 1),
+    # with radius large enough to fully cover both endpoints of that edge.
+    c0, c1 = np.array(pts_xy[0]), np.array(pts_xy[1])
+    mid_xy = (c0 + c1) / 2
+    occ_r = float(np.hypot(c1[0] - c0[0], c1[1] - c0[1])) / 2 + 10
+    occ_mask = _disk_mask(mid_xy[0], mid_xy[1], occ_r, h, w)
+
+    region = Region(label=1, mask=pentagon & ~occ_mask, color_hex="#3366cc")
+    occ = Region(label=2, mask=occ_mask, color_hex="#cc3333")
+
+    # Non-vacuous guard: completion DOES produce a (wrong) convex-polygon candidate
+    # (the two seam-flanking pentagon edges are non-parallel, unlike a diamond's),
+    # so the decline below is the consistency gate rejecting it
+    # (stack_agreement ~= 0.9455 < _GATE_AGREEMENT = 0.96), NOT a silent skip from
+    # has_bite=False or _complete_member returning None.
+    assert _complete_member(region, [occ]) is not None
+    reconstructed, remaining = reconstruct_scene([region, occ], None, (h, w))
+    assert 1 in {r.label for r in remaining}                       # declined -> fallback
+    assert not any(getattr(e, "kind", None) == "polygon" for e in reconstructed)  # nothing emitted
