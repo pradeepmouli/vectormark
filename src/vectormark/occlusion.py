@@ -82,7 +82,8 @@ def _own_arc_span_deg(own_pts: np.ndarray, cx: float, cy: float) -> float:
 def _fit_line(pts: np.ndarray) -> tuple[float, float, float, float] | None:
     """Total-least-squares line through `pts`. Returns (a, b, c, max_residual) for
     the line a*x + b*y = c with a**2 + b**2 == 1 (so a*x + b*y - c is signed
-    perpendicular distance), or None for fewer than 2 points."""
+    perpendicular distance), or None for fewer than 2 points or all-identical points
+    (degenerate, no defined direction)."""
     pts = np.asarray(pts, float)
     if len(pts) < 2 or np.allclose(pts, pts[0]):
         return None
@@ -99,7 +100,8 @@ def _line_intersect(
     l1: tuple[float, float, float, float],
     l2: tuple[float, float, float, float],
 ) -> tuple[float, float] | None:
-    """Intersection of lines (a1,b1,c1) and (a2,b2,c2); None if (near-)parallel."""
+    """Intersection of lines (a1,b1,c1) and (a2,b2,c2); None when |det| < _PARALLEL_TOL
+    (1e-9), i.e. the unit normals are essentially exactly parallel."""
     a1, b1, c1 = l1[0], l1[1], l1[2]
     a2, b2, c2 = l2[0], l2[1], l2[2]
     det = a1 * b2 - a2 * b1
@@ -247,36 +249,53 @@ def complete_annulus(
             "params": {"cx": cx, "cy": cy, "r_outer": outer["r"], "r_inner": inner["r"]}}
 
 
+def _subseq_indices(pts: np.ndarray, sub: np.ndarray) -> list[int]:
+    """Indices in `pts` of the subsequence `sub`. `rdp` preserves its input points
+    exactly and in order, so a monotone forward cursor with exact equality maps each
+    `sub` point back to `pts` — robust to repeated/near-duplicate points where a
+    nearest-point (argmin) search could pick a wrong or out-of-order index."""
+    idxs: list[int] = []
+    j = 0
+    for v in sub:
+        while j < len(pts) and not (pts[j, 0] == v[0] and pts[j, 1] == v[1]):
+            j += 1
+        if j >= len(pts):
+            break
+        idxs.append(j)
+        j += 1
+    return idxs
+
+
 def complete_polygon(
-    region: Region, others: list[Region], *, max_residual: float, max_vertices: int
+    region: Region, others: list[Region], *, max_residual: float, max_vertices: int,
+    boundary: tuple[np.ndarray, np.ndarray] | None = None,
 ) -> dict | None:
-    """Recover a convex polygon from a partially-occluded fragment. Fit a line to each
-    visible (own-boundary) edge, then intersect consecutive lines cyclically — the
-    wrap-around intersection of the last and first line recovers the corner hidden
-    behind the occluder. Returns {"kind":"polygon","params":{"points":[(x,y),...]}}
-    or None when the fragment is curved, under-constrained, or non-convex."""
-    contour, seam = label_boundary(region, others)
+    """Recover a convex polygon from a partially-occluded fragment. Fit a line to every
+    visible (own-boundary) edge across ALL own runs, kept in boundary (cyclic) order,
+    then intersect consecutive lines cyclically — each intersection spanning a seam gap
+    recovers a corner hidden behind an occluder (so a polygon bitten by several separate
+    occluders is still recovered, as long as every edge stays partly visible). Returns
+    {"kind":"polygon","params":{"points":[(x,y),...]}} or None when the fragment is
+    curved, under-constrained, or non-convex.
+
+    `boundary` optionally supplies an already-computed (contour, seam) from
+    `label_boundary` so it isn't recomputed."""
+    contour, seam = boundary if boundary is not None else label_boundary(region, others)
     if len(contour) == 0 or not seam.any():
         return None                                    # no occlusion -> not this completer
     runs = _own_runs(contour, seam)
     if not runs:
         return None
-    poly = max(runs, key=len)                          # the visible boundary arc
-    simp = rdp(poly, max_residual)
-    if len(simp) < 4:                                  # need >= 3 edges (incl. the 2 seam stubs)
-        return None
-    # map interior RDP vertices back to indices in `poly`; the two ends are the stubs
-    idxs = [0]
-    for v in simp[1:-1]:
-        idxs.append(int(np.argmin(np.hypot(poly[:, 0] - v[0], poly[:, 1] - v[1]))))
-    idxs.append(len(poly) - 1)
-    lines = []
-    for i in range(len(idxs) - 1):
-        seg = poly[idxs[i]: idxs[i + 1] + 1]
-        ln = _fit_line(seg)
-        if ln is None or ln[3] > max_residual:
-            return None
-        lines.append(ln)
+    lines: list[tuple[float, float, float, float]] = []
+    for run in runs:                                   # runs are already in cyclic order
+        if len(run) < 2:
+            continue
+        idxs = _subseq_indices(run, rdp(run, max_residual))   # edge breakpoints in this run
+        for i in range(len(idxs) - 1):
+            ln = _fit_line(run[idxs[i]: idxs[i + 1] + 1])
+            if ln is None or ln[3] > max_residual:
+                return None
+            lines.append(ln)
     if len(lines) < 3 or len(lines) > max_vertices:
         return None
     verts: list[tuple[float, float]] = []
@@ -302,7 +321,8 @@ def _complete_member(region: Region, others: list[Region]) -> dict | None:
     prim = complete_primitive(contour, seam, max_residual=_MAX_RESIDUAL, min_arc_deg=_MIN_ARC_DEG)
     if prim is not None:
         return prim
-    return complete_polygon(region, others, max_residual=_MAX_RESIDUAL, max_vertices=_MAX_VERTICES)
+    return complete_polygon(region, others, max_residual=_MAX_RESIDUAL,
+                            max_vertices=_MAX_VERTICES, boundary=(contour, seam))
 
 
 def intersection_lens_d(a: dict, b: dict) -> str | None:

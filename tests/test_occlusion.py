@@ -431,6 +431,30 @@ def test_complete_polygon_rejects_curved_disk_fragment():
     assert complete_polygon(region, [other], max_residual=_MAX_RESIDUAL, max_vertices=_MAX_VERTICES) is None
 
 
+def test_complete_polygon_recovers_diamond_with_two_corners_bitten():
+    # A diamond clipped by TWO separate occluders (top and bottom corners), with all
+    # four edges still partly visible -> the own boundary is TWO runs. complete_polygon
+    # must collect edge lines across BOTH runs in cyclic order to recover all four
+    # corners (including the two hidden ones). Regression for keeping only the longest
+    # run, which would drop one arc's edges and decline.
+    from vectormark.occlusion import complete_polygon, _MAX_RESIDUAL, _MAX_VERTICES
+    h, w = 180, 180
+    cx, cy, r = 90, 90, 50
+    top = _disk_mask(90, 40, 16, h, w)       # hides top corner (90,40)
+    bot = _disk_mask(90, 140, 16, h, w)      # hides bottom corner (90,140)
+    diamond = _diamond_mask(cx, cy, r, h, w) & ~top & ~bot
+    region = Region(label=1, mask=diamond, color_hex="#3366cc")
+    others = [Region(label=2, mask=top, color_hex="#cc3333"),
+              Region(label=3, mask=bot, color_hex="#cc3333")]
+    prim = complete_polygon(region, others, max_residual=_MAX_RESIDUAL, max_vertices=_MAX_VERTICES)
+    assert prim is not None and prim["kind"] == "polygon"
+    pts = prim["params"]["points"]
+    assert len(pts) == 4
+    truth = [(cx, cy - r), (cx + r, cy), (cx, cy + r), (cx - r, cy)]
+    for tx, ty in truth:
+        assert min(np.hypot(px - tx, py - ty) for px, py in pts) <= 2.5
+
+
 # --- Task 4 (polygon branch): primitive_mask polygon case ---
 def test_primitive_mask_polygon_membership():
     from vectormark.occlusion import primitive_mask
