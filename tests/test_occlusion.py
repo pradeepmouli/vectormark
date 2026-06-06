@@ -233,3 +233,34 @@ def test_primitive_mask_annulus():
     assert not m[60, 60]            # hole
     assert m[60, 60 - 31]          # on the band (31 px out, between 22 and 40)
     assert not m[60, 60 - 50]      # outside the outer radius
+
+
+# --- Task 5: complete_annulus ---
+from vectormark.occlusion import complete_annulus  # noqa: E402
+
+
+def _occluded_ring(h=160, w=200):
+    # a ring whose right OUTER rim is clipped by a big disk sitting mostly outside it:
+    # the disk stops short of the inner radius (so the hole stays enclosed and the ring
+    # keeps its outer+hole contours) yet borders enough background to complete as a
+    # circle itself.
+    yy, xx = np.ogrid[:h, :w]
+    d2 = (xx - 70) ** 2 + (yy - 70) ** 2
+    ring = (d2 <= 45 ** 2) & (d2 >= 25 ** 2)
+    occ = ((xx - 135) ** 2 + (yy - 70) ** 2) <= 38 ** 2
+    return Region(1, ring & ~occ, "#3366cc"), Region(2, occ, "#cc3333")
+
+
+def test_complete_annulus_recovers_ring():
+    ring, occ = _occluded_ring()
+    prim = complete_annulus(ring, [occ], max_residual=1.6, min_arc_deg=110.0, concentric_tol=2.0)
+    assert prim is not None and prim["kind"] == "annulus"
+    p = prim["params"]
+    assert abs(p["cx"] - 70) < 2 and abs(p["cy"] - 70) < 2
+    assert abs(p["r_outer"] - 45) < 2 and abs(p["r_inner"] - 25) < 2
+
+
+def test_complete_annulus_rejects_solid_disk():
+    yy, xx = np.ogrid[:120, :120]
+    disk = Region(1, ((xx - 60) ** 2 + (yy - 60) ** 2) <= 40 ** 2, "#3366cc")
+    assert complete_annulus(disk, [], max_residual=1.6, min_arc_deg=110.0, concentric_tol=2.0) is None

@@ -147,6 +147,40 @@ def complete_primitive(
     return None
 
 
+def complete_annulus(
+    region: Region, others: list[Region], *, max_residual: float, min_arc_deg: float,
+    concentric_tol: float,
+) -> dict | None:
+    """Fit an annulus (two concentric circles) from a ring fragment's outer and inner
+    own arcs. Returns {"kind":"annulus","params":{cx,cy,r_outer,r_inner}} or None when
+    the region has no hole, either circle can't be fit, the radii don't nest, or the
+    centres aren't concentric within `concentric_tol`."""
+    if len(region_contours(region.mask)) < 2:
+        return None                                       # no hole -> not a ring
+    outer_c, outer_seam = label_boundary(region, others, contour_index=0)
+    inner_c, inner_seam = label_boundary(region, others, contour_index=1)
+    outer = _fit_circle(outer_c, outer_seam, max_residual=max_residual, min_arc_deg=min_arc_deg)
+    inner = _fit_circle(inner_c, inner_seam, max_residual=max_residual, min_arc_deg=min_arc_deg)
+    if outer is None or inner is None or inner["r"] >= outer["r"]:
+        return None
+    if np.hypot(outer["cx"] - inner["cx"], outer["cy"] - inner["cy"]) > concentric_tol:
+        return None
+    cx = (outer["cx"] + inner["cx"]) / 2
+    cy = (outer["cy"] + inner["cy"]) / 2
+    return {"kind": "annulus",
+            "params": {"cx": cx, "cy": cy, "r_outer": outer["r"], "r_inner": inner["r"]}}
+
+
+def _complete_member(region: Region, others: list[Region]) -> dict | None:
+    """Complete a group member as an annulus if it has a hole, else as a circle/ellipse."""
+    ann = complete_annulus(region, others, max_residual=_MAX_RESIDUAL,
+                           min_arc_deg=_MIN_ARC_DEG, concentric_tol=_CONCENTRIC_TOL)
+    if ann is not None:
+        return ann
+    contour, seam = label_boundary(region, others)
+    return complete_primitive(contour, seam, max_residual=_MAX_RESIDUAL, min_arc_deg=_MIN_ARC_DEG)
+
+
 def intersection_lens_d(a: dict, b: dict) -> str | None:
     """SVG path (two A arcs) for the lens = intersection of circles a and b.
     Returns None if the circles don't properly overlap (disjoint or one contains
@@ -216,6 +250,9 @@ def stack_agreement(prims, lens, regions: list[Region], h: int, w: int) -> float
 _MAX_RESIDUAL = 1.6
 _MIN_ARC_DEG = 110.0
 _GATE_AGREEMENT = 0.97
+_CONCENTRIC_TOL = 2.0
+_MIN_OVERLAP_PX = 12
+_OVERLAP_OWNERSHIP = 0.5
 
 
 def _snap_pair(p_left: dict, p_right: dict, axis_x: float) -> tuple[dict, dict]:
