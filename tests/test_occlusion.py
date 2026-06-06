@@ -429,3 +429,17 @@ def test_complete_polygon_rejects_curved_disk_fragment():
     other = Region(label=2, mask=occluder, color_hex="#cc3333")
     # a curved boundary RDP-splits into more than _MAX_VERTICES straight edges -> rejected
     assert complete_polygon(region, [other], max_residual=_MAX_RESIDUAL, max_vertices=_MAX_VERTICES) is None
+
+
+# --- Task 4 (polygon branch): primitive_mask polygon case ---
+def test_primitive_mask_polygon_membership():
+    from vectormark.occlusion import primitive_mask
+    # an asymmetric rectangle: x in [2,7] (width 5), y in [2,12] (height 10).
+    # Asymmetric extents make the (x,y)->(row,col) swap load-bearing — a reversed
+    # swap would fail these assertions.
+    prim = {"kind": "polygon", "params": {"points": [(2.0, 2.0), (7.0, 2.0), (7.0, 12.0), (2.0, 12.0)]}}
+    mask = primitive_mask(prim, 15, 10)
+    assert mask[6, 4]        # row=6 (y=6 in [2,12]), col=4 (x=4 in [2,7]) -> inside
+    assert not mask[1, 4]    # row=1 (y=1 < 2) -> outside
+    assert not mask[0, 0]    # grid corner -> outside
+    assert mask.dtype == bool

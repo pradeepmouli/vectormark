@@ -8,6 +8,7 @@ from dataclasses import dataclass
 
 import numpy as np
 from scipy.ndimage import binary_dilation, binary_erosion
+from skimage.draw import polygon2mask
 from skimage.measure import CircleModel, EllipseModel
 from skimage.morphology import convex_hull_image
 
@@ -327,7 +328,7 @@ def intersection_lens_d(a: dict, b: dict) -> str | None:
 
 
 def primitive_mask(prim: dict, h: int, w: int) -> np.ndarray:
-    """Boolean mask of a completed circle/ellipse on an (h, w) grid."""
+    """Boolean mask of a completed primitive (circle, annulus, polygon, or ellipse) on an (h, w) grid."""
     yy, xx = np.ogrid[:h, :w]
     p = prim["params"]
     if prim["kind"] == "circle":
@@ -335,6 +336,10 @@ def primitive_mask(prim: dict, h: int, w: int) -> np.ndarray:
     if prim["kind"] == "annulus":
         d2 = (xx - p["cx"]) ** 2 + (yy - p["cy"]) ** 2
         return (d2 <= p["r_outer"] ** 2) & (d2 >= p["r_inner"] ** 2)
+    if prim["kind"] == "polygon":
+        pts = prim["params"]["points"]
+        rc = np.array([(y, x) for x, y in pts], dtype=float)   # skimage wants (row, col)
+        return polygon2mask((h, w), rc)
     return ((xx - p["cx"]) / p["rx"]) ** 2 + ((yy - p["cy"]) / p["ry"]) ** 2 <= 1.0
 
 
