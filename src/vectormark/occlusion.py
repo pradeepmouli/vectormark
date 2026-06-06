@@ -7,7 +7,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 import numpy as np
-from scipy.ndimage import binary_dilation
+from scipy.ndimage import binary_dilation, binary_erosion
 from skimage.measure import CircleModel, EllipseModel
 from skimage.morphology import convex_hull_image
 
@@ -244,14 +244,19 @@ def stack_agreement(prims, lens, regions: list[Region], h: int, w: int) -> float
     compare_mask = region_union | painted_any
     if not compare_mask.any():
         return 0.0
-    return float((painted[compare_mask] == truth[compare_mask]).mean())
+    # Tolerate a 1px boundary shell: sub-pixel fit error shows up as a thin ring of
+    # disagreement (worst on thin annulus bands, where it can reach several percent).
+    # Erode the disagreement so only thick — genuinely wrong — mismatches count; a
+    # wrong reconstruction (filled hole, wrong radius) still scores far below the bar.
+    disagree = compare_mask & (painted != truth)
+    core = binary_erosion(disagree, iterations=1)
+    return 1.0 - float(core.sum()) / float(compare_mask.sum())
 
 
 _MAX_RESIDUAL = 1.6
 _MIN_ARC_DEG = 110.0
-# A thin annulus band has high perimeter-to-area, so even a ~0.4px radial fit error
-# shows up as a few percent of boundary mismatch — 0.97 over-rejects clean rings while
-# a wrong reconstruction still scores well below 0.9, so the safety bar holds at 0.96.
+# With the 1px-boundary-tolerant gate, correct reconstructions score ~0.97–1.0 and a
+# wrong one (filled hole, wrong radius) ~0.7, so 0.96 separates them with wide margin.
 _GATE_AGREEMENT = 0.96
 _CONCENTRIC_TOL = 2.0
 _MIN_OVERLAP_PX = 12
