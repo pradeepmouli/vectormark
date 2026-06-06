@@ -255,6 +255,44 @@ _MIN_OVERLAP_PX = 12
 _OVERLAP_OWNERSHIP = 0.5
 
 
+def _pair_constraint(
+    prim_i: dict, region_i: Region, prim_j: dict, region_j: Region, h: int, w: int
+) -> str | None:
+    """Over/under for an overlapping pair, from which region owns the overlap zone in
+    the raster: the colour that survives where the two completed shapes overlap is the
+    one on top. Returns "i_over_j", "j_over_i", or None (no real overlap, or a
+    distinct-coloured intersection owned by neither — e.g. a Mastercard lens)."""
+    overlap = primitive_mask(prim_i, h, w) & primitive_mask(prim_j, h, w)
+    n = int(overlap.sum())
+    if n < _MIN_OVERLAP_PX:
+        return None
+    in_i = int((overlap & region_i.mask).sum())
+    in_j = int((overlap & region_j.mask).sum())
+    if max(in_i, in_j) < _OVERLAP_OWNERSHIP * n or in_i == in_j:
+        return None
+    return "i_over_j" if in_i > in_j else "j_over_i"
+
+
+def _topo_order(n: int, edges: list[tuple[int, int]]) -> list[int] | None:
+    """Kahn topological sort. `edges` are (under, over): under is painted first.
+    Returns a paint order (z = position), or None if the constraints are cyclic."""
+    adj: dict[int, list[int]] = {i: [] for i in range(n)}
+    indeg = [0] * n
+    for u, v in edges:
+        adj[u].append(v)
+        indeg[v] += 1
+    queue = [i for i in range(n) if indeg[i] == 0]
+    order: list[int] = []
+    while queue:
+        node = queue.pop()
+        order.append(node)
+        for m in adj[node]:
+            indeg[m] -= 1
+            if indeg[m] == 0:
+                queue.append(m)
+    return order if len(order) == n else None
+
+
 def _snap_pair(p_left: dict, p_right: dict, axis_x: float) -> tuple[dict, dict]:
     """Force two completed circles to be exact mirror images about x = axis_x."""
     r = (p_left["params"]["r"] + p_right["params"]["r"]) / 2

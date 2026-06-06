@@ -264,3 +264,24 @@ def test_complete_annulus_rejects_solid_disk():
     yy, xx = np.ogrid[:120, :120]
     disk = Region(1, ((xx - 60) ** 2 + (yy - 60) ** 2) <= 40 ** 2, "#3366cc")
     assert complete_annulus(disk, [], max_residual=1.6, min_arc_deg=110.0, concentric_tol=2.0) is None
+
+
+# --- Task 6: pairwise over/under + topological order ---
+from vectormark.occlusion import _pair_constraint, _topo_order  # noqa: E402
+
+
+def test_pair_constraint_from_overlap_ownership():
+    h = w = 140
+    yy, xx = np.ogrid[:h, :w]
+    ring_full = ((xx - 70) ** 2 + (yy - 70) ** 2 <= 45 ** 2) & ((xx - 70) ** 2 + (yy - 70) ** 2 >= 25 ** 2)
+    disk_full = (xx - 105) ** 2 + (yy - 70) ** 2 <= 28 ** 2
+    ring_vis = Region(1, ring_full & ~disk_full, "#3366cc")   # ring loses the overlap
+    disk_vis = Region(2, disk_full, "#cc3333")                # disk keeps it (on top)
+    ring_prim = {"kind": "annulus", "params": {"cx": 70, "cy": 70, "r_outer": 45, "r_inner": 25}}
+    disk_prim = {"kind": "circle", "params": {"cx": 105, "cy": 70, "r": 28}}
+    assert _pair_constraint(ring_prim, ring_vis, disk_prim, disk_vis, h, w) == "j_over_i"
+
+
+def test_topo_order_linear_and_cycle():
+    assert _topo_order(3, [(0, 1), (1, 2)]) == [0, 1, 2]      # 0 under 1 under 2
+    assert _topo_order(3, [(0, 1), (1, 2), (2, 0)]) is None   # cycle -> decline
