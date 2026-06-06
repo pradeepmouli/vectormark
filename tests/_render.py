@@ -9,6 +9,8 @@ import resvg_py
 from PIL import Image
 from skimage.metrics import structural_similarity
 
+from vectormark.color import mean_delta_e  # re-exported; single source of truth
+
 
 def render_svg(svg: str, width: int, height: int) -> np.ndarray:
     """Rasterize `svg` to an (H, W, 3) uint8 array on a white background."""
@@ -22,12 +24,3 @@ def render_svg(svg: str, width: int, height: int) -> np.ndarray:
 def ssim(a: np.ndarray, b: np.ndarray) -> float:
     """Structural similarity in [0, 1]; 1.0 == identical."""
     return float(structural_similarity(a, b, channel_axis=-1))
-
-
-def mean_delta_e(a: np.ndarray, b: np.ndarray) -> float:
-    """Mean OKLab Euclidean distance per pixel (perceptual color error)."""
-    from vectormark.color import srgb_to_oklab
-
-    la = srgb_to_oklab(a.reshape(-1, 3) / 255.0)
-    lb = srgb_to_oklab(b.reshape(-1, 3) / 255.0)
-    return float(np.linalg.norm(la - lb, axis=1).mean())

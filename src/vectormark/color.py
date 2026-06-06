@@ -77,6 +77,14 @@ def extract_palette(
     return colors[palette_idx].astype(np.uint8)
 
 
+def mean_delta_e(a: np.ndarray, b: np.ndarray) -> float:
+    """Mean per-pixel OKLab Euclidean distance between two uint8 RGB images/arrays
+    (shape (...,3)). 0.0 == identical; perceptual color error."""
+    la = srgb_to_oklab(a.reshape(-1, 3) / 255.0)
+    lb = srgb_to_oklab(b.reshape(-1, 3) / 255.0)
+    return float(np.linalg.norm(la - lb, axis=1).mean())
+
+
 def quantize(rgb_image: np.ndarray, palette: np.ndarray) -> np.ndarray:
     """Assign every pixel to its nearest palette colour by OKLab ΔE."""
     h, w, _ = rgb_image.shape
