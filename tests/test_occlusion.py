@@ -443,3 +443,15 @@ def test_primitive_mask_polygon_membership():
     assert not mask[1, 4]    # row=1 (y=1 < 2) -> outside
     assert not mask[0, 0]    # grid corner -> outside
     assert mask.dtype == bool
+
+
+# --- Task 5: _complete_member dispatches polygonal fragments ---
+def test_complete_member_dispatches_diamond_to_polygon():
+    from vectormark.occlusion import _complete_member
+    h, w = 160, 220
+    diamond = _diamond_mask(80, 80, 46, h, w) & ~_disk_mask(126, 80, 30, h, w)
+    occluder = _disk_mask(126, 80, 30, h, w)
+    region = Region(label=1, mask=diamond, color_hex="#3366cc")
+    other = Region(label=2, mask=occluder, color_hex="#cc3333")
+    prim = _complete_member(region, [other])
+    assert prim is not None and prim["kind"] == "polygon"

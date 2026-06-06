@@ -291,13 +291,18 @@ def complete_polygon(
 
 
 def _complete_member(region: Region, others: list[Region]) -> dict | None:
-    """Complete a group member as an annulus if it has a hole, else as a circle/ellipse."""
+    """Complete a group member: annulus if it has a hole, else circle/ellipse, else a
+    convex polygon. The curved fitters run first (they reject straight edges), so only
+    genuinely polygonal fragments reach complete_polygon."""
     ann = complete_annulus(region, others, max_residual=_MAX_RESIDUAL,
                            min_arc_deg=_MIN_ARC_DEG, concentric_tol=_CONCENTRIC_TOL)
     if ann is not None:
         return ann
     contour, seam = label_boundary(region, others)
-    return complete_primitive(contour, seam, max_residual=_MAX_RESIDUAL, min_arc_deg=_MIN_ARC_DEG)
+    prim = complete_primitive(contour, seam, max_residual=_MAX_RESIDUAL, min_arc_deg=_MIN_ARC_DEG)
+    if prim is not None:
+        return prim
+    return complete_polygon(region, others, max_residual=_MAX_RESIDUAL, max_vertices=_MAX_VERTICES)
 
 
 def intersection_lens_d(a: dict, b: dict) -> str | None:
