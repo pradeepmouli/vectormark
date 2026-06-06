@@ -122,7 +122,7 @@ def _ramp_groups(regions: list[Region]) -> list[list[Region]]:
                 continue
             seen.add(lab)
             comp.append(lab)
-            stack.extend(adj[lab] - seen)
+            stack.extend(sorted(adj[lab] - seen))
         members = [by_label[l] for l in comp]
         if len(members) < _MIN_BANDS:
             continue
