@@ -36,14 +36,15 @@ def has_bite(mask: np.ndarray, *, max_solidity: float = 0.92) -> bool:
 
 
 def label_boundary(
-    region: Region, others: list[Region], *, reach: int = 2
+    region: Region, others: list[Region], *, reach: int = 2, contour_index: int = 0
 ) -> tuple[np.ndarray, np.ndarray]:
-    """Return (outer_contour Nx2 as (x,y), seam_bool N). A contour point is a seam
-    if any OTHER region's mask sits within `reach` px of it; else it is own boundary."""
+    """Return (contour Nx2 as (x,y), seam_bool N) for the region's `contour_index`-th
+    contour (0 = outer boundary, 1 = largest hole, ...). A contour point is a seam if
+    any OTHER region's mask sits within `reach` px of it; else it is own boundary."""
     contours = region_contours(region.mask)
-    if not contours:
+    if contour_index >= len(contours):
         return np.empty((0, 2)), np.empty((0,), bool)
-    contour = contours[0]
+    contour = contours[contour_index]
     if not others:
         return contour, np.zeros(len(contour), bool)
     near = np.zeros_like(region.mask)

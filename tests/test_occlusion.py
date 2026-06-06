@@ -182,3 +182,25 @@ def test_reconstruct_scene_does_not_drop_members_of_larger_component():
     reconstructed, remaining = reconstruct_scene(regions, Axis(x=float(cx)), (H, W))
     assert reconstructed == []                              # non-canonical group declined
     assert {r.label for r in remaining} == {1, 2, 3, 4}     # nothing dropped
+
+
+# --- Task 2: label_boundary per-contour ---
+from vectormark.occlusion import label_boundary as _lb_contour_index  # noqa: E402
+
+
+def _ring_region(label, cx, cy, r_out, r_in, h=120, w=120, color="#3366cc"):
+    yy, xx = np.ogrid[:h, :w]
+    d2 = (xx - cx) ** 2 + (yy - cy) ** 2
+    mask = (d2 <= r_out ** 2) & (d2 >= r_in ** 2)
+    return Region(label, mask, color)
+
+
+def test_label_boundary_reads_inner_contour():
+    ring = _ring_region(1, 60, 60, 40, 22)
+    yy, xx = np.ogrid[:120, :120]
+    occ = Region(2, ((xx - 85) ** 2 + (yy - 75) ** 2) <= 30 ** 2, "#cc3333")
+    outer, outer_seam = _lb_contour_index(ring, [occ], contour_index=0)
+    inner, inner_seam = _lb_contour_index(ring, [occ], contour_index=1)
+    assert len(outer) > 0 and len(inner) > 0
+    assert outer_seam.any()        # the occluder reaches the outer rim
+    assert inner_seam.any()        # ...and the inner rim, only readable via contour_index=1
