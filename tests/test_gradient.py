@@ -2,6 +2,11 @@
 import numpy as np
 
 
+def _OKLAB(img_uint8):
+    from vectormark.color import srgb_to_oklab
+    return srgb_to_oklab(img_uint8.reshape(-1, 3) / 255.0)
+
+
 def test_mean_delta_e_zero_for_identical_and_positive_for_different():
     from vectormark.color import mean_delta_e
     a = np.full((4, 4, 3), 120, np.uint8)
@@ -72,3 +77,48 @@ def test_ramp_groups_rejects_nonramp_colors():
     # adjacent but colors are not collinear in OKLab (zig-zag hues)
     regions = _hstrip_regions(["#ff0000", "#00ff00", "#0000ff", "#00ff00"])
     assert _ramp_groups(regions) == []
+
+
+def _linear_gradient_image(h, w, p0, p1, stops_rgb):
+    """Render a ground-truth linear gradient (for fitting against)."""
+    yy, xx = np.mgrid[:h, :w]
+    d = np.array(p1, float) - np.array(p0, float)
+    L = np.dot(d, d)
+    t = (((xx - p0[0]) * d[0] + (yy - p0[1]) * d[1]) / L).clip(0, 1)
+    offs = np.array([o for o, _ in stops_rgb])
+    cols = np.array([c for _, c in stops_rgb], float)
+    img = np.empty((h, w, 3))
+    for ch in range(3):
+        img[:, :, ch] = np.interp(t, offs, cols[:, ch])
+    return img.round().astype(np.uint8)
+
+
+def test_fit_linear_recovers_axis_and_endpoints():
+    from vectormark.gradient import _fit_linear
+    h, w = 80, 120
+    p0, p1 = (10, 40), (110, 40)                       # horizontal axis
+    img = _linear_gradient_image(h, w, p0, p1, [(0.0, (37, 99, 235)), (1.0, (219, 39, 119))])
+    ys, xs = np.mgrid[:h, :w]
+    pts = np.column_stack([xs.ravel(), ys.ravel()]).astype(float)
+    oklab = _OKLAB(img)
+    model = _fit_linear(pts, oklab, img.reshape(-1, 3))
+    assert model is not None and model["kind"] == "linear"
+    g = model["geometry"]
+    # axis is ~horizontal: endpoints span x, ~constant y
+    assert abs(g["y1"] - g["y2"]) < 3.0
+    # span tolerance is loose: the test gradient fills the whole 120px canvas, so the
+    # fitted axis spans all pixels (~119px) not the 100px p0->p1 range; the DIRECTION
+    # assertion above (|y1-y2|) is the real check. (In the pipeline the footprint mask
+    # bounds the span.)
+    assert abs(abs(g["x2"] - g["x1"]) - 100) < 25
+    assert len(model["stops"]) >= 2
+
+
+def test_reduce_stops_drops_redundant_midpoints():
+    from vectormark.gradient import _reduce_stops
+    # an sRGB gray ramp: some interior stops fall within max_delta_e of the
+    # piecewise-linear (OKLab) reconstruction from their neighbors, so they get dropped
+    stops = [(0.0, "#000000"), (0.25, "#404040"), (0.5, "#808080"),
+             (0.75, "#bfbfbf"), (1.0, "#ffffff")]
+    reduced = _reduce_stops(stops, max_delta_e=0.02)
+    assert len(reduced) < len(stops) and reduced[0][0] == 0.0 and reduced[-1][0] == 1.0
