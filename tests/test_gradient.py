@@ -149,3 +149,39 @@ def test_fit_radial_recovers_center():
     g = model["geometry"]
     assert abs(g["cx"] - 60) < 6 and abs(g["cy"] - 60) < 6
     assert g["r"] > 30
+
+
+def test_fit_gradient_accepts_linear_rejects_flat():
+    from vectormark.gradient import fit_gradient
+    h, w = 80, 120
+    img = _linear_gradient_image(h, w, (10, 40), (110, 40),
+                                 [(0.0, (37, 99, 235)), (1.0, (219, 39, 119))])
+    mask = np.ones((h, w), bool)
+    model = fit_gradient(mask, img)
+    assert model is not None and model["kind"] == "linear"
+    flat = np.full((h, w, 3), (37, 99, 235), np.uint8)
+    assert fit_gradient(mask, flat) is None             # flat -> no gradient
+
+
+def test_detect_gradients_consumes_ramp_returns_remaining():
+    from vectormark.gradient import detect_gradients
+    from vectormark.types import Region
+    h, w = 60, 160
+    # left half: a 4-band blue->magenta linear ramp; right: one flat green block
+    img = _linear_gradient_image(h, 80, (0, 30), (79, 30),
+                                 [(0.0, (37, 99, 235)), (1.0, (219, 39, 119))])
+    full = np.zeros((h, w, 3), np.uint8)
+    full[:, :80] = img
+    full[:, 80:] = (20, 160, 60)
+    # build the quantized regions the way the pipeline would (4 ramp bands + 1 flat)
+    regions = []
+    for i in range(4):
+        m = np.zeros((h, w), bool); m[:, i * 20:(i + 1) * 20] = True
+        regions.append(Region(label=i + 1, mask=m,
+                              color_hex="#%02x%02x%02x" % tuple(np.median(full[m], axis=0).astype(int))))
+    gm = np.zeros((h, w), bool); gm[:, 80:] = True
+    regions.append(Region(label=5, mask=gm, color_hex="#149c3c"))
+    fills, remaining = detect_gradients(regions, full)
+    assert len(fills) == 1                               # the ramp became one gradient fill
+    assert fills[0][1]["kind"] == "linear"
+    assert {r.label for r in remaining} == {5}           # the flat green block remains

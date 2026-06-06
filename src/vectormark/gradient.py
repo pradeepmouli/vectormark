@@ -14,7 +14,7 @@ from .types import Region
 
 _MIN_BANDS = 3
 _RAMP_TOL = 0.06          # max OKLab distance of a band colour from the fitted ramp line
-_GATE_DELTA_E = 0.05      # mean OKLab ΔE bar (consumed by fit_gradient in a later task)
+_GATE_DELTA_E = 0.05      # mean OKLab ΔE bar: a fitted model must re-render within this to be accepted
 
 
 def _hex_to_oklab(hex_colors: list[str]) -> np.ndarray:
@@ -35,25 +35,76 @@ def _principal_axis(vectors: np.ndarray, *, eps: float) -> np.ndarray | None:
     return vt[0]
 
 
+def _ramp_fit(colors_oklab: np.ndarray) -> tuple[np.ndarray | None, float, np.ndarray | None]:
+    """Fit a line to OKLab colours via the principal axis. Returns
+    (unit_axis, max_residual, projections), or (None, inf, None) if degenerate/flat."""
+    axis = _principal_axis(colors_oklab, eps=1e-6)
+    if axis is None:
+        return None, np.inf, None
+    centred = colors_oklab - colors_oklab.mean(axis=0)
+    projs = centred @ axis
+    resid = float(np.linalg.norm(centred - np.outer(projs, axis), axis=1).max())
+    return axis, resid, projs
+
+
 def _is_ramp(colors_oklab: np.ndarray) -> bool:
     """True if >=3 colours and they lie on a single line in OKLab within _RAMP_TOL."""
     if len(colors_oklab) < _MIN_BANDS:
         return False
-    axis = _principal_axis(colors_oklab, eps=1e-6)
-    if axis is None:
-        return False                                   # all equal -> flat, not a ramp
-    centred = colors_oklab - colors_oklab.mean(axis=0)
-    proj = np.outer(centred @ axis, axis)
-    resid = np.linalg.norm(centred - proj, axis=1).max()
+    _, resid, _ = _ramp_fit(colors_oklab)
     return resid <= _RAMP_TOL
 
 
+def _is_strict_ramp(members: list[Region]) -> bool:
+    """True if the members form a ramp AND all band colours project to distinct positions
+    along the principal axis (monotone, no repeated colours)."""
+    oklab = _hex_to_oklab([m.color_hex for m in members])
+    axis, resid, projs = _ramp_fit(oklab)
+    if axis is None or resid > _RAMP_TOL:
+        return False
+    # round(8) is a float-noise-tolerant *exact*-duplicate guard (catches palindromes like
+    # green-blue-green). Near-duplicates that slip through are caught downstream by the
+    # fit_gradient consistency gate: a folded colour sequence won't re-render monotonically.
+    return len(np.unique(projs.round(8))) == len(members)
+
+
+def _trim_to_ramp(members: list[Region], adj: dict) -> list[Region] | None:
+    """Given a connected set of regions, trim boundary nodes that break the ramp property
+    until either the remainder forms a strict ramp (return it) or fewer than _MIN_BANDS remain.
+    Only degree<=1 (leaf) nodes are trimmable; a non-leaf intruder — e.g. a flat region
+    bordering multiple ramp bands — causes the whole component to be rejected (the
+    fit_gradient ΔE gate is the downstream backstop)."""
+    current = list(members)
+    while len(current) >= _MIN_BANDS:
+        if _is_strict_ramp(current):
+            return current
+        # Find leaf nodes (degree ≤ 1 within the current subset)
+        cur_labels = {m.label for m in current}
+        leaves = [m for m in current
+                  if len(adj[m.label] & cur_labels) <= 1]
+        if not leaves:
+            break                                           # no leaf to trim -> give up
+        # Remove the leaf that least fits the ramp (highest residual after removal)
+        best_trim = None
+        best_score = np.inf
+        for leaf in leaves:
+            trial = [m for m in current if m.label != leaf.label]
+            if len(trial) < _MIN_BANDS:
+                continue
+            _, score, _ = _ramp_fit(_hex_to_oklab([m.color_hex for m in trial]))
+            if score < best_score:                          # strict `<` keeps the first
+                best_score, best_trim = score, trial        # minimal-score leaf; deterministic
+                                                            # given stable input `regions` order
+        if best_trim is None:
+            break
+        current = best_trim
+    return None
+
+
 def _ramp_groups(regions: list[Region]) -> list[list[Region]]:
-    """Connected groups of >=3 adjacent regions whose flat colours form an OKLab ramp."""
-    # Grows each full connected component, then tests if the whole thing is a ramp.
-    # segment() excludes the background plate, so a gradient mark's bands neighbor only
-    # each other -> this works. A gradient bordering another real shape is lumped in and
-    # rejected (falls back to flat bands); edge-consistent growth would refine that later.
+    """Connected groups of >=3 adjacent regions whose flat colours form an OKLab ramp.
+    If a connected component's full colour set doesn't form a ramp, boundary nodes are
+    trimmed iteratively until a ramp is found or the component is too small."""
     by_label = {r.label: r for r in regions}
     adj = region_adjacency(regions)
     seen: set[int] = set()
@@ -74,8 +125,9 @@ def _ramp_groups(regions: list[Region]) -> list[list[Region]]:
         members = [by_label[l] for l in comp]
         if len(members) < _MIN_BANDS:
             continue
-        if _is_ramp(_hex_to_oklab([m.color_hex for m in members])):
-            groups.append(members)
+        ramp = _trim_to_ramp(members, adj)
+        if ramp is not None:
+            groups.append(ramp)
     return groups
 
 
@@ -196,3 +248,73 @@ def _fit_linear(pts: np.ndarray, oklab: np.ndarray, rgb: np.ndarray) -> dict | N
             "geometry": {"x1": float(p1[0]), "y1": float(p1[1]),
                          "x2": float(p2[0]), "y2": float(p2[1])},
             "stops": stops}
+
+
+def _interp_stops_rgb(t: np.ndarray, stops: list[tuple[float, str]]) -> np.ndarray:
+    offs = np.array([o for o, _ in stops])
+    cols = np.array([[int(c[1:3], 16), int(c[3:5], 16), int(c[5:7], 16)] for _, c in stops], float)
+    return np.column_stack([np.interp(t, offs, cols[:, ch]) for ch in range(3)])
+
+
+def _model_t(model: dict, pts: np.ndarray) -> np.ndarray:
+    g = model["geometry"]
+    if model["kind"] == "linear":
+        d = np.array([g["x2"] - g["x1"], g["y2"] - g["y1"]], float)
+        L = float(d @ d) or 1.0
+        return (((pts[:, 0] - g["x1"]) * d[0] + (pts[:, 1] - g["y1"]) * d[1]) / L).clip(0, 1)
+    r = np.hypot(pts[:, 0] - g["cx"], pts[:, 1] - g["cy"]) / (g["r"] or 1.0)
+    return r.clip(0, 1)
+
+
+def _agreement_delta_e(model: dict, mask: np.ndarray, rgb_image: np.ndarray) -> float:
+    """Mean OKLab ΔE between the rendered model and the original over the footprint."""
+    ys, xs = np.where(mask)
+    pts = np.column_stack([xs, ys]).astype(float)
+    t = _model_t(model, pts)
+    rendered = _interp_stops_rgb(t, model["stops"])
+    truth = rgb_image[ys, xs].astype(float)
+    la = srgb_to_oklab(rendered / 255.0)
+    lb = srgb_to_oklab(truth / 255.0)
+    return float(np.linalg.norm(la - lb, axis=1).mean())
+
+
+def fit_gradient(mask: np.ndarray, rgb_image: np.ndarray) -> dict | None:
+    """Fit a linear (then radial) gradient to the original pixels under `mask`. Returns
+    the model only if it re-renders within _GATE_DELTA_E, else None."""
+    ys, xs = np.where(mask)
+    if len(xs) < 3 * _MIN_BANDS:
+        return None
+    pts = np.column_stack([xs, ys]).astype(float)
+    rgb = rgb_image[ys, xs].astype(float)
+    oklab = srgb_to_oklab(rgb / 255.0)
+    best = None
+    for fit in (_fit_linear, _fit_radial):
+        model = fit(pts, oklab, rgb)
+        if model is None:
+            continue
+        de = _agreement_delta_e(model, mask, rgb_image)
+        if de <= _GATE_DELTA_E and (best is None or de < best[0]):
+            best = (de, model)
+    return best[1] if best is not None else None
+
+
+def detect_gradients(
+    regions: list[Region], rgb_image: np.ndarray
+) -> tuple[list[tuple[Region, dict]], list[Region]]:
+    """Group ramp bands, fit+gate a gradient per footprint, and return
+    (accepted [(footprint_region, model)], remaining flat regions)."""
+    fills: list[tuple[Region, dict]] = []
+    consumed: set[int] = set()
+    for group in _ramp_groups(regions):
+        mask = np.zeros(rgb_image.shape[:2], bool)
+        for m in group:
+            mask |= m.mask
+        model = fit_gradient(mask, rgb_image)
+        if model is None:
+            continue                                   # dissolve back into flat bands
+        rep = max(group, key=lambda r: r.area)
+        footprint = Region(label=rep.label, mask=mask, color_hex=rep.color_hex)
+        fills.append((footprint, model))
+        consumed.update(m.label for m in group)
+    remaining = [r for r in regions if r.label not in consumed]
+    return fills, remaining
