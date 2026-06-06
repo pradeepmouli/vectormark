@@ -204,3 +204,23 @@ def test_label_boundary_reads_inner_contour():
     assert len(outer) > 0 and len(inner) > 0
     assert outer_seam.any()        # the occluder reaches the outer rim
     assert inner_seam.any()        # ...and the inner rim, only readable via contour_index=1
+
+
+# --- Task 3: _fit_circle ---
+from vectormark.occlusion import _fit_circle  # noqa: E402
+
+
+def test_fit_circle_recovers_full_circle():
+    th = np.linspace(0, 2 * np.pi, 200, endpoint=False)
+    contour = np.column_stack([50 + 30 * np.cos(th), 60 + 30 * np.sin(th)])
+    seam = np.zeros(len(contour), bool)
+    fit = _fit_circle(contour, seam, max_residual=1.6, min_arc_deg=110.0)
+    assert fit is not None
+    assert abs(fit["cx"] - 50) < 1 and abs(fit["cy"] - 60) < 1 and abs(fit["r"] - 30) < 1
+
+
+def test_fit_circle_rejects_short_arc():
+    th = np.linspace(0, 0.3, 40)            # ~17 deg, far below min_arc_deg
+    contour = np.column_stack([50 + 30 * np.cos(th), 60 + 30 * np.sin(th)])
+    seam = np.zeros(len(contour), bool)
+    assert _fit_circle(contour, seam, max_residual=1.6, min_arc_deg=110.0) is None

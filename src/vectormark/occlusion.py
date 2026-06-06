@@ -92,6 +92,27 @@ def _fit_candidate_pts(own: np.ndarray) -> np.ndarray:
         return own
 
 
+def _fit_circle(
+    contour: np.ndarray, seam: np.ndarray, *, max_residual: float, min_arc_deg: float
+) -> dict | None:
+    """Fit a circle to the own-boundary points (convex hull, to drop concave inner
+    arcs). Returns {"cx","cy","r"} or None if too few points, residual too large, or
+    the own arc spans less than `min_arc_deg`."""
+    own = np.asarray(contour, float)[~seam]
+    if len(own) < 8:
+        return None
+    fit_pts = _fit_candidate_pts(own)
+    if len(fit_pts) < 8:
+        return None
+    cm = CircleModel.from_estimate(fit_pts)
+    if not cm or np.abs(cm.residuals(fit_pts)).max() > max_residual:
+        return None
+    cx, cy = float(cm.center[0]), float(cm.center[1])
+    if _own_arc_span_deg(fit_pts, cx, cy) < min_arc_deg:
+        return None
+    return {"cx": cx, "cy": cy, "r": float(cm.radius)}
+
+
 def complete_primitive(
     contour: np.ndarray, seam: np.ndarray, *, max_residual: float, min_arc_deg: float
 ) -> dict | None:
@@ -107,16 +128,15 @@ def complete_primitive(
     fit_pts = _fit_candidate_pts(own)
     if len(fit_pts) < 8:
         return None
-    cm = CircleModel.from_estimate(fit_pts)
-    if cm and np.abs(cm.residuals(fit_pts)).max() <= max_residual:
-        cx, cy = float(cm.center[0]), float(cm.center[1])
-        if _own_arc_span_deg(fit_pts, cx, cy) >= min_arc_deg:
-            seam_pts = np.asarray(contour, float)[seam]
-            inside = len(seam_pts) == 0 or np.all(
-                (seam_pts[:, 0] - cx) ** 2 + (seam_pts[:, 1] - cy) ** 2 <= (cm.radius + max_residual) ** 2
-            )
-            if inside:
-                return {"kind": "circle", "params": {"cx": cx, "cy": cy, "r": float(cm.radius)}}
+    circ = _fit_circle(contour, seam, max_residual=max_residual, min_arc_deg=min_arc_deg)
+    if circ is not None:
+        cx, cy = circ["cx"], circ["cy"]
+        seam_pts = np.asarray(contour, float)[seam]
+        inside = len(seam_pts) == 0 or np.all(
+            (seam_pts[:, 0] - cx) ** 2 + (seam_pts[:, 1] - cy) ** 2 <= (circ["r"] + max_residual) ** 2
+        )
+        if inside:
+            return {"kind": "circle", "params": {"cx": cx, "cy": cy, "r": circ["r"]}}
     em = EllipseModel.from_estimate(fit_pts)
     if em and np.abs(em.residuals(fit_pts)).max() <= max_residual:
         xc, yc = float(em.center[0]), float(em.center[1])
