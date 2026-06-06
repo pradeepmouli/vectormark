@@ -238,3 +238,13 @@ def test_detect_gradients_dissolves_unfittable_group_back_to_flats():
     fills, remaining = detect_gradients(regions, img)
     assert fills == []                                     # but no model fits -> rejected
     assert {r.label for r in remaining} == {1, 2, 3, 4, 5, 6}  # all bands fall back to flats
+
+
+def test_dominant_blob_fraction():
+    from vectormark.gradient import _dominant_blob_fraction
+    m = np.zeros((20, 40), bool)
+    m[2:18, 2:18] = True                       # one 16x16 blob, rest empty
+    assert _dominant_blob_fraction(m) == 1.0
+    m[2:18, 22:38] = True                      # add a second, equal, disconnected blob
+    assert abs(_dominant_blob_fraction(m) - 0.5) < 1e-9
+    assert _dominant_blob_fraction(np.zeros((5, 5), bool)) == 0.0   # empty -> 0

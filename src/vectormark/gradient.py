@@ -16,6 +16,9 @@ from .types import Region
 _MIN_BANDS = 3
 _RAMP_TOL = 0.06          # max OKLab distance of a band colour from the fitted ramp line
 _GATE_DELTA_E = 0.05      # mean OKLab ΔE bar: a fitted model must re-render within this to be accepted
+_BLOB_DOMINANCE = 0.85   # smooth-gradient path: min fraction of the foreground that must lie
+                         # in a single connected component for the mark to be treated as one
+                         # gradient blob (rejects multi-glyph wordmarks before any fit).
 
 
 def _hex_to_oklab(hex_colors: list[str]) -> np.ndarray:
@@ -326,6 +329,19 @@ def _expand_footprint(model: dict, mask: np.ndarray, rgb_image: np.ndarray) -> n
     labels, _ = ndi.label(match)                 # 4-connectivity by default
     keep = set(labels[mask].tolist()) - {0}      # components overlapping the band mask
     return np.isin(labels, list(keep))
+
+
+def _dominant_blob_fraction(mask: np.ndarray) -> float:
+    """Fraction of the foreground occupied by its largest connected component
+    (4-connectivity). 1.0 = one solid blob; ~0 = many disconnected pieces; 0.0 if empty."""
+    total = int(mask.sum())
+    if total == 0:
+        return 0.0
+    labels, n = ndi.label(mask)
+    if n == 0:
+        return 0.0
+    sizes = np.bincount(labels.ravel())[1:]       # drop background label 0
+    return float(sizes.max()) / total
 
 
 def detect_gradients(
