@@ -185,3 +185,21 @@ def test_detect_gradients_consumes_ramp_returns_remaining():
     assert len(fills) == 1                               # the ramp became one gradient fill
     assert fills[0][1]["kind"] == "linear"
     assert {r.label for r in remaining} == {5}           # the flat green block remains
+
+
+def test_expand_footprint_bounds_to_contiguous_region():
+    from vectormark.gradient import _expand_footprint
+    h, w = 40, 120
+    # horizontal linear model the image matches everywhere EXCEPT a non-matching black gap
+    model = {"kind": "linear", "geometry": {"x1": 0.0, "y1": 20.0, "x2": 119.0, "y2": 20.0},
+             "stops": [(0.0, "#2563eb"), (1.0, "#db2777")]}
+    ys, xs = np.mgrid[:h, :w]
+    from vectormark.gradient import _model_t, _interp_stops_rgb
+    pts = np.column_stack([xs.ravel(), ys.ravel()]).astype(float)
+    img = _interp_stops_rgb(_model_t(model, pts), model["stops"]).reshape(h, w, 3).round().astype(np.uint8)
+    img[:, 60:71] = (0, 0, 0)                       # non-matching black gap breaks contiguity
+    mask = np.zeros((h, w), bool); mask[:, 0:50] = True   # surviving bands (left of the gap)
+    expanded = _expand_footprint(model, mask, img)
+    assert expanded[:, 50:60].all()                # contiguous matching strip recovered
+    assert not expanded[:, 71:].any()              # matching pixels PAST the gap stay out (bounded)
+    assert not expanded[:, 60:71].any()            # the black gap itself is never absorbed

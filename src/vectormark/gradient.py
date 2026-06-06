@@ -7,6 +7,7 @@ docs/superpowers/specs/2026-06-06-gradient-handling-design.md)."""
 from __future__ import annotations
 
 import numpy as np
+from scipy import ndimage as ndi
 
 from .color import srgb_to_oklab
 from .occlusion import region_adjacency
@@ -136,7 +137,7 @@ def _rgb_to_hex(rgb: np.ndarray) -> str:
     return f"#{r:02x}{g:02x}{b:02x}"
 
 
-def _fit_stops(t: np.ndarray, rgb: np.ndarray, k: int = 5) -> list[tuple[float, str]]:
+def _fit_stops(t: np.ndarray, rgb: np.ndarray, k: int = 7) -> list[tuple[float, str]]:
     """Sample k evenly-spaced stops; each stop colour = median original RGB of pixels
     in its t-neighbourhood. `t` in [0,1], `rgb` is (N,3) uint8-ish."""
     edges = np.linspace(0.0, 1.0, k)
@@ -266,16 +267,18 @@ def _model_t(model: dict, pts: np.ndarray) -> np.ndarray:
     return r.clip(0, 1)
 
 
+def _per_pixel_delta_e(model: dict, ys: np.ndarray, xs: np.ndarray, rgb_image: np.ndarray) -> np.ndarray:
+    """Per-pixel OKLab ΔE between the model's rendered colour and the actual pixel at (ys, xs)."""
+    pts = np.column_stack([xs, ys]).astype(float)
+    rendered = _interp_stops_rgb(_model_t(model, pts), model["stops"])
+    truth = rgb_image[ys, xs].astype(float)
+    return np.linalg.norm(srgb_to_oklab(rendered / 255.0) - srgb_to_oklab(truth / 255.0), axis=1)
+
+
 def _agreement_delta_e(model: dict, mask: np.ndarray, rgb_image: np.ndarray) -> float:
     """Mean OKLab ΔE between the rendered model and the original over the footprint."""
     ys, xs = np.where(mask)
-    pts = np.column_stack([xs, ys]).astype(float)
-    t = _model_t(model, pts)
-    rendered = _interp_stops_rgb(t, model["stops"])
-    truth = rgb_image[ys, xs].astype(float)
-    la = srgb_to_oklab(rendered / 255.0)
-    lb = srgb_to_oklab(truth / 255.0)
-    return float(np.linalg.norm(la - lb, axis=1).mean())
+    return float(_per_pixel_delta_e(model, ys, xs, rgb_image).mean())
 
 
 def fit_gradient(mask: np.ndarray, rgb_image: np.ndarray) -> dict | None:
@@ -298,6 +301,33 @@ def fit_gradient(mask: np.ndarray, rgb_image: np.ndarray) -> dict | None:
     return best[1] if best is not None else None
 
 
+def _expand_footprint(model: dict, mask: np.ndarray, rgb_image: np.ndarray) -> np.ndarray:
+    """Grow `mask` to include pixels outside it whose model-predicted colour matches
+    the actual pixel within _GATE_DELTA_E. This recovers pixels that were classified
+    as 'background' by the segmenter but are genuinely part of the gradient (the
+    most-common border colour is sometimes the end of a full-canvas gradient rather
+    than a neutral plate).
+
+    Absorption is bounded to the connected component(s) of matching pixels that touch
+    the original band mask, so a disconnected same-colour patch elsewhere is never
+    swallowed. (A degenerate full-canvas gradient whose endpoint stop ≈ the page
+    colour can still bridge across the page — but the render stays correct because
+    only model-matching pixels are absorbed.)"""
+    outside = ~mask
+    if not outside.any():
+        return mask
+    oy, ox = np.where(outside)
+    per_pixel_de = _per_pixel_delta_e(model, oy, ox, rgb_image)
+    good = per_pixel_de <= _GATE_DELTA_E
+    if not good.any():
+        return mask
+    match = mask.copy()
+    match[oy[good], ox[good]] = True
+    labels, _ = ndi.label(match)                 # 4-connectivity by default
+    keep = set(labels[mask].tolist()) - {0}      # components overlapping the band mask
+    return np.isin(labels, list(keep))
+
+
 def detect_gradients(
     regions: list[Region], rgb_image: np.ndarray
 ) -> tuple[list[tuple[Region, dict]], list[Region]]:
@@ -312,6 +342,7 @@ def detect_gradients(
         model = fit_gradient(mask, rgb_image)
         if model is None:
             continue                                   # dissolve back into flat bands
+        mask = _expand_footprint(model, mask, rgb_image)
         rep = max(group, key=lambda r: r.area)
         footprint = Region(label=rep.label, mask=mask, color_hex=rep.color_hex)
         fills.append((footprint, model))

@@ -277,10 +277,12 @@ def _render_body(
 
     # gradient-filled footprints: fit the outline with the normal recognizers, emit
     # with fill="url(#gN)" and register the gradient def. axis=None (gradient marks
-    # aren't force-mirrored in this cut). Emitted after all flats/occlusion prims:
-    # segmentation regions are spatially disjoint so paint order is immaterial here;
-    # true behind-a-flat layering of an idealized gradient footprint is out of scope
-    # in this cut.
+    # aren't force-mirrored in this cut). Emitted after all flats/occlusion prims.
+    # NOTE: _expand_footprint can grow a gradient footprint over former-background
+    # pixels, so the strict spatial-disjointness invariant no longer holds; distinct
+    # non-matching elements survive as even-odd holes / separate flats, so paint
+    # order remains safe in practice. True behind-a-flat layering of an idealized
+    # gradient footprint is out of scope in this cut.
     for footprint, model in gradient_fills:
         shape = _fit_region(footprint, opt, None, corner_radius)
         if shape is None:
