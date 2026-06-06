@@ -182,3 +182,133 @@ def test_reconstruct_scene_does_not_drop_members_of_larger_component():
     reconstructed, remaining = reconstruct_scene(regions, Axis(x=float(cx)), (H, W))
     assert reconstructed == []                              # non-canonical group declined
     assert {r.label for r in remaining} == {1, 2, 3, 4}     # nothing dropped
+
+
+# --- Task 2: label_boundary per-contour ---
+from vectormark.occlusion import label_boundary as _lb_contour_index  # noqa: E402
+
+
+def _ring_region(label, cx, cy, r_out, r_in, h=120, w=120, color="#3366cc"):
+    yy, xx = np.ogrid[:h, :w]
+    d2 = (xx - cx) ** 2 + (yy - cy) ** 2
+    mask = (d2 <= r_out ** 2) & (d2 >= r_in ** 2)
+    return Region(label, mask, color)
+
+
+def test_label_boundary_reads_inner_contour():
+    ring = _ring_region(1, 60, 60, 40, 22)
+    yy, xx = np.ogrid[:120, :120]
+    occ = Region(2, ((xx - 85) ** 2 + (yy - 75) ** 2) <= 30 ** 2, "#cc3333")
+    outer, outer_seam = _lb_contour_index(ring, [occ], contour_index=0)
+    inner, inner_seam = _lb_contour_index(ring, [occ], contour_index=1)
+    assert len(outer) > 0 and len(inner) > 0
+    assert outer_seam.any()        # the occluder reaches the outer rim
+    assert inner_seam.any()        # ...and the inner rim, only readable via contour_index=1
+
+
+# --- Task 3: _fit_circle ---
+from vectormark.occlusion import _fit_circle  # noqa: E402
+
+
+def test_fit_circle_recovers_full_circle():
+    th = np.linspace(0, 2 * np.pi, 200, endpoint=False)
+    contour = np.column_stack([50 + 30 * np.cos(th), 60 + 30 * np.sin(th)])
+    seam = np.zeros(len(contour), bool)
+    fit = _fit_circle(contour, seam, max_residual=1.6, min_arc_deg=110.0)
+    assert fit is not None
+    assert abs(fit["cx"] - 50) < 1 and abs(fit["cy"] - 60) < 1 and abs(fit["r"] - 30) < 1
+
+
+def test_fit_circle_rejects_short_arc():
+    th = np.linspace(0, 0.3, 40)            # ~17 deg, far below min_arc_deg
+    contour = np.column_stack([50 + 30 * np.cos(th), 60 + 30 * np.sin(th)])
+    seam = np.zeros(len(contour), bool)
+    assert _fit_circle(contour, seam, max_residual=1.6, min_arc_deg=110.0) is None
+
+
+# --- Task 4: primitive_mask annulus ---
+def test_primitive_mask_annulus():
+    prim = {"kind": "annulus", "params": {"cx": 60, "cy": 60, "r_outer": 40, "r_inner": 22}}
+    m = primitive_mask(prim, 120, 120)
+    assert not m[60, 60]            # hole
+    assert m[60, 60 - 31]          # on the band (31 px out, between 22 and 40)
+    assert not m[60, 60 - 50]      # outside the outer radius
+
+
+# --- Task 5: complete_annulus ---
+from vectormark.occlusion import complete_annulus  # noqa: E402
+
+
+def _occluded_ring(h=160, w=200):
+    # a ring whose right OUTER rim is clipped by a big disk sitting mostly outside it:
+    # the disk stops short of the inner radius (so the hole stays enclosed and the ring
+    # keeps its outer+hole contours) yet borders enough background to complete as a
+    # circle itself.
+    yy, xx = np.ogrid[:h, :w]
+    d2 = (xx - 70) ** 2 + (yy - 70) ** 2
+    ring = (d2 <= 45 ** 2) & (d2 >= 25 ** 2)
+    occ = ((xx - 135) ** 2 + (yy - 70) ** 2) <= 38 ** 2
+    return Region(1, ring & ~occ, "#3366cc"), Region(2, occ, "#cc3333")
+
+
+def test_complete_annulus_recovers_ring():
+    ring, occ = _occluded_ring()
+    prim = complete_annulus(ring, [occ], max_residual=1.6, min_arc_deg=110.0, concentric_tol=2.0)
+    assert prim is not None and prim["kind"] == "annulus"
+    p = prim["params"]
+    assert abs(p["cx"] - 70) < 2 and abs(p["cy"] - 70) < 2
+    assert abs(p["r_outer"] - 45) < 2 and abs(p["r_inner"] - 25) < 2
+
+
+def test_complete_annulus_rejects_solid_disk():
+    yy, xx = np.ogrid[:120, :120]
+    disk = Region(1, ((xx - 60) ** 2 + (yy - 60) ** 2) <= 40 ** 2, "#3366cc")
+    assert complete_annulus(disk, [], max_residual=1.6, min_arc_deg=110.0, concentric_tol=2.0) is None
+
+
+# --- Task 6: pairwise over/under + topological order ---
+from vectormark.occlusion import _pair_constraint, _topo_order  # noqa: E402
+
+
+def test_pair_constraint_from_overlap_ownership():
+    h = w = 140
+    yy, xx = np.ogrid[:h, :w]
+    ring_full = ((xx - 70) ** 2 + (yy - 70) ** 2 <= 45 ** 2) & ((xx - 70) ** 2 + (yy - 70) ** 2 >= 25 ** 2)
+    disk_full = (xx - 105) ** 2 + (yy - 70) ** 2 <= 28 ** 2
+    ring_vis = Region(1, ring_full & ~disk_full, "#3366cc")   # ring loses the overlap
+    disk_vis = Region(2, disk_full, "#cc3333")                # disk keeps it (on top)
+    ring_prim = {"kind": "annulus", "params": {"cx": 70, "cy": 70, "r_outer": 45, "r_inner": 25}}
+    disk_prim = {"kind": "circle", "params": {"cx": 105, "cy": 70, "r": 28}}
+    assert _pair_constraint(ring_prim, ring_vis, disk_prim, disk_vis, h, w) == "j_over_i"
+
+
+def test_topo_order_linear_and_cycle():
+    assert _topo_order(3, [(0, 1), (1, 2)]) == [0, 1, 2]      # 0 under 1 under 2
+    assert _topo_order(3, [(0, 1), (1, 2), (2, 0)]) is None   # cycle -> decline
+
+
+# --- Task 7: N-shape reconstruct_scene ---
+def test_reconstruct_ring_plus_disk():
+    ring, occ = _occluded_ring()
+    reconstructed, remaining = reconstruct_scene([ring, occ], None, (160, 200))
+    kinds = sorted(p.kind for p in reconstructed if hasattr(p, "kind"))
+    assert kinds == ["annulus", "circle"]
+    assert remaining == []                       # both consumed
+
+
+def test_reconstruct_declines_weave():
+    # three mutually-interlocked rings whose overlap ownership is cyclic. Construct it
+    # exactly: each ring keeps everything EXCEPT where the NEXT ring overlaps it
+    # (A loses to C, B loses to A, C loses to B) -> A-over-B, B-over-C, C-over-A.
+    h = w = 180
+    yy, xx = np.ogrid[:h, :w]
+    def ring(cx, cy):
+        d2 = (xx - cx) ** 2 + (yy - cy) ** 2
+        return (d2 <= 40 ** 2) & (d2 >= 24 ** 2)
+    a, b, c = ring(75, 75), ring(110, 75), ring(92, 110)
+    regions = [Region(1, a & ~c, "#1111ee"),
+               Region(2, b & ~a, "#eeee11"),
+               Region(3, c & ~b, "#11aa11")]
+    reconstructed, remaining = reconstruct_scene(regions, None, (h, w))
+    assert reconstructed == []                    # cyclic -> declined
+    assert len(remaining) == 3

@@ -7,7 +7,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 import numpy as np
-from scipy.ndimage import binary_dilation
+from scipy.ndimage import binary_dilation, binary_erosion
 from skimage.measure import CircleModel, EllipseModel
 from skimage.morphology import convex_hull_image
 
@@ -19,7 +19,7 @@ from .types import Axis, Region
 @dataclass
 class ScenePrimitive:
     """A completed shape that may be partially occluded by higher-z primitives."""
-    kind: str                 # "circle" | "ellipse"
+    kind: str                 # "circle" | "ellipse" | "annulus"
     params: dict
     color_hex: str
     z: int
@@ -36,14 +36,15 @@ def has_bite(mask: np.ndarray, *, max_solidity: float = 0.92) -> bool:
 
 
 def label_boundary(
-    region: Region, others: list[Region], *, reach: int = 2
+    region: Region, others: list[Region], *, reach: int = 2, contour_index: int = 0
 ) -> tuple[np.ndarray, np.ndarray]:
-    """Return (outer_contour Nx2 as (x,y), seam_bool N). A contour point is a seam
-    if any OTHER region's mask sits within `reach` px of it; else it is own boundary."""
+    """Return (contour Nx2 as (x,y), seam_bool N) for the region's `contour_index`-th
+    contour (0 = outer boundary, 1 = largest hole, ...). A contour point is a seam if
+    any OTHER region's mask sits within `reach` px of it; else it is own boundary."""
     contours = region_contours(region.mask)
-    if not contours:
+    if contour_index >= len(contours):
         return np.empty((0, 2)), np.empty((0,), bool)
-    contour = contours[0]
+    contour = contours[contour_index]
     if not others:
         return contour, np.zeros(len(contour), bool)
     near = np.zeros_like(region.mask)
@@ -91,6 +92,27 @@ def _fit_candidate_pts(own: np.ndarray) -> np.ndarray:
         return own
 
 
+def _fit_circle(
+    contour: np.ndarray, seam: np.ndarray, *, max_residual: float, min_arc_deg: float
+) -> dict | None:
+    """Fit a circle to the own-boundary points (convex hull, to drop concave inner
+    arcs). Returns {"cx","cy","r"} or None if too few points, residual too large, or
+    the own arc spans less than `min_arc_deg`."""
+    own = np.asarray(contour, float)[~seam]
+    if len(own) < 8:
+        return None
+    fit_pts = _fit_candidate_pts(own)
+    if len(fit_pts) < 8:
+        return None
+    cm = CircleModel.from_estimate(fit_pts)
+    if not cm or np.abs(cm.residuals(fit_pts)).max() > max_residual:
+        return None
+    cx, cy = float(cm.center[0]), float(cm.center[1])
+    if _own_arc_span_deg(fit_pts, cx, cy) < min_arc_deg:
+        return None
+    return {"cx": cx, "cy": cy, "r": float(cm.radius)}
+
+
 def complete_primitive(
     contour: np.ndarray, seam: np.ndarray, *, max_residual: float, min_arc_deg: float
 ) -> dict | None:
@@ -106,16 +128,15 @@ def complete_primitive(
     fit_pts = _fit_candidate_pts(own)
     if len(fit_pts) < 8:
         return None
-    cm = CircleModel.from_estimate(fit_pts)
-    if cm and np.abs(cm.residuals(fit_pts)).max() <= max_residual:
-        cx, cy = float(cm.center[0]), float(cm.center[1])
-        if _own_arc_span_deg(fit_pts, cx, cy) >= min_arc_deg:
-            seam_pts = np.asarray(contour, float)[seam]
-            inside = len(seam_pts) == 0 or np.all(
-                (seam_pts[:, 0] - cx) ** 2 + (seam_pts[:, 1] - cy) ** 2 <= (cm.radius + max_residual) ** 2
-            )
-            if inside:
-                return {"kind": "circle", "params": {"cx": cx, "cy": cy, "r": float(cm.radius)}}
+    circ = _fit_circle(contour, seam, max_residual=max_residual, min_arc_deg=min_arc_deg)
+    if circ is not None:
+        cx, cy = circ["cx"], circ["cy"]
+        seam_pts = np.asarray(contour, float)[seam]
+        inside = len(seam_pts) == 0 or np.all(
+            (seam_pts[:, 0] - cx) ** 2 + (seam_pts[:, 1] - cy) ** 2 <= (circ["r"] + max_residual) ** 2
+        )
+        if inside:
+            return {"kind": "circle", "params": {"cx": cx, "cy": cy, "r": circ["r"]}}
     em = EllipseModel.from_estimate(fit_pts)
     if em and np.abs(em.residuals(fit_pts)).max() <= max_residual:
         xc, yc = float(em.center[0]), float(em.center[1])
@@ -124,6 +145,40 @@ def complete_primitive(
             if _own_arc_span_deg(fit_pts, xc, yc) >= min_arc_deg:
                 return {"kind": "ellipse", "params": {"cx": xc, "cy": yc, "rx": a, "ry": b}}
     return None
+
+
+def complete_annulus(
+    region: Region, others: list[Region], *, max_residual: float, min_arc_deg: float,
+    concentric_tol: float,
+) -> dict | None:
+    """Fit an annulus (two concentric circles) from a ring fragment's outer and inner
+    own arcs. Returns {"kind":"annulus","params":{cx,cy,r_outer,r_inner}} or None when
+    the region has no hole, either circle can't be fit, the radii don't nest, or the
+    centres aren't concentric within `concentric_tol`."""
+    if len(region_contours(region.mask)) < 2:
+        return None                                       # no hole -> not a ring
+    outer_c, outer_seam = label_boundary(region, others, contour_index=0)
+    inner_c, inner_seam = label_boundary(region, others, contour_index=1)
+    outer = _fit_circle(outer_c, outer_seam, max_residual=max_residual, min_arc_deg=min_arc_deg)
+    inner = _fit_circle(inner_c, inner_seam, max_residual=max_residual, min_arc_deg=min_arc_deg)
+    if outer is None or inner is None or inner["r"] >= outer["r"]:
+        return None
+    if np.hypot(outer["cx"] - inner["cx"], outer["cy"] - inner["cy"]) > concentric_tol:
+        return None
+    cx = (outer["cx"] + inner["cx"]) / 2
+    cy = (outer["cy"] + inner["cy"]) / 2
+    return {"kind": "annulus",
+            "params": {"cx": cx, "cy": cy, "r_outer": outer["r"], "r_inner": inner["r"]}}
+
+
+def _complete_member(region: Region, others: list[Region]) -> dict | None:
+    """Complete a group member as an annulus if it has a hole, else as a circle/ellipse."""
+    ann = complete_annulus(region, others, max_residual=_MAX_RESIDUAL,
+                           min_arc_deg=_MIN_ARC_DEG, concentric_tol=_CONCENTRIC_TOL)
+    if ann is not None:
+        return ann
+    contour, seam = label_boundary(region, others)
+    return complete_primitive(contour, seam, max_residual=_MAX_RESIDUAL, min_arc_deg=_MIN_ARC_DEG)
 
 
 def intersection_lens_d(a: dict, b: dict) -> str | None:
@@ -159,6 +214,9 @@ def primitive_mask(prim: dict, h: int, w: int) -> np.ndarray:
     p = prim["params"]
     if prim["kind"] == "circle":
         return (xx - p["cx"]) ** 2 + (yy - p["cy"]) ** 2 <= p["r"] ** 2
+    if prim["kind"] == "annulus":
+        d2 = (xx - p["cx"]) ** 2 + (yy - p["cy"]) ** 2
+        return (d2 <= p["r_outer"] ** 2) & (d2 >= p["r_inner"] ** 2)
     return ((xx - p["cx"]) / p["rx"]) ** 2 + ((yy - p["cy"]) / p["ry"]) ** 2 <= 1.0
 
 
@@ -186,12 +244,61 @@ def stack_agreement(prims, lens, regions: list[Region], h: int, w: int) -> float
     compare_mask = region_union | painted_any
     if not compare_mask.any():
         return 0.0
-    return float((painted[compare_mask] == truth[compare_mask]).mean())
+    # Tolerate a 1px boundary shell: sub-pixel fit error shows up as a thin ring of
+    # disagreement (worst on thin annulus bands, where it can reach several percent).
+    # Erode the disagreement so only thick — genuinely wrong — mismatches count; a
+    # wrong reconstruction (filled hole, wrong radius) still scores far below the bar.
+    disagree = compare_mask & (painted != truth)
+    core = binary_erosion(disagree, iterations=1)
+    return 1.0 - float(core.sum()) / float(compare_mask.sum())
 
 
 _MAX_RESIDUAL = 1.6
 _MIN_ARC_DEG = 110.0
-_GATE_AGREEMENT = 0.97
+# With the 1px-boundary-tolerant gate, correct reconstructions score ~0.97–1.0 and a
+# wrong one (filled hole, wrong radius) ~0.7, so 0.96 separates them with wide margin.
+_GATE_AGREEMENT = 0.96
+_CONCENTRIC_TOL = 2.0
+_MIN_OVERLAP_PX = 12
+_OVERLAP_OWNERSHIP = 0.5
+
+
+def _pair_constraint(
+    prim_i: dict, region_i: Region, prim_j: dict, region_j: Region, h: int, w: int
+) -> str | None:
+    """Over/under for an overlapping pair, from which region owns the overlap zone in
+    the raster: the colour that survives where the two completed shapes overlap is the
+    one on top. Returns "i_over_j", "j_over_i", or None (no real overlap, or a
+    distinct-coloured intersection owned by neither — e.g. a Mastercard lens)."""
+    overlap = primitive_mask(prim_i, h, w) & primitive_mask(prim_j, h, w)
+    n = int(overlap.sum())
+    if n < _MIN_OVERLAP_PX:
+        return None
+    in_i = int((overlap & region_i.mask).sum())
+    in_j = int((overlap & region_j.mask).sum())
+    if max(in_i, in_j) < _OVERLAP_OWNERSHIP * n or in_i == in_j:
+        return None
+    return "i_over_j" if in_i > in_j else "j_over_i"
+
+
+def _topo_order(n: int, edges: list[tuple[int, int]]) -> list[int] | None:
+    """Kahn topological sort. `edges` are (under, over): under is painted first.
+    Returns a paint order (z = position), or None if the constraints are cyclic."""
+    adj: dict[int, list[int]] = {i: [] for i in range(n)}
+    indeg = [0] * n
+    for u, v in edges:
+        adj[u].append(v)
+        indeg[v] += 1
+    queue = [i for i in range(n) if indeg[i] == 0]
+    order: list[int] = []
+    while queue:
+        node = queue.pop()
+        order.append(node)
+        for m in adj[node]:
+            indeg[m] -= 1
+            if indeg[m] == 0:
+                queue.append(m)
+    return order if len(order) == n else None
 
 
 def _snap_pair(p_left: dict, p_right: dict, axis_x: float) -> tuple[dict, dict]:
@@ -209,7 +316,8 @@ def reconstruct_scene(
 ) -> tuple[list, list[Region]]:
     """Return (reconstructed, remaining). `reconstructed` mixes ScenePrimitive and
     lens Shape objects in paint order; `remaining` are regions to fit the old way.
-    Only adjacent groups that pass the consistency gate are reconstructed."""
+    Only adjacent groups that complete, admit a global paint order, and pass the
+    consistency gate are reconstructed."""
     h, w = shape_hw
     by_label = {r.label: r for r in regions}
     adj = region_adjacency(regions)
@@ -219,7 +327,6 @@ def reconstruct_scene(
     for r in regions:
         if r.label in consumed or not has_bite(r.mask):
             continue
-        # transitive connected component (crescents touch only through the lens)
         group: set[int] = set()
         stack = [r.label]
         while stack:
@@ -234,54 +341,66 @@ def reconstruct_scene(
 
         completed: list[tuple[Region, dict]] = []
         for gr in group_regions:
-            if not has_bite(gr.mask):
-                continue
             others = [o for o in group_regions if o.label != gr.label]
-            contour, seam = label_boundary(gr, others)
-            prim = complete_primitive(contour, seam, max_residual=_MAX_RESIDUAL, min_arc_deg=_MIN_ARC_DEG)
+            prim = _complete_member(gr, others)
             if prim is not None:
                 completed.append((gr, prim))
-        if len(completed) != 2:
-            continue                                      # v1 handles the two-disk case
-
-        (ra, pa), (rb, pb) = completed
-        # v1 scope: a clean two-disk overlap is EXACTLY the two crescents plus at most
-        # one lens (the distinct-coloured intersection). A larger connected component
-        # (chains, 3+ overlaps) is out of scope — decline rather than risk dropping a
-        # member or mis-picking the lens. (z-order between the two disks needs no
-        # disambiguation here: when a distinct-coloured lens exists it is painted on
-        # top and covers the intersection, so disk paint-order is moot; equal-coloured
-        # overlaps merge into one region upstream and never reach this two-crescent path.)
-        non_completed = [g for g in group_regions if g.label not in {ra.label, rb.label}]
-        if len(non_completed) > 1:
+        if len(completed) < 2:
             continue
-        if pa["params"]["cx"] > pb["params"]["cx"]:
-            (ra, pa), (rb, pb) = (rb, pb), (ra, pa)
-        if axis is not None and pa["kind"] == pb["kind"] == "circle":
-            snapped_l, snapped_r = _snap_pair(pa, pb, axis.x)
-            pa["params"], pb["params"] = snapped_l["params"], snapped_r["params"]
+
+        reg_list = [cr for cr, _ in completed]
+        prim_list = [p for _, p in completed]
+        completed_labels = {cr.label for cr in reg_list}
+        leftover = [gr for gr in group_regions if gr.label not in completed_labels]
+
+        # global paint order from pairwise overlap ownership
+        edges: list[tuple[int, int]] = []
+        for i in range(len(completed)):
+            for j in range(i + 1, len(completed)):
+                cons = _pair_constraint(prim_list[i], reg_list[i], prim_list[j], reg_list[j], h, w)
+                if cons == "i_over_j":
+                    edges.append((j, i))          # under=j, over=i
+                elif cons == "j_over_i":
+                    edges.append((i, j))
+        order = _topo_order(len(completed), edges)
+        if order is None:
+            continue                              # cyclic -> weave -> decline
+        z_of = {idx: k for k, idx in enumerate(order)}
 
         prims = [
-            {"kind": pa["kind"], "params": pa["params"], "color": ra.color_hex, "z": 0},
-            {"kind": pb["kind"], "params": pb["params"], "color": rb.color_hex, "z": 1},
+            {"kind": prim_list[i]["kind"], "params": prim_list[i]["params"],
+             "color": reg_list[i].color_hex, "z": z_of[i]}
+            for i in range(len(completed))
         ]
-        lens_region = non_completed[0] if non_completed else None
+
+        # Mastercard: exactly two circles + one distinct-coloured lens -> snap + lens.
+        # Snap first (it moves the circles), then derive the lens path; only treat the
+        # leftover as a lens if that path is real, so we never consume a region we can't
+        # emit (degenerate / non-overlapping circles fall through and the gate decides).
         lens = None
-        if lens_region is not None and pa["kind"] == pb["kind"] == "circle":
-            lens = {"mask_color": lens_region.color_hex, "lens_of": (0, 1)}
+        lens_region = None
+        lens_d = None
+        if (len(completed) == 2 and prim_list[0]["kind"] == prim_list[1]["kind"] == "circle"
+                and len(leftover) == 1):
+            if axis is not None:
+                lo, hi = (0, 1) if prim_list[0]["params"]["cx"] <= prim_list[1]["params"]["cx"] else (1, 0)
+                sl, sr = _snap_pair(prim_list[lo], prim_list[hi], axis.x)
+                prims[lo]["params"] = sl["params"]
+                prims[hi]["params"] = sr["params"]
+            lens_d = intersection_lens_d(prims[0]["params"], prims[1]["params"])
+            if lens_d is not None:
+                lens_region = leftover[0]
+                lens = {"mask_color": lens_region.color_hex, "lens_of": (0, 1)}
 
         if stack_agreement(prims, lens, group_regions, h, w) < _GATE_AGREEMENT:
-            continue                                      # reject -> regions stay in `remaining`
+            continue
 
-        reconstructed.append(ScenePrimitive(pa["kind"], pa["params"], ra.color_hex, 0))
-        reconstructed.append(ScenePrimitive(pb["kind"], pb["params"], rb.color_hex, 1))
+        for p in sorted(prims, key=lambda p: p["z"]):
+            reconstructed.append(ScenePrimitive(p["kind"], p["params"], p["color"], p["z"]))
         if lens is not None:
-            d = intersection_lens_d(pa["params"], pb["params"])
-            if d is not None:
-                reconstructed.append(Shape("path", {"d": d, "color_hex": lens_region.color_hex, "z": 2}))
-        # consume ONLY what was reconstructed (the guard guarantees the group has no
-        # other members, but be explicit so a stale group can never drop a region)
-        consumed.update({ra.label, rb.label})
+            reconstructed.append(Shape("path", {"d": lens_d, "color_hex": lens["mask_color"],
+                                                "z": len(prims)}))
+        consumed.update(completed_labels)
         if lens_region is not None:
             consumed.add(lens_region.label)
 

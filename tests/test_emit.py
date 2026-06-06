@@ -1,8 +1,11 @@
 import re
 
+import numpy as np
+
 from vectormark.fit import Shape
 from vectormark.types import Axis
-from vectormark.emit import shape_to_svg, mirror_use, render_svg_doc
+from vectormark.emit import shape_to_svg, shape_to_path_d, mirror_use, render_svg_doc
+from tests._render import render_svg
 
 
 def test_rect_shape_emits_native_rect():
@@ -47,3 +50,23 @@ def test_reflect_path_d_mirrors_x_about_axis():
     nums = [float(t) for t in re.findall(r"-?\d+\.?\d*", out)]
     assert nums[0] == 10 and nums[1] == 0      # first point x mirrored, y same
     assert nums[2] == 0 and nums[3] == 0       # second point
+
+
+def _annulus_shape():
+    return Shape("annulus", {"cx": 60.0, "cy": 60.0, "r_outer": 40.0, "r_inner": 22.0})
+
+
+def test_annulus_svg_is_evenodd_path():
+    svg = shape_to_svg(_annulus_shape(), "#3366cc", "s0")
+    assert "<path" in svg and 'fill-rule="evenodd"' in svg
+    # two subpaths (outer + inner): two move commands
+    assert svg.count("M") == 2
+
+
+def test_annulus_renders_hollow_center():
+    d = shape_to_path_d(_annulus_shape())
+    svg = (f'<svg xmlns="http://www.w3.org/2000/svg" width="120" height="120">'
+           f'<path fill="#000" fill-rule="evenodd" d="{d}"/></svg>')
+    img = render_svg(svg, 120, 120)
+    assert tuple(img[60, 60]) == (255, 255, 255)   # center is the hole -> white
+    assert tuple(img[60, 26]) == (0, 0, 0)         # on the ring band -> black

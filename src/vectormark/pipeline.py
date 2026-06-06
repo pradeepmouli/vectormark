@@ -227,7 +227,10 @@ def _render_body(
         if isinstance(elem, ScenePrimitive):
             shape = Shape(elem.kind, dict(elem.params))
             if opt.flatten:
-                body.append(emit(shape_to_path_d(shape), elem.color_hex))
+                # an annulus is two same-winding circles: it only reads as a ring
+                # under even-odd fill, so carry that rule onto the baked path too.
+                rule = "evenodd" if elem.kind == "annulus" else None
+                body.append(emit(shape_to_path_d(shape), elem.color_hex, rule))
             else:
                 body.append(shape_to_svg(shape, elem.color_hex, f"s{eid}"))
         else:  # lens Shape("path", {"d", "color_hex", "z"})
