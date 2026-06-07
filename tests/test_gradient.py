@@ -293,3 +293,29 @@ def test_detect_gradients_smooth_rejects_flat_blob():
     regions = [Region(label=1, mask=np.ones((h, w), bool), color_hex="#2878c8")]
     fills, remaining = detect_gradients(regions, img)
     assert fills == [] and {r.label for r in remaining} == {1}   # fit_gradient -> None
+
+
+def test_fit_gradient_rejects_near_flat_region():
+    # a near-flat red region with only a faint ~2-level tint (like a real flat logo's
+    # antialiasing/compression noise): its fitted stops barely travel, so it must NOT be
+    # emitted as a near-constant gradient (regression for Pinterest/Vimeo over-detection).
+    from vectormark.gradient import fit_gradient
+    h, w = 60, 60
+    img = np.empty((h, w, 3))
+    t = np.linspace(0.0, 1.0, w)
+    for ch, (a, b) in enumerate(((189, 191), (8, 10), (28, 30))):   # #BD081C +/- ~2 levels
+        img[:, :, ch] = a + t * (b - a)
+    img = img.round().astype(np.uint8)
+    assert fit_gradient(np.ones((h, w), bool), img) is None         # span below _MIN_STOP_SPAN
+
+
+def test_fit_gradient_accepts_traveling_gradient():
+    from vectormark.gradient import fit_gradient
+    h, w = 60, 120
+    img = np.empty((h, w, 3))
+    t = np.linspace(0.0, 1.0, w)
+    for ch, (a, b) in enumerate(((37, 219), (99, 39), (235, 119))):  # blue -> magenta
+        img[:, :, ch] = a + t * (b - a)
+    img = img.round().astype(np.uint8)
+    model = fit_gradient(np.ones((h, w), bool), img)
+    assert model is not None and model["kind"] == "linear"          # real travel: still fires

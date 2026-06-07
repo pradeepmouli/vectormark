@@ -16,6 +16,9 @@ from .types import Region
 _MIN_BANDS = 3
 _RAMP_TOL = 0.06          # max OKLab distance of a band colour from the fitted ramp line
 _GATE_DELTA_E = 0.05      # mean OKLab ΔE bar: a fitted model must re-render within this to be accepted
+_MIN_STOP_SPAN = 0.02    # OKLab end-to-end travel a fit must show to count as a gradient;
+                         # rejects flat regions whose antialiasing noise fits a near-constant
+                         # gradient (genuine gradients span >=0.039, flat-with-AA spans ~0).
 _BLOB_DOMINANCE = 0.85   # smooth-gradient path: min fraction of the foreground that must lie
                          # in a single connected component for the mark to be treated as one
                          # gradient blob (rejects multi-glyph wordmarks before any fit).
@@ -159,6 +162,13 @@ def _stop_colors_oklab(stops: list[tuple[float, str]]) -> np.ndarray:
     return _hex_to_oklab([c for _, c in stops])
 
 
+def _stop_span(stops: list[tuple[float, str]]) -> float:
+    """OKLab distance between the first and last stop colours: how far the gradient travels
+    end to end. ~0 for a flat region fit as a near-constant gradient."""
+    cols = _stop_colors_oklab(stops)
+    return float(np.linalg.norm(cols[0] - cols[-1]))
+
+
 def _reduce_stops(stops: list[tuple[float, str]], *, max_delta_e: float) -> list[tuple[float, str]]:
     """Greedily drop interior stops whose removal keeps the piecewise-linear (in OKLab)
     reconstruction within max_delta_e of the full stop set."""
@@ -299,6 +309,8 @@ def fit_gradient(mask: np.ndarray, rgb_image: np.ndarray) -> dict | None:
         model = fit(pts, oklab, rgb)
         if model is None:
             continue
+        if _stop_span(model["stops"]) < _MIN_STOP_SPAN:
+            continue                       # near-constant: a flat region, not a gradient
         de = _agreement_delta_e(model, mask, rgb_image)
         if de <= _GATE_DELTA_E and (best is None or de < best[0]):
             best = (de, model)
