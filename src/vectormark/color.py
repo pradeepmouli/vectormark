@@ -53,28 +53,77 @@ def extract_palette(
     rgb_image: np.ndarray, *, max_colors: int = 16, merge_de: float = 0.045,
     min_fraction: float = 0.002,
 ) -> np.ndarray:
-    """Greedy frequency-ordered palette in OKLab; skips AA blends.
+    """Perceptual-clustering palette in OKLab.
 
-    Returns an (N, 3) uint8 array of true palette colours.
+    Clusters near-identical shades *before* applying the frequency floor, so a
+    colour dispersed across many antialiased shades (a thin/small mark) is kept
+    by its aggregate weight instead of dropped per-shade. Each cluster's
+    representative is its most-frequent member — a real colour, never a centroid.
+
+    Returns an (N, 3) uint8 array, frequency-ordered.
     """
-    flat = rgb_image.reshape(-1, 3)
-    colors, counts = np.unique(flat, axis=0, return_counts=True)
-    order = np.argsort(counts)[::-1]
-    colors, counts = colors[order], counts[order]
-    total = counts.sum()
-    lab = srgb_to_oklab(colors / 255.0)
+    flat = np.asarray(rgb_image, dtype=np.uint8).reshape(-1, 3)
+    total = len(flat)
+    if total == 0:
+        return np.empty((0, 3), dtype=np.uint8)
 
-    palette_idx: list[int] = []
-    for i in range(len(colors)):
-        if counts[i] < min_fraction * total:
-            break
-        if all(delta_e(lab[i], lab[j]) >= merge_de for j in palette_idx):
-            palette_idx.append(i)
-        if len(palette_idx) >= max_colors:
-            break
-    if not palette_idx and len(colors):
-        palette_idx = [0]   # fall back to the most frequent colour
-    return colors[palette_idx].astype(np.uint8)
+    # Distinct full-precision colours and their pixel counts.
+    colors, counts = np.unique(flat, axis=0, return_counts=True)
+
+    # Coarse 5-bit pre-bin (32 levels/channel) caps clustering input regardless
+    # of AA spread. Group full-precision colours by their bin.
+    color_bin = colors >> 3
+    bins, bin_inv = np.unique(color_bin, axis=0, return_inverse=True)
+    bin_inv = bin_inv.ravel()
+    nbins = len(bins)
+    bin_total = np.zeros(nbins, dtype=np.int64)
+    np.add.at(bin_total, bin_inv, counts)
+
+    # Representative per bin = most-frequent full-precision colour in that bin.
+    # Order colours by descending count, value-tiebroken for determinism; the
+    # first colour seen for each bin (in this order) is its representative.
+    order = np.lexsort((colors[:, 2], colors[:, 1], colors[:, 0], -counts))
+    sorted_bins = bin_inv[order]
+    uniq_bin, first_pos = np.unique(sorted_bins, return_index=True)
+    rep_color_idx = np.empty(nbins, dtype=np.int64)
+    rep_color_idx[uniq_bin] = order[first_pos]
+    rep_color = colors[rep_color_idx]                       # (nbins, 3) full precision
+    rep_lab = srgb_to_oklab(rep_color / 255.0)
+
+    # Greedy perceptual clustering over bins, in descending aggregate-count
+    # order (stable -> value-tiebroken via the value-sorted bin ids). The seed
+    # bin of each cluster is its most-frequent member -> the representative.
+    # A new cluster is only seeded by a bin whose own total meets the floor;
+    # sub-floor bins can only be absorbed into an existing cluster (AA shades).
+    # Trade-off: a colour whose *most-frequent* bin is still sub-floor (e.g. a
+    # hue smeared over many distant bins) is dropped — it has no dominant
+    # representative to anchor a cluster. Safe direction: a miss, not a false
+    # colour. See the spec's "Known limitation (from the seed-floor rule)".
+    b_order = np.argsort(-bin_total, kind="stable")
+    floor = min_fraction * total
+    cluster_lab: list[np.ndarray] = []
+    cluster_total: list[int] = []
+    cluster_bin: list[int] = []
+    for b in b_order:
+        placed = False
+        for k in range(len(cluster_lab)):
+            if delta_e(rep_lab[b], cluster_lab[k]) < merge_de:
+                cluster_total[k] += int(bin_total[b])
+                placed = True
+                break
+        if not placed and bin_total[b] >= floor:
+            cluster_lab.append(rep_lab[b])
+            cluster_total.append(int(bin_total[b]))
+            cluster_bin.append(int(b))
+
+    # Cap to max_colors, frequency-ordered.
+    if not cluster_total:
+        # All bins are sub-floor: fall back to the most-frequent bin.
+        fb = int(b_order[0])
+        return rep_color[fb:fb + 1].astype(np.uint8)
+    totals = np.array(cluster_total, dtype=np.int64)
+    keep = list(np.argsort(-totals, kind="stable")[:max_colors])
+    return rep_color[[cluster_bin[k] for k in keep]].astype(np.uint8)
 
 
 def mean_delta_e(a: np.ndarray, b: np.ndarray) -> float:
