@@ -1,0 +1,25 @@
+{
+  "name": "vectormark",
+  "owner": {
+    "name": "Pradeep Mouli",
+    "url": "https://github.com/pradeepmouli"
+  },
+  "metadata": {
+    "description": "Plugins for vectormark, the deterministic raster-logo to SVG idealizer.",
+    "version": "0.1.0"
+  },
+  "plugins": [
+    {
+      "name": "vectormark-logo-pipeline",
+      "description": "Generate a raster logo with a raster image-generation tool or model, then idealize it into a clean, symmetric, editable SVG via the vectormark CLI.",
+      "version": "0.1.0",
+      "author": {
+        "name": "Pradeep Mouli",
+        "email": "pradeepmouli@users.noreply.github.com"
+      },
+      "source": "./integrations/claude-plugin",
+      "category": "design",
+      "tags": ["logo", "svg", "raster-to-vector", "image-generation"]
+    }
+  ]
+}
