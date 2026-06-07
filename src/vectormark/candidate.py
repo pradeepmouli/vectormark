@@ -1,0 +1,47 @@
+"""The (geometry, fill) candidate seam: decouples shape/path detection from
+colour application. IO-free data (SVG emission stays in emit.py / pipeline.py)."""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+
+from .fit import Shape
+from .types import Axis
+
+
+@dataclass
+class FlatFill:
+    """A solid colour fill."""
+    hex: str
+
+
+@dataclass
+class LinearGradientFill:
+    """A linear gradient fill. `geometry` = {x1, y1, x2, y2} in the element's frame."""
+    geometry: dict
+    stops: list
+
+
+@dataclass
+class RadialGradientFill:
+    """A radial gradient fill. `geometry` = {cx, cy, r} in the element's frame."""
+    geometry: dict
+    stops: list
+
+
+Fill = FlatFill | LinearGradientFill | RadialGradientFill
+
+
+@dataclass
+class Candidate:
+    """One renderable element: a geometry paired with a fill.
+
+    `source` records the producing strategy ("occlusion" | "lens" | "region" |
+    "gradient") — provenance for later agent/user candidate selection, and the
+    discriminator for the one legacy emit quirk (lens = plain path, no id).
+    `mirror`, when set, means: emit the element AND its mirror twin about that axis.
+    """
+    geometry: Shape
+    fill: Fill
+    source: str
+    mirror: Axis | None = None
