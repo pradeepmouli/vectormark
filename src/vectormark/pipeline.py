@@ -11,8 +11,10 @@ from scipy import ndimage as ndi
 from .color import extract_palette, quantize
 from .contour import region_contours
 from .emit import (
+    linear_gradient_def,
     mirror_use,
     path_svg,
+    radial_gradient_def,
     reflect_path_d,
     render_svg_doc,
     shape_to_path_d,
@@ -20,6 +22,7 @@ from .emit import (
     transform_path_d,
 )
 from .fit import Shape, _fmt, fit_path, recognize_polygon, recognize_primitive
+from .gradient import detect_gradients
 from .occlusion import ScenePrimitive, reconstruct_scene
 from .refine import half_ellipse_cap_fit, rounded_trapezoid_fit, symmetric_fit, symmetric_polygon_fit
 from .segment import segment
@@ -196,8 +199,9 @@ Affine = tuple[float, float, float, float, float, float]
 
 
 def _render_body(
-    w: int, h: int, regions: list[Region], opt: Options, *, bake: Affine | None = None,
-) -> list[str]:
+    w: int, h: int, regions: list[Region], opt: Options, *,
+    bake: Affine | None = None, rgb: np.ndarray | None = None,
+) -> tuple[list[str], list[str]]:
     """Detect symmetry, reconstruct occlusion, fit and emit every region in
     z-order. Operates entirely in the frame of `regions` (which may be a rectified
     frame) so the caller can wrap the result in an inverse transform.
@@ -210,6 +214,14 @@ def _render_body(
     corner_radius = opt.corner_radius if opt.corner_radius is not None else _mark_corner_radius(regions, axis)
 
     reconstructed, regions = reconstruct_scene(regions, axis, (h, w))
+
+    # NOTE: silhouette/axis/corner_radius above are measured on the full pre-strip mark
+    # by design — one stable mark-wide fillet radius, independent of which bands the
+    # gradient pass consumes, applied uniformly to the remaining flats and the footprint.
+    defs: list[str] = []
+    gradient_fills: list[tuple[Region, dict]] = []
+    if rgb is not None and bake is None:
+        gradient_fills, regions = detect_gradients(regions, rgb)
 
     if axis is not None:
         straddlers, pairs, loners = classify_regions(regions, axis)
@@ -263,7 +275,32 @@ def _render_body(
                 body.append(mirror_use(elem_id, axis))
         eid += 1
 
-    return body
+    # gradient-filled footprints: fit the outline with the normal recognizers, emit
+    # with fill="url(#gN)" and register the gradient def. axis=None (gradient marks
+    # aren't force-mirrored in this cut). Emitted after all flats/occlusion prims.
+    # NOTE: _expand_footprint can grow a gradient footprint over former-background
+    # pixels, so the strict spatial-disjointness invariant no longer holds; distinct
+    # non-matching elements survive as even-odd holes / separate flats, so paint
+    # order remains safe in practice. True behind-a-flat layering of an idealized
+    # gradient footprint is out of scope in this cut.
+    for footprint, model in gradient_fills:
+        shape = _fit_region(footprint, opt, None, corner_radius)
+        if shape is None:
+            continue
+        gid = f"g{len(defs)}"
+        gg = model["geometry"]
+        if model["kind"] == "linear":
+            defs.append(linear_gradient_def(gid, gg["x1"], gg["y1"], gg["x2"], gg["y2"], model["stops"]))
+        else:
+            defs.append(radial_gradient_def(gid, gg["cx"], gg["cy"], gg["r"], model["stops"]))
+        fill = f"url(#{gid})"
+        if opt.flatten:
+            body.append(emit(shape_to_path_d(shape), fill, shape.params.get("fill_rule")))
+        else:
+            body.append(shape_to_svg(shape, fill, f"s{eid}"))
+        eid += 1
+
+    return body, defs
 
 
 def _rectify_affine(rho: float, w0: int, h0: int, rw: int, rh: int) -> Affine:
@@ -293,9 +330,9 @@ def _idealize_rectified(arr: np.ndarray, opt: Options, rho: float, w0: int, h0: 
     if detect_axis(np.any([r.mask for r in regions], axis=0)) is None:
         return None
     if opt.flatten:
-        body = _render_body(rw, rh, regions, opt, bake=_rectify_affine(rho, w0, h0, rw, rh))
+        body, _ = _render_body(rw, rh, regions, opt, bake=_rectify_affine(rho, w0, h0, rw, rh))
         return render_svg_doc(w0, h0, body)
-    body = _render_body(rw, rh, regions, opt)
+    body, _ = _render_body(rw, rh, regions, opt)
     wrap = (f'<g transform="translate({_fmt(w0 / 2)} {_fmt(h0 / 2)}) '
             f'rotate({_fmt(round(-rho, 3))}) translate({_fmt(-rw / 2)} {_fmt(-rh / 2)})">')
     return render_svg_doc(w0, h0, [wrap, *body, "</g>"])
@@ -326,4 +363,5 @@ def idealize(image, *, options: Options | None = None) -> str:
                 if rectified is not None:
                     return rectified
 
-    return render_svg_doc(w, h, _render_body(w, h, regions, opt))
+    body, defs = _render_body(w, h, regions, opt, rgb=arr)
+    return render_svg_doc(w, h, body, defs)

@@ -94,6 +94,7 @@ def test_gradient_image_does_not_crash():
         grad[:, x] = (x * 6, 100, 255 - x * 6)
     svg = idealize(grad)
     assert svg.startswith("<svg")
+    assert "<linearGradient" in svg or "<radialGradient" in svg
 
 
 def test_region_with_hole_uses_evenodd_and_renders_hole():

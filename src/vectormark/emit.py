@@ -149,10 +149,33 @@ def path_svg(d: str, fill: str, fill_rule: str | None = None) -> str:
     return f'<path fill="{fill}"{rule} d="{d}"/>'
 
 
-def render_svg_doc(width: int, height: int, body: list[str]) -> str:
+def _gradient_stops(stops: list[tuple[float, str]]) -> str:
+    return "".join(f'<stop offset="{_fmt(o)}" stop-color="{c}"/>' for o, c in stops)
+
+
+def linear_gradient_def(elem_id: str, x1: float, y1: float, x2: float, y2: float,
+                        stops: list[tuple[float, str]]) -> str:
+    """A <linearGradient> in userSpaceOnUse coords (absolute px; no gradientTransform,
+    survives --flatten)."""
+    return (f'<linearGradient id="{elem_id}" gradientUnits="userSpaceOnUse" '
+            f'x1="{_fmt(x1)}" y1="{_fmt(y1)}" x2="{_fmt(x2)}" y2="{_fmt(y2)}">'
+            f'{_gradient_stops(stops)}</linearGradient>')
+
+
+def radial_gradient_def(elem_id: str, cx: float, cy: float, r: float,
+                        stops: list[tuple[float, str]]) -> str:
+    """A <radialGradient> in userSpaceOnUse coords."""
+    return (f'<radialGradient id="{elem_id}" gradientUnits="userSpaceOnUse" '
+            f'cx="{_fmt(cx)}" cy="{_fmt(cy)}" r="{_fmt(r)}">'
+            f'{_gradient_stops(stops)}</radialGradient>')
+
+
+def render_svg_doc(width: int, height: int, body: list[str], defs: list[str] | None = None) -> str:
+    defs_block = f'  <defs>{"".join(defs)}</defs>\n  ' if defs else "  "
     return (
         f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 {width} {height}" '
-        f'width="{width}" height="{height}">\n  '
+        f'width="{width}" height="{height}">\n'
+        + defs_block
         + "\n  ".join(body)
         + "\n</svg>\n"
     )
