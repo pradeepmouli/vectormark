@@ -107,3 +107,36 @@ def structural_priors(cand: Candidate, region: Region) -> tuple[bool, str | None
         if _dominant_blob_fraction(region.mask) < _BLOB_DOMINANCE:
             return False, "gradient footprint not a single dominant blob"
     return True, None
+
+
+# --- the scorer ------------------------------------------------------------------
+@dataclass
+class ScoreBreakdown:
+    delta_e: float             # render-ΔE fidelity (lower = better); inf if priors failed
+    parsimony: float           # structured description-length (lower = better)
+    priors_ok: bool            # passed all structural-prior hard gates
+    reject_reason: str | None  # which prior failed (transparency for override)
+    qualified: bool            # priors_ok AND delta_e <= fidelity_tol
+
+
+def rank_candidates(
+    cands: list[Candidate], source_rgb: np.ndarray, region: Region, *,
+    fidelity_tol: float = 0.06,
+) -> list[tuple[Candidate, ScoreBreakdown]]:
+    """Rank candidates best-first by the lexicographic rule: qualifiers (priors ok
+    AND ΔE <= fidelity_tol) first, ordered by parsimony then ΔE; disqualified
+    candidates follow, ordered by ΔE. Returns the full list with breakdowns so a
+    caller can inspect/override."""
+    scored: list[tuple[Candidate, ScoreBreakdown]] = []
+    for c in cands:
+        ok, reason = structural_priors(c, region)
+        de = render_delta_e(c, source_rgb, region) if ok else float("inf")
+        par = parsimony_cost(c)
+        scored.append((c, ScoreBreakdown(de, par, ok, reason, ok and de <= fidelity_tol)))
+
+    scored.sort(key=lambda cb: (
+        not cb[1].qualified,
+        cb[1].parsimony if cb[1].qualified else 0.0,
+        cb[1].delta_e,
+    ))
+    return scored

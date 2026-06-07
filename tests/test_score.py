@@ -84,3 +84,36 @@ def test_priors_pass_flat_and_primitive():
                      FlatFill("#202020"), "region")
     ok, reason = structural_priors(flat, region)
     assert ok is True and reason is None
+
+
+from vectormark.score import ScoreBreakdown, rank_candidates
+
+
+def test_rank_prefers_parsimony_among_fidelity_qualifiers():
+    h = w = 60
+    src = np.full((h, w, 3), 255, np.uint8)
+    src[_disk_region(30, 30, 18, h, w, "#1e64eb").mask] = (30, 100, 235)
+    region = _disk_region(30, 30, 18, h, w, "#1e64eb")
+    circle = Candidate(Shape("circle", {"cx": 30, "cy": 30, "r": 18}),
+                       FlatFill("#1e64eb"), "region")
+    path_d = "M48 30 C48 40 40 48 30 48 C20 48 12 40 12 30 C12 20 20 12 30 12 C40 12 48 20 48 30 Z"
+    path = Candidate(Shape("path", {"d": path_d}), FlatFill("#1e64eb"), "region")
+    ranked = rank_candidates([path, circle], src, region, fidelity_tol=0.06)
+    assert ranked[0][0] is circle
+    assert all(isinstance(b, ScoreBreakdown) for _, b in ranked)
+    assert ranked[0][1].qualified is True
+
+
+def test_rank_disqualifies_degenerate_gradient_keeps_flat():
+    region = _square_region(60, 60, "#202020")
+    src = np.full((60, 60, 3), 255, np.uint8)
+    src[region.mask] = (32, 32, 32)
+    flat = Candidate(Shape("rect", {"x": 10, "y": 10, "w": 40, "h": 40}),
+                     FlatFill("#202020"), "region")
+    grad = Candidate(Shape("rect", {"x": 10, "y": 10, "w": 40, "h": 40}),
+                     LinearGradientFill({"x1": 10, "y1": 10, "x2": 50, "y2": 10},
+                                        [(0.0, "#202020"), (1.0, "#212121")]), "gradient")
+    ranked = rank_candidates([grad, flat], src, region)
+    assert ranked[0][0] is flat
+    grad_bd = next(b for c, b in ranked if c is grad)
+    assert grad_bd.priors_ok is False and grad_bd.qualified is False
