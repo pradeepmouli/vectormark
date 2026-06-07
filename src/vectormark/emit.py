@@ -107,6 +107,13 @@ def reflect_path_d(d: str, axis_x: float) -> str:
     return " ".join(out)
 
 
+def apply_affine_point(bake: tuple[float, float, float, float, float, float],
+                       x: float, y: float) -> tuple[float, float]:
+    """Apply an SVG affine (a, b, c, d, e, f) to a point: (a*x + c*y + e, b*x + d*y + f)."""
+    a, b, c, d, e, f = bake
+    return (a * x + c * y + e, b * x + d * y + f)
+
+
 def transform_path_d(d: str, m: tuple[float, float, float, float, float, float]) -> str:
     """Apply the SVG affine `m = (a, b, c, d, e, f)` to every point of an absolute
     path, so the transform can be *baked* into the geometry instead of carried on a
@@ -118,7 +125,7 @@ def transform_path_d(d: str, m: tuple[float, float, float, float, float, float])
     rot_deg = math.degrees(math.atan2(b, a))
 
     def pt(x: float, y: float) -> tuple[float, float]:
-        return a * x + c * y + e, b * x + dd * y + f
+        return apply_affine_point(m, x, y)
 
     toks = _AFFINE_TOKEN.findall(d)
     out: list[str] = []

@@ -111,6 +111,8 @@ includes the extra element and fails the gate/blob guard. This is the *safe* fai
 a stronger discriminator than the simple guards tried (gate, flat-residual, compactness all
 overlap between subtle true gradients and flat/conic false positives).
 
+The rectified frame is produced by bilinear rotation (`ndi.rotate`), whose edge-smear can let a *contrived* high-contrast flat tilted mark be fit as a (faithful, low-ΔE) gradient. Real flat marks (e.g. the daikonic fixture) do not trigger this — their flat interiors make `fit_gradient` return None — and the ΔE gate keeps any such render faithful.
+
 ## Rectified-path gradient support (added after real-logo eval)
 
 Real-logo testing showed Telegram (a gradient circle + diagonal paper plane) breaks vertical

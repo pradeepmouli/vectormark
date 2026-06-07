@@ -11,6 +11,7 @@ from scipy import ndimage as ndi
 from .color import extract_palette, quantize
 from .contour import region_contours
 from .emit import (
+    apply_affine_point,
     linear_gradient_def,
     mirror_use,
     path_svg,
@@ -321,14 +322,11 @@ def _bake_gradient_geometry(geom: dict, kind: str, bake: Affine) -> dict:
     """Map gradient geometry from the rectified frame to the original via the bake affine
     (a, b, c, d, e, f): x' = a*x + c*y + e, y' = b*x + d*y + f. The rectify affine is a rigid
     rotation+translation, so the radial radius is preserved."""
-    a, b, c, d, e, f = bake
-    def xf(x: float, y: float) -> tuple[float, float]:
-        return (a * x + c * y + e, b * x + d * y + f)
     if kind == "linear":
-        x1, y1 = xf(geom["x1"], geom["y1"])
-        x2, y2 = xf(geom["x2"], geom["y2"])
+        x1, y1 = apply_affine_point(bake, geom["x1"], geom["y1"])
+        x2, y2 = apply_affine_point(bake, geom["x2"], geom["y2"])
         return {"x1": x1, "y1": y1, "x2": x2, "y2": y2}
-    cx, cy = xf(geom["cx"], geom["cy"])
+    cx, cy = apply_affine_point(bake, geom["cx"], geom["cy"])
     return {"cx": cx, "cy": cy, "r": geom["r"]}
 
 
