@@ -68,3 +68,31 @@ def test_smooth_two_blob_stays_flat():
         img[40:120, x0:x0 + 80] = block.round().astype(np.uint8)
     svg = idealize(img, options=Options())
     assert "<linearGradient" not in svg and "<radialGradient" not in svg   # dom 0.5 < 0.85
+
+
+def _rotate_img(img, deg):
+    from PIL import Image
+    return np.asarray(Image.fromarray(img).rotate(
+        deg, resample=Image.BILINEAR, expand=True, fillcolor=(255, 255, 255)), np.uint8)
+
+
+def test_bake_gradient_geometry_linear_and_radial():
+    from vectormark.pipeline import _bake_gradient_geometry
+    # 90° rotation about origin as an SVG affine (a,b,c,d,e,f): (x,y) -> (-y, x)
+    bake = (0.0, 1.0, -1.0, 0.0, 0.0, 0.0)
+    lin = _bake_gradient_geometry({"x1": 10.0, "y1": 0.0, "x2": 20.0, "y2": 0.0}, "linear", bake)
+    assert abs(lin["x1"] - 0.0) < 1e-9 and abs(lin["y1"] - 10.0) < 1e-9
+    assert abs(lin["x2"] - 0.0) < 1e-9 and abs(lin["y2"] - 20.0) < 1e-9
+    rad = _bake_gradient_geometry({"cx": 10.0, "cy": 0.0, "r": 7.0}, "radial", bake)
+    assert abs(rad["cx"] - 0.0) < 1e-9 and abs(rad["cy"] - 10.0) < 1e-9
+    assert rad["r"] == 7.0                                # rigid affine preserves radius
+
+
+def test_rectified_path_emits_gradient_nonflatten():
+    base = _smooth_linear_rect(160, 240, 40, 200, (85, 145, 225), (70, 125, 210))
+    img = _rotate_img(base, 30)                           # tilted rect -> rectified path
+    h, w = img.shape[:2]
+    svg = idealize(img, options=Options())
+    assert "<g transform=" in svg                         # rectified path was taken
+    assert svg.count("<linearGradient") == 1              # ...and a gradient was emitted
+    assert mean_delta_e(render_svg(svg, w, h), img) <= 0.08
