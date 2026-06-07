@@ -361,3 +361,170 @@ Expected: `telegram` and `apple_music` now show `lin=1` (or `rad=1`) with low Δ
 **2. Placeholder scan:** No TBD/vague steps; every code step is complete; tuning notes name concrete bounds (contrast lever, ΔE bars 0.06/0.07). ✓
 
 **3. Type consistency:** `_dominant_blob_fraction(mask) -> float`, `_BLOB_DOMINANCE` (float), `detect_gradients(regions, rgb_image) -> (list[(Region, dict)], list[Region])` (unchanged signature), `fit_gradient(mask, rgb_image) -> dict | None`, model dict `{"kind","geometry","stops"}` — all consistent with PR #8 and across tasks. ✓
+
+---
+
+## Addendum: Rectified-path gradient support (Tasks 4–5)
+
+Real-logo eval (after Task 3) found Telegram routes through the rectified (tilted-symmetry) path, where PR #8 left gradients off, so it rendered flat despite a perfect upright fit. We reverse that non-goal (see the spec's "Rectified-path gradient support" section). Spike-verified: a `userSpaceOnUse` gradient inside a rotated `<g>` aligns with its shape (ΔE 0.0004); flatten needs the gradient geometry baked by the same affine.
+
+All edits are in `src/vectormark/pipeline.py`; tests in `tests/test_acceptance_smooth_gradient.py`.
+
+### Task 4: thread gradients through `_idealize_rectified` + bake geometry
+
+**Files:**
+- Modify: `src/vectormark/pipeline.py`
+- Test: `tests/test_acceptance_smooth_gradient.py` (append)
+
+- [ ] **Step 1: Write the failing tests**
+
+Append to `tests/test_acceptance_smooth_gradient.py`:
+
+```python
+def _rotate_img(img, deg):
+    from PIL import Image
+    return np.asarray(Image.fromarray(img).rotate(
+        deg, resample=Image.BILINEAR, expand=True, fillcolor=(255, 255, 255)), np.uint8)
+
+
+def test_bake_gradient_geometry_linear_and_radial():
+    from vectormark.pipeline import _bake_gradient_geometry
+    # identity-rotation-by-90° about origin via an SVG affine (a,b,c,d,e,f): (x,y)->(-y, x)
+    bake = (0.0, 1.0, -1.0, 0.0, 0.0, 0.0)
+    lin = _bake_gradient_geometry({"x1": 10.0, "y1": 0.0, "x2": 20.0, "y2": 0.0}, "linear", bake)
+    assert abs(lin["x1"] - 0.0) < 1e-9 and abs(lin["y1"] - 10.0) < 1e-9
+    assert abs(lin["x2"] - 0.0) < 1e-9 and abs(lin["y2"] - 20.0) < 1e-9
+    rad = _bake_gradient_geometry({"cx": 10.0, "cy": 0.0, "r": 7.0}, "radial", bake)
+    assert abs(rad["cx"] - 0.0) < 1e-9 and abs(rad["cy"] - 10.0) < 1e-9
+    assert rad["r"] == 7.0                                # rigid affine preserves radius
+
+
+def test_rectified_path_emits_gradient_nonflatten():
+    base = _smooth_linear_rect(160, 240, 40, 200, (85, 145, 225), (70, 125, 210))
+    img = _rotate_img(base, 30)                           # tilted rect -> rectified path
+    h, w = img.shape[:2]
+    svg = idealize(img, options=Options())
+    assert "<g transform=" in svg                         # rectified path was taken
+    assert svg.count("<linearGradient") == 1              # ...and a gradient was emitted
+    assert mean_delta_e(render_svg(svg, w, h), img) <= 0.08
+```
+
+- [ ] **Step 2: Run to verify they fail**
+
+Run: `uv run pytest tests/test_acceptance_smooth_gradient.py -k "bake_gradient or rectified_path_emits_gradient_nonflatten" -q`
+Expected: FAIL — `_bake_gradient_geometry` not defined; the non-flatten test fails (gradient currently off in the rectified path → count 0, or no `<g>` if it fell to upright).
+
+- [ ] **Step 3: Add `_bake_gradient_geometry` and relax the gate**
+
+In `src/vectormark/pipeline.py`, add this helper immediately after `_rectify_affine`:
+
+```python
+def _bake_gradient_geometry(geom: dict, kind: str, bake: Affine) -> dict:
+    """Map gradient geometry from the rectified frame to the original via the bake affine
+    (a, b, c, d, e, f): x' = a*x + c*y + e, y' = b*x + d*y + f. The rectify affine is a rigid
+    rotation+translation, so the radial radius is preserved."""
+    a, b, c, d, e, f = bake
+    def xf(x: float, y: float) -> tuple[float, float]:
+        return (a * x + c * y + e, b * x + d * y + f)
+    if kind == "linear":
+        x1, y1 = xf(geom["x1"], geom["y1"])
+        x2, y2 = xf(geom["x2"], geom["y2"])
+        return {"x1": x1, "y1": y1, "x2": x2, "y2": y2}
+    cx, cy = xf(geom["cx"], geom["cy"])
+    return {"cx": cx, "cy": cy, "r": geom["r"]}
+```
+
+In `_render_body`, relax the gradient-pass gate. Change:
+```python
+    if rgb is not None and bake is None:
+        gradient_fills, regions = detect_gradients(regions, rgb)
+```
+to:
+```python
+    if rgb is not None:
+        gradient_fills, regions = detect_gradients(regions, rgb)
+```
+
+- [ ] **Step 4: Bake gradient geometry in the emit loop**
+
+In `_render_body`'s gradient-emit loop, change:
+```python
+        gid = f"g{len(defs)}"
+        gg = model["geometry"]
+        if model["kind"] == "linear":
+```
+to:
+```python
+        gid = f"g{len(defs)}"
+        gg = model["geometry"]
+        if bake is not None:                       # baked frame: map gradient coords too
+            gg = _bake_gradient_geometry(gg, model["kind"], bake)
+        if model["kind"] == "linear":
+```
+
+- [ ] **Step 5: Thread rgb + defs through `_idealize_rectified`**
+
+Replace the body of `_idealize_rectified` from the `if opt.flatten:` block to the end with:
+```python
+    if opt.flatten:
+        body, defs = _render_body(rw, rh, regions, opt,
+                                  bake=_rectify_affine(rho, w0, h0, rw, rh), rgb=rot)
+        return render_svg_doc(w0, h0, body, defs)
+    body, defs = _render_body(rw, rh, regions, opt, rgb=rot)
+    wrap = (f'<g transform="translate({_fmt(w0 / 2)} {_fmt(h0 / 2)}) '
+            f'rotate({_fmt(round(-rho, 3))}) translate({_fmt(-rw / 2)} {_fmt(-rh / 2)})">')
+    return render_svg_doc(w0, h0, [wrap, *body, "</g>"], defs)
+```
+
+- [ ] **Step 6: Run to verify they pass**
+
+Run: `uv run pytest tests/test_acceptance_smooth_gradient.py -k "bake_gradient or rectified_path_emits_gradient_nonflatten" -q`
+Expected: PASS (2 passed). If `test_rectified_path_emits_gradient_nonflatten` fails because the rotated rect did NOT route to the rectified path (no `<g transform=`), try a different rotation angle (e.g. 25° or 35°) so a tilted mirror axis is detected; the rect must not have a vertical mirror. If it emits the gradient but ΔE slightly exceeds 0.08 (rotation antialiasing), report it — do not loosen beyond 0.10.
+
+- [ ] **Step 7: Commit**
+
+```bash
+git add src/vectormark/pipeline.py tests/test_acceptance_smooth_gradient.py
+git commit -m "feat(pipeline): gradients in the rectified path (thread rgb/defs, bake gradient geometry)"
+```
+Commit trailer: `Co-Authored-By: Claude Sonnet 4.6 <noreply@anthropic.com>`.
+
+### Task 5: flatten rectified acceptance + regression
+
+**Files:**
+- Test: `tests/test_acceptance_smooth_gradient.py` (append)
+
+- [ ] **Step 1: Write the failing test**
+
+Append to `tests/test_acceptance_smooth_gradient.py`:
+
+```python
+def test_rectified_path_emits_gradient_flatten():
+    base = _smooth_linear_rect(160, 240, 40, 200, (85, 145, 225), (70, 125, 210))
+    img = _rotate_img(base, 30)
+    h, w = img.shape[:2]
+    svg = idealize(img, options=Options(flatten=True))
+    assert "<g transform=" not in svg                     # flatten bakes geometry: no wrapping <g>
+    assert svg.count("<linearGradient") == 1              # gradient still emitted (baked geometry)
+    assert mean_delta_e(render_svg(svg, w, h), img) <= 0.08
+```
+
+- [ ] **Step 2: Run to verify it passes**
+
+Run: `uv run pytest tests/test_acceptance_smooth_gradient.py -k rectified_path_emits_gradient_flatten -q`
+Expected: PASS (1 passed). It should already pass given Task 4's geometry baking. If the baked gradient is misaligned (high ΔE), the `_bake_gradient_geometry` affine application is wrong — fix it, don't loosen the bar.
+
+- [ ] **Step 3: Full regression**
+
+Run: `uv run pytest -q`
+Expected: all green. Prior was 128 (Tasks 1–3); this adds 3 (Task 4: 2, Task 5: 1) → **131 passed**. Confirm the rectified path still handles NON-gradient tilted marks (existing daikonic / symmetry fixtures unchanged).
+
+- [ ] **Step 4: Commit**
+
+```bash
+git add tests/test_acceptance_smooth_gradient.py
+git commit -m "test(acceptance): gradients in the rectified path (flatten + non-flatten)"
+```
+Commit trailer: `Co-Authored-By: Claude Sonnet 4.6 <noreply@anthropic.com>`.
+
+- [ ] **Step 5: Manual real-logo eval** — re-run the real-logo eval and confirm Telegram now emits a gradient (it routes through the rectified path) and Apple Music still does; flats/conic stay gradient-free.

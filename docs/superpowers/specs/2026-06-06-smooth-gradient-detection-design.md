@@ -111,10 +111,31 @@ includes the extra element and fails the gate/blob guard. This is the *safe* fai
 a stronger discriminator than the simple guards tried (gate, flat-residual, compactness all
 overlap between subtle true gradients and flat/conic false positives).
 
+## Rectified-path gradient support (added after real-logo eval)
+
+Real-logo testing showed Telegram (a gradient circle + diagonal paper plane) breaks vertical
+symmetry, so `idealize` routes it through the **rectified** (tilted-symmetry) path — where PR #8
+left gradients OFF — and it rendered flat, even though the upright fit was perfect (ΔE 0.0021).
+Apple Music (no tilted symmetry) reached the upright path and worked. We therefore **reverse the
+PR #8 non-goal** and support gradients in the rectified frame.
+
+Approach (spike-verified):
+- `_idealize_rectified` passes `rgb=rot` (the rotated image) to both `_render_body` calls and
+  threads the returned `defs` into `render_svg_doc`.
+- The gradient pass gate in `_render_body` relaxes from `rgb is not None and bake is None` to
+  `rgb is not None`, so detection runs in the baked/rectified frame too.
+- **Non-flatten:** gradient defs (`userSpaceOnUse`, rectified-frame coords) sit in `<defs>`; the
+  gradient-filled shapes are inside the rotated `<g>`. A `userSpaceOnUse` gradient resolves in the
+  referencing element's user space (inside the `<g>`), so gradient and shape rotate together —
+  verified ΔE 0.0004 vs the rotated reference. No geometry transform needed.
+- **Flatten:** path coords are baked to the original frame, so the gradient geometry is baked the
+  same way via a new `_bake_gradient_geometry(geom, kind, bake)` helper (linear: transform both
+  endpoints; radial: transform centre, keep `r` — the rectify affine is a rigid rotation+translation
+  so radius is preserved). Keeps flatten's "no surviving transforms" philosophy.
+
 ## Non-goals
 
 - Conic/sweep gradients (still unsupported; correctly gate-rejected).
 - Multi-blob gradient-plus-element marks (future work, above).
 - Changing `extract_palette` / `merge_de` (the smooth path fits raw pixels, so palette collapse
   is irrelevant — only the silhouette mask is needed, and that survives).
-- Gradients in the rectified (tilted-symmetry) path (off by design, inherited from PR #8).
