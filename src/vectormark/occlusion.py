@@ -8,10 +8,11 @@ from dataclasses import dataclass
 
 import numpy as np
 from scipy.ndimage import binary_dilation, binary_erosion
+from skimage.draw import polygon2mask
 from skimage.measure import CircleModel, EllipseModel
 from skimage.morphology import convex_hull_image
 
-from .contour import region_contours
+from .contour import rdp, region_contours
 from .fit import Shape, _fmt
 from .types import Axis, Region
 
@@ -19,7 +20,7 @@ from .types import Axis, Region
 @dataclass
 class ScenePrimitive:
     """A completed shape that may be partially occluded by higher-z primitives."""
-    kind: str                 # "circle" | "ellipse" | "annulus"
+    kind: str                 # "circle" | "ellipse" | "annulus" | "polygon"
     params: dict
     color_hex: str
     z: int
@@ -76,6 +77,83 @@ def _own_arc_span_deg(own_pts: np.ndarray, cx: float, cy: float) -> float:
         return 0.0
     gaps = np.diff(np.concatenate([ang, [ang[0] + 2 * np.pi]]))
     return float(np.degrees(2 * np.pi - gaps.max()))     # span covered = full minus largest gap
+
+
+def _fit_line(pts: np.ndarray) -> tuple[float, float, float, float] | None:
+    """Total-least-squares line through `pts`. Returns (a, b, c, max_residual) for
+    the line a*x + b*y = c with a**2 + b**2 == 1 (so a*x + b*y - c is signed
+    perpendicular distance), or None for fewer than 2 points or all-identical points
+    (degenerate, no defined direction)."""
+    pts = np.asarray(pts, float)
+    if len(pts) < 2 or np.allclose(pts, pts[0]):
+        return None
+    mean = pts.mean(axis=0)
+    _, _, vt = np.linalg.svd(pts - mean)
+    direction = vt[0]                                  # principal axis of the points
+    a, b = float(-direction[1]), float(direction[0])   # unit normal
+    c = a * mean[0] + b * mean[1]
+    resid = float(np.abs(pts @ np.array([a, b]) - c).max())
+    return a, b, c, resid
+
+
+def _line_intersect(
+    l1: tuple[float, float, float, float],
+    l2: tuple[float, float, float, float],
+) -> tuple[float, float] | None:
+    """Intersection of lines (a1,b1,c1) and (a2,b2,c2); None when |det| < _PARALLEL_TOL
+    (1e-9), i.e. the unit normals are essentially exactly parallel."""
+    a1, b1, c1 = l1[0], l1[1], l1[2]
+    a2, b2, c2 = l2[0], l2[1], l2[2]
+    det = a1 * b2 - a2 * b1
+    if abs(det) < _PARALLEL_TOL:
+        return None
+    return ((c1 * b2 - c2 * b1) / det, (a1 * c2 - a2 * c1) / det)
+
+
+def _is_convex(pts: list[tuple[float, float]]) -> bool:
+    """True if the closed vertex ring turns consistently one way (all cross products
+    share a sign). Rejects concave or self-intersecting rings."""
+    n = len(pts)
+    if n < 3:
+        return False
+    sign = 0
+    for i in range(n):
+        ax, ay = pts[i]
+        bx, by = pts[(i + 1) % n]
+        cx, cy = pts[(i + 2) % n]
+        cross = (bx - ax) * (cy - by) - (by - ay) * (cx - bx)
+        if abs(cross) < 1e-9:
+            continue
+        s = 1 if cross > 0 else -1
+        if sign == 0:
+            sign = s
+        elif s != sign:
+            return False
+    return sign != 0
+
+
+def _own_runs(contour: np.ndarray, seam: np.ndarray) -> list[np.ndarray]:
+    """Maximal contiguous runs of own (non-seam) contour points, each as an open
+    (M, 2) polyline. The contour is cyclic, so a run may wrap across index 0.
+    Precondition: len(seam) == len(contour)."""
+    n = len(seam)
+    own = ~np.asarray(seam, bool)
+    if n == 0 or not own.any():
+        return []
+    if own.all():
+        return [np.asarray(contour, float)]
+    # a run starts at an own point whose predecessor (cyclically) is a seam point
+    starts = [i for i in range(n) if own[i] and not own[(i - 1) % n]]
+    runs: list[np.ndarray] = []
+    c = np.asarray(contour, float)
+    for s in starts:
+        idx = []
+        i = s
+        while own[i % n] and len(idx) < n:
+            idx.append(i % n)
+            i += 1
+        runs.append(c[idx])
+    return runs
 
 
 def _fit_candidate_pts(own: np.ndarray) -> np.ndarray:
@@ -171,14 +249,107 @@ def complete_annulus(
             "params": {"cx": cx, "cy": cy, "r_outer": outer["r"], "r_inner": inner["r"]}}
 
 
+def _subseq_indices(pts: np.ndarray, sub: np.ndarray) -> list[int]:
+    """Indices in `pts` of the subsequence `sub`. `rdp` preserves its input points
+    exactly and in order, so a monotone forward cursor with exact equality maps each
+    `sub` point back to `pts` — robust to repeated/near-duplicate points where a
+    nearest-point (argmin) search could pick a wrong or out-of-order index."""
+    idxs: list[int] = []
+    j = 0
+    for v in sub:
+        while j < len(pts) and not (pts[j, 0] == v[0] and pts[j, 1] == v[1]):
+            j += 1
+        if j >= len(pts):
+            break
+        idxs.append(j)
+        j += 1
+    return idxs
+
+
+def _collinear(l1: tuple, l2: tuple) -> bool:
+    """True if two normalized-normal lines (a,b,c) describe the same line — parallel
+    normals and matching offset (the SVD normal sign is arbitrary, so align it)."""
+    a1, b1, c1 = l1[0], l1[1], l1[2]
+    a2, b2, c2 = l2[0], l2[1], l2[2]
+    if abs(a1 * b2 - a2 * b1) > _COLLINEAR_SIN_TOL:        # normals not parallel
+        return False
+    s = 1.0 if (a1 * a2 + b1 * b2) >= 0 else -1.0          # align normal directions
+    return abs(c1 - s * c2) <= _COLLINEAR_OFFSET_TOL
+
+
+def _coalesce_collinear(lines: list[tuple]) -> list[tuple]:
+    """Drop consecutive (and wraparound) collinear duplicates from a cyclic line list,
+    so one polygon edge split by a mid-edge bite into two collinear fits becomes a
+    single supporting line (else their intersection is parallel -> None)."""
+    if len(lines) < 2:
+        return lines
+    merged = [lines[0]]
+    for ln in lines[1:]:
+        if not _collinear(merged[-1], ln):
+            merged.append(ln)
+    while len(merged) > 2 and _collinear(merged[-1], merged[0]):
+        merged.pop()
+    return merged
+
+
+def complete_polygon(
+    region: Region, others: list[Region], *, max_residual: float, max_vertices: int,
+    boundary: tuple[np.ndarray, np.ndarray] | None = None,
+) -> dict | None:
+    """Recover a convex polygon from a partially-occluded fragment. Fit a line to every
+    visible (own-boundary) edge across ALL own runs, kept in boundary (cyclic) order,
+    then intersect consecutive lines cyclically — each intersection spanning a seam gap
+    recovers a corner hidden behind an occluder (so a polygon bitten by several separate
+    occluders is still recovered, as long as every edge stays partly visible). Returns
+    {"kind":"polygon","params":{"points":[(x,y),...]}} or None when the fragment is
+    curved, under-constrained, or non-convex.
+
+    `boundary` optionally supplies an already-computed (contour, seam) from
+    `label_boundary` so it isn't recomputed."""
+    contour, seam = boundary if boundary is not None else label_boundary(region, others)
+    if len(contour) == 0 or not seam.any():
+        return None                                    # no occlusion -> not this completer
+    runs = _own_runs(contour, seam)
+    if not runs:
+        return None
+    lines: list[tuple[float, float, float, float]] = []
+    for run in runs:                                   # runs are already in cyclic order
+        if len(run) < 2:
+            continue
+        idxs = _subseq_indices(run, rdp(run, max_residual))   # edge breakpoints in this run
+        for i in range(len(idxs) - 1):
+            ln = _fit_line(run[idxs[i]: idxs[i + 1] + 1])
+            if ln is None or ln[3] > max_residual:
+                return None
+            lines.append(ln)
+    lines = _coalesce_collinear(lines)                 # merge one edge split by a mid-edge bite
+    if len(lines) < 3 or len(lines) > max_vertices:
+        return None
+    verts: list[tuple[float, float]] = []
+    for i in range(len(lines)):
+        p = _line_intersect(lines[i], lines[(i + 1) % len(lines)])
+        if p is None:
+            return None
+        verts.append(p)
+    if not _is_convex(verts):
+        return None
+    return {"kind": "polygon", "params": {"points": verts}}
+
+
 def _complete_member(region: Region, others: list[Region]) -> dict | None:
-    """Complete a group member as an annulus if it has a hole, else as a circle/ellipse."""
+    """Complete a group member: annulus if it has a hole, else circle/ellipse, else a
+    convex polygon. The curved fitters run first (they reject straight edges), so only
+    genuinely polygonal fragments reach complete_polygon."""
     ann = complete_annulus(region, others, max_residual=_MAX_RESIDUAL,
                            min_arc_deg=_MIN_ARC_DEG, concentric_tol=_CONCENTRIC_TOL)
     if ann is not None:
         return ann
     contour, seam = label_boundary(region, others)
-    return complete_primitive(contour, seam, max_residual=_MAX_RESIDUAL, min_arc_deg=_MIN_ARC_DEG)
+    prim = complete_primitive(contour, seam, max_residual=_MAX_RESIDUAL, min_arc_deg=_MIN_ARC_DEG)
+    if prim is not None:
+        return prim
+    return complete_polygon(region, others, max_residual=_MAX_RESIDUAL,
+                            max_vertices=_MAX_VERTICES, boundary=(contour, seam))
 
 
 def intersection_lens_d(a: dict, b: dict) -> str | None:
@@ -209,7 +380,7 @@ def intersection_lens_d(a: dict, b: dict) -> str | None:
 
 
 def primitive_mask(prim: dict, h: int, w: int) -> np.ndarray:
-    """Boolean mask of a completed circle/ellipse on an (h, w) grid."""
+    """Boolean mask of a completed primitive (circle, annulus, polygon, or ellipse) on an (h, w) grid."""
     yy, xx = np.ogrid[:h, :w]
     p = prim["params"]
     if prim["kind"] == "circle":
@@ -217,6 +388,10 @@ def primitive_mask(prim: dict, h: int, w: int) -> np.ndarray:
     if prim["kind"] == "annulus":
         d2 = (xx - p["cx"]) ** 2 + (yy - p["cy"]) ** 2
         return (d2 <= p["r_outer"] ** 2) & (d2 >= p["r_inner"] ** 2)
+    if prim["kind"] == "polygon":
+        pts = prim["params"]["points"]
+        rc = np.array([(y, x) for x, y in pts], dtype=float)   # skimage wants (row, col)
+        return polygon2mask((h, w), rc)
     return ((xx - p["cx"]) / p["rx"]) ** 2 + ((yy - p["cy"]) / p["ry"]) ** 2 <= 1.0
 
 
@@ -254,6 +429,7 @@ def stack_agreement(prims, lens, regions: list[Region], h: int, w: int) -> float
 
 
 _MAX_RESIDUAL = 1.6
+_MAX_VERTICES = 8
 _MIN_ARC_DEG = 110.0
 # With the 1px-boundary-tolerant gate, correct reconstructions score ~0.97–1.0 and a
 # wrong one (filled hole, wrong radius) ~0.7, so 0.96 separates them with wide margin.
@@ -261,6 +437,12 @@ _GATE_AGREEMENT = 0.96
 _CONCENTRIC_TOL = 2.0
 _MIN_OVERLAP_PX = 12
 _OVERLAP_OWNERSHIP = 0.5
+_PARALLEL_TOL = 1e-9  # |det| of two unit normals == sin(angle); ~1e-7 deg, i.e. exact-parallel only
+# Two fits of the SAME polygon edge (split by a mid-edge bite) agree to within these:
+# normals near-parallel (sin ~< 4.6 deg, well under any real convex exterior angle) and
+# offsets within a couple px. Genuinely distinct edges differ by far more on one or both.
+_COLLINEAR_SIN_TOL = 0.08
+_COLLINEAR_OFFSET_TOL = 2.0
 
 
 def _pair_constraint(
