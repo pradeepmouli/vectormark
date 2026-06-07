@@ -5,6 +5,7 @@ from __future__ import annotations
 import math
 import re
 
+from .candidate import FlatFill, LinearGradientFill, RadialGradientFill
 from .fit import Shape, _fmt
 from .types import Axis
 
@@ -175,6 +176,29 @@ def radial_gradient_def(elem_id: str, cx: float, cy: float, r: float,
     return (f'<radialGradient id="{elem_id}" gradientUnits="userSpaceOnUse" '
             f'cx="{_fmt(cx)}" cy="{_fmt(cy)}" r="{_fmt(r)}">'
             f'{_gradient_stops(stops)}</radialGradient>')
+
+
+def fill_rule_for(geometry: Shape) -> str | None:
+    """SVG fill-rule for a geometry: an explicit params['fill_rule'] if present, else
+    'evenodd' for an annulus (its two same-winding circles only read as a ring under
+    even-odd), else None."""
+    return geometry.params.get("fill_rule", "evenodd" if geometry.kind == "annulus" else None)
+
+
+def resolve_fill(fill, defs: list[str], *, geometry: dict | None = None) -> str:
+    """Resolve a Fill to an SVG fill attribute. FlatFill -> its hex. Gradient fill ->
+    register a <def> (id g{len(defs)}, minted BEFORE the append) and return url(#id).
+    `geometry` overrides the gradient's coords (used when the caller baked them to
+    another frame); None uses fill.geometry."""
+    if isinstance(fill, FlatFill):
+        return fill.hex
+    g = geometry if geometry is not None else fill.geometry
+    gid = f"g{len(defs)}"
+    if isinstance(fill, LinearGradientFill):
+        defs.append(linear_gradient_def(gid, g["x1"], g["y1"], g["x2"], g["y2"], fill.stops))
+    else:
+        defs.append(radial_gradient_def(gid, g["cx"], g["cy"], g["r"], fill.stops))
+    return f"url(#{gid})"
 
 
 def render_svg_doc(width: int, height: int, body: list[str], defs: list[str] | None = None) -> str:

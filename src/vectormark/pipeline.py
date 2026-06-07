@@ -12,12 +12,12 @@ from .color import extract_palette, quantize
 from .contour import region_contours
 from .emit import (
     apply_affine_point,
-    linear_gradient_def,
+    fill_rule_for,
     mirror_use,
     path_svg,
-    radial_gradient_def,
     reflect_path_d,
     render_svg_doc,
+    resolve_fill,
     shape_to_path_d,
     shape_to_svg,
     transform_path_d,
@@ -291,28 +291,21 @@ def _render_body(
     def emit(d: str, fill: str, rule: str | None = None) -> str:
         return path_svg(transform_path_d(d, bake) if bake is not None else d, fill, rule)
 
-    def resolve_fill(fill: Fill) -> str:
-        if isinstance(fill, FlatFill):
-            return fill.hex
-        g = fill.geometry
-        if bake is not None:
+    def _fill_attr(fill: Fill) -> str:
+        baked = None
+        if not isinstance(fill, FlatFill) and bake is not None:
             kind = "linear" if isinstance(fill, LinearGradientFill) else "radial"
-            g = _bake_gradient_geometry(g, kind, bake)
-        gid = f"g{len(defs)}"
-        if isinstance(fill, LinearGradientFill):
-            defs.append(linear_gradient_def(gid, g["x1"], g["y1"], g["x2"], g["y2"], fill.stops))
-        else:
-            defs.append(radial_gradient_def(gid, g["cx"], g["cy"], g["r"], fill.stops))
-        return f"url(#{gid})"
+            baked = _bake_gradient_geometry(fill.geometry, kind, bake)
+        return resolve_fill(fill, defs, geometry=baked)
 
     body: list[str] = []
     eid = 0
     for cand in cands:
         geom = cand.geometry
-        fill = resolve_fill(cand.fill)
+        fill = _fill_attr(cand.fill)
         if opt.flatten:
             d = shape_to_path_d(geom)
-            rule = geom.params.get("fill_rule", "evenodd" if geom.kind == "annulus" else None)
+            rule = fill_rule_for(geom)
             body.append(emit(d, fill, rule))
             if cand.mirror is not None:
                 body.append(emit(reflect_path_d(d, cand.mirror.x), fill, rule))

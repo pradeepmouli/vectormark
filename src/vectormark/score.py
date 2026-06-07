@@ -15,7 +15,7 @@ from PIL import Image
 from .candidate import Candidate, FlatFill, LinearGradientFill, RadialGradientFill
 from .color import mean_delta_e
 from .emit import (
-    linear_gradient_def, path_svg, radial_gradient_def, render_svg_doc, shape_to_path_d,
+    fill_rule_for, path_svg, render_svg_doc, resolve_fill, shape_to_path_d,
 )
 from .gradient import _BLOB_DOMINANCE, _MIN_STOP_SPAN, _dominant_blob_fraction, _stop_span
 from .types import Region
@@ -28,6 +28,7 @@ _FILL_FLAT = 1.0
 
 def _path_cost(d: str) -> float:
     """Description length of a path `d`: sum of per-command coordinate counts."""
+    # Assumes M/L/C/Q/Z commands only — the sole set this package's emitters produce.
     return float(sum(_CMD_COST.get(cmd, 0) for cmd in re.findall(r"[MLCQZ]", d.upper())))
 
 
@@ -53,24 +54,10 @@ def parsimony_cost(cand: Candidate) -> float:
 
 
 # --- fidelity (render-ΔE via resvg) ---------------------------------------------
-def _resolve_fill_str(fill, defs: list[str]) -> str:
-    """Flat -> hex; gradient -> register a def (g{N}) and return url(#...)."""
-    if isinstance(fill, FlatFill):
-        return fill.hex
-    g = fill.geometry
-    gid = f"g{len(defs)}"
-    if isinstance(fill, LinearGradientFill):
-        defs.append(linear_gradient_def(gid, g["x1"], g["y1"], g["x2"], g["y2"], fill.stops))
-    else:
-        defs.append(radial_gradient_def(gid, g["cx"], g["cy"], g["r"], fill.stops))
-    return f"url(#{gid})"
-
-
 def _candidate_svg(cand: Candidate, w: int, h: int) -> str:
     defs: list[str] = []
-    fill = _resolve_fill_str(cand.fill, defs)
-    rule = cand.geometry.params.get("fill_rule",
-                                    "evenodd" if cand.geometry.kind == "annulus" else None)
+    fill = resolve_fill(cand.fill, defs)
+    rule = fill_rule_for(cand.geometry)
     body = [path_svg(shape_to_path_d(cand.geometry), fill, rule)]
     return render_svg_doc(w, h, body, defs)
 
