@@ -146,6 +146,12 @@ The goldens are generated from the pre-refactor code so they encode current beha
 are committed so the equality assertion is reproducible. Because the bar is byte-identical, the
 golden set does not need ΔE/SSIM tolerances — exact string match.
 
+**Pressure valve:** byte-identical is the *default*. If faithfully reproducing a specific legacy
+quirk (e.g. the lens-no-id case) would force genuinely worse code, that *single* case may be relaxed
+to a render-ΔE≈0 / SSIM≈1 assertion instead of exact match — but it must be called out explicitly in
+the test and the commit, with a one-line rationale, rather than loosening the whole bar. Default to
+exact match; relax only with a named reason.
+
 ## Forward context (slices 3–4) — captured here so it isn't lost
 
 Per design discussion, candidate **selection** in later slices is **not purely automated**. It must
