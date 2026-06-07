@@ -94,3 +94,16 @@ def render_delta_e(cand: Candidate, source_rgb: np.ndarray, region: Region) -> f
         return float("inf")
     raster = _rasterize(_candidate_svg(cand, w, h), w, h)
     return mean_delta_e(source_rgb[mask], raster[mask])
+
+
+# --- structural priors (hard gates) ---------------------------------------------
+def structural_priors(cand: Candidate, region: Region) -> tuple[bool, str | None]:
+    """Hard gates generalising the proven gradient guards. A failure disqualifies
+    the candidate (with a reason); flat/primitive/path candidates have no prior."""
+    f = cand.fill
+    if isinstance(f, (LinearGradientFill, RadialGradientFill)):
+        if _stop_span(f.stops) < _MIN_STOP_SPAN:
+            return False, "gradient stop-span below minimum"
+        if _dominant_blob_fraction(region.mask) < _BLOB_DOMINANCE:
+            return False, "gradient footprint not a single dominant blob"
+    return True, None

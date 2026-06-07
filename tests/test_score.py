@@ -58,3 +58,29 @@ def test_render_delta_e_large_on_wrong_color():
     wrong = Candidate(Shape("circle", {"cx": 30, "cy": 30, "r": 18}),
                       FlatFill("#ff0000"), "region")
     assert render_delta_e(wrong, src, region) > 0.2
+
+
+from vectormark.score import structural_priors
+
+
+def _square_region(h, w, color_hex):
+    mask = np.zeros((h, w), bool)
+    mask[10:50, 10:50] = True
+    return Region(1, mask, color_hex)
+
+
+def test_priors_reject_degenerate_gradient_stop_span():
+    region = _square_region(60, 60, "#202020")
+    grad = Candidate(Shape("rect", {"x": 10, "y": 10, "w": 40, "h": 40}),
+                     LinearGradientFill({"x1": 10, "y1": 10, "x2": 50, "y2": 10},
+                                        [(0.0, "#202020"), (1.0, "#212121")]), "gradient")
+    ok, reason = structural_priors(grad, region)
+    assert ok is False and "stop-span" in reason
+
+
+def test_priors_pass_flat_and_primitive():
+    region = _square_region(60, 60, "#202020")
+    flat = Candidate(Shape("rect", {"x": 10, "y": 10, "w": 40, "h": 40}),
+                     FlatFill("#202020"), "region")
+    ok, reason = structural_priors(flat, region)
+    assert ok is True and reason is None
