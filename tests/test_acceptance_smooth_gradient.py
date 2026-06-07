@@ -96,3 +96,13 @@ def test_rectified_path_emits_gradient_nonflatten():
     assert "<g transform=" in svg                         # rectified path was taken
     assert svg.count("<linearGradient") == 1              # ...and a gradient was emitted
     assert mean_delta_e(render_svg(svg, w, h), img) <= 0.08
+
+
+def test_rectified_path_emits_gradient_flatten():
+    base = _smooth_linear_rect(160, 240, 40, 200, (85, 145, 225), (70, 125, 210))
+    img = _rotate_img(base, 30)
+    h, w = img.shape[:2]
+    svg = idealize(img, options=Options(flatten=True))
+    assert "<g transform=" not in svg                     # flatten bakes geometry: no wrapping <g>
+    assert svg.count("<linearGradient") == 1              # gradient still emitted (baked geometry)
+    assert mean_delta_e(render_svg(svg, w, h), img) <= 0.08
