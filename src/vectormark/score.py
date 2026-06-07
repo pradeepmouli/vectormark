@@ -50,3 +50,47 @@ def parsimony_cost(cand: Candidate) -> float:
     else:  # RadialGradientFill
         fill = 3.0 + 2.0 * len(f.stops)
     return geom + fill
+
+
+# --- fidelity (render-ΔE via resvg) ---------------------------------------------
+def _resolve_fill_str(fill, defs: list[str]) -> str:
+    """Flat -> hex; gradient -> register a def (g{N}) and return url(#...)."""
+    if isinstance(fill, FlatFill):
+        return fill.hex
+    g = fill.geometry
+    gid = f"g{len(defs)}"
+    if isinstance(fill, LinearGradientFill):
+        defs.append(linear_gradient_def(gid, g["x1"], g["y1"], g["x2"], g["y2"], fill.stops))
+    else:
+        defs.append(radial_gradient_def(gid, g["cx"], g["cy"], g["r"], fill.stops))
+    return f"url(#{gid})"
+
+
+def _candidate_svg(cand: Candidate, w: int, h: int) -> str:
+    defs: list[str] = []
+    fill = _resolve_fill_str(cand.fill, defs)
+    rule = cand.geometry.params.get("fill_rule",
+                                    "evenodd" if cand.geometry.kind == "annulus" else None)
+    body = [path_svg(shape_to_path_d(cand.geometry), fill, rule)]
+    return render_svg_doc(w, h, body, defs)
+
+
+def _rasterize(svg: str, w: int, h: int) -> np.ndarray:
+    """SVG -> (h, w, 3) uint8 composited on white. (Mirrors tests/_render.render_svg;
+    kept local so src/ does not import test helpers — unify in a later DRY pass.)"""
+    png = resvg_py.svg_to_bytes(svg_string=svg, width=w, height=h)
+    img = Image.open(io.BytesIO(bytes(png)))
+    bg = Image.new("RGB", img.size, (255, 255, 255))
+    bg.paste(img, mask=img.split()[3] if img.mode == "RGBA" else None)
+    return np.asarray(bg, dtype=np.uint8)
+
+
+def render_delta_e(cand: Candidate, source_rgb: np.ndarray, region: Region) -> float:
+    """Render the candidate over the source canvas and compare (mean OKLab ΔE)
+    against the source within the region's footprint. 0 = identical."""
+    h, w = source_rgb.shape[:2]
+    mask = region.mask
+    if not mask.any():
+        return float("inf")
+    raster = _rasterize(_candidate_svg(cand, w, h), w, h)
+    return mean_delta_e(source_rgb[mask], raster[mask])
