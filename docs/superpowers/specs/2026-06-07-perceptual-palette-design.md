@@ -54,18 +54,31 @@ principle: a self-contained change to one function, no pipeline restructuring.
    for counting; the representative returned is a real (full-precision) colour (see step 4).
 2. **Frequency sort.** Sort the binned shades by descending aggregate count (deterministic;
    ties broken by shade value to remove `np.unique` order dependence).
-3. **Greedy perceptual clustering (before any floor).** Walk shades in frequency order; for each,
-   assign it to the first existing cluster whose representative is < `merge_de` (OKLab) away, else
-   start a new cluster. Accumulate each cluster's total pixel count. Because we walk in frequency
-   order, the first shade to seed a cluster is its most-frequent member → it is the representative.
-4. **Representative = most-frequent member.** The seed shade of each cluster (highest count, since
-   frequency-ordered) is the representative, mapped back to a full-precision RGB value. Use the
-   **most-frequent full-precision colour within the seed's bin**, so the returned colour is one that
-   genuinely appears in the image, not the bin corner.
-5. **Floor on cluster totals, then cap.** Drop clusters whose **aggregate** count < `min_fraction *
-   total_pixels`. Sort survivors by aggregate count descending; keep the top `max_colors`.
-6. **Fallback.** If nothing survives but the image is non-empty, return the single most-frequent
-   colour (preserves current behaviour for degenerate inputs).
+3. **Greedy perceptual clustering with a seed-floor (the floor is applied here, not at the end).**
+   Walk bins in frequency order; for each, if it is within `merge_de` (OKLab) of an existing
+   cluster's representative, absorb it (add its count). Otherwise it may **seed a new cluster only if
+   its own aggregate count ≥ `min_fraction * total_pixels`**; a sub-floor bin that matches no
+   existing cluster is dropped. Because we walk in frequency order, the bin that seeds a cluster is
+   its most-frequent member → it is the representative.
+
+   *Why the floor gates seeding rather than being applied once at the end* (revised during
+   implementation): applying the floor only after building every cluster lets mid-gradient AA-blend
+   bins chain together via `merge_de` into a spurious cluster that creeps just over the floor — which
+   reintroduces exactly the blend-colour false positives the band-image regression forbids. Gating
+   *seeding* by the floor keeps genuine marks (whose dominant bin is comfortably supra-floor) while
+   refusing to let sub-floor blend crumbs originate a colour. Sub-floor bins are still **absorbed**
+   into a real cluster they are perceptually close to, so AA edges of a true mark still count toward
+   its weight.
+4. **Representative = most-frequent member.** The seed bin of each cluster (highest count, since
+   frequency-ordered) is the representative, mapped back to the **most-frequent full-precision colour
+   within that bin**, so the returned colour is one that genuinely appears in the image, not the bin
+   corner.
+5. **Cap.** Every surviving cluster is supra-floor by construction (only supra-floor bins seed), so
+   no separate end-of-pipeline floor pass is needed. Sort clusters by aggregate count descending;
+   keep the top `max_colors`.
+6. **Fallback.** If no bin reaches the floor (every bin sub-floor) but the image is non-empty, return
+   the single most-frequent bin's representative (preserves current behaviour for degenerate inputs).
+   Empty image → empty `(0, 3)` array.
 
 ### Why this design (vs. alternatives)
 
@@ -123,6 +136,18 @@ No committed brand assets — synthetic fixtures only.
 7. **Full regression — including the gradient acceptance suite.** The entire existing test suite
    stays green. Gradient detection depends on palette behaviour (band-grouping reads
    `extract_palette`), so the gradient acceptance fixtures are an explicit part of the gate.
+
+## Known limitation (from the seed-floor rule)
+
+Recovery requires the mark's colour to have **at least one 5-bit bin whose aggregate count reaches
+the floor**, not merely a supra-floor sum spread across many sub-floor bins. A genuine thin mark has
+perceptually stable hue, so its shades concentrate in one bin neighbourhood and its dominant bin is
+comfortably supra-floor (the settir-style fixture's blue peaks well above the floor) — so realistic
+marks are recovered. The narrowing only drops a *hyper-dispersed* colour smeared so smoothly across
+many bins that no single bin reaches the floor while the total does; such a colour is gradient-like
+rather than a clean palette entry, and rejecting it is consistent with the band-image regression
+(AA-blend smears must not become palette colours). This is the *safe* failure direction (a miss,
+not a false colour).
 
 ## Non-goals
 
