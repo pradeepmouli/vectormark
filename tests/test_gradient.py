@@ -238,3 +238,58 @@ def test_detect_gradients_dissolves_unfittable_group_back_to_flats():
     fills, remaining = detect_gradients(regions, img)
     assert fills == []                                     # but no model fits -> rejected
     assert {r.label for r in remaining} == {1, 2, 3, 4, 5, 6}  # all bands fall back to flats
+
+
+def test_dominant_blob_fraction():
+    from vectormark.gradient import _dominant_blob_fraction
+    m = np.zeros((20, 40), bool)
+    m[2:18, 2:18] = True                       # one 16x16 blob, rest empty
+    assert _dominant_blob_fraction(m) == 1.0
+    m[2:18, 22:38] = True                      # add a second, equal, disconnected blob
+    assert abs(_dominant_blob_fraction(m) - 0.5) < 1e-9
+    assert _dominant_blob_fraction(np.zeros((5, 5), bool)) == 0.0   # empty -> 0
+
+
+def _smooth_linear_region(h, w, c0, c1):
+    """One full-canvas Region + a horizontally smooth linear gradient image (raw pixels)."""
+    from vectormark.types import Region
+    yy, xx = np.mgrid[:h, :w]
+    t = xx / (w - 1)
+    img = np.empty((h, w, 3))
+    for ch in range(3):
+        img[:, :, ch] = c0[ch] + t * (c1[ch] - c0[ch])
+    img = img.round().astype(np.uint8)
+    return [Region(label=1, mask=np.ones((h, w), bool), color_hex="#000000")], img
+
+
+def test_detect_gradients_smooth_single_blob_fits():
+    from vectormark.gradient import detect_gradients
+    regions, img = _smooth_linear_region(60, 120, (20, 40, 200), (220, 40, 90))
+    fills, remaining = detect_gradients(regions, img)
+    assert len(fills) == 1 and fills[0][1]["kind"] == "linear"
+    assert remaining == []                                   # the blob was consumed
+
+
+def test_detect_gradients_smooth_rejects_multiblob():
+    from vectormark.types import Region
+    from vectormark.gradient import detect_gradients
+    h, w = 60, 140
+    img = np.full((h, w, 3), 255, np.uint8)
+    img[10:50, 10:50] = (220, 30, 30)                        # two disconnected flat blocks
+    img[10:50, 90:130] = (30, 30, 220)
+    m1 = np.zeros((h, w), bool); m1[10:50, 10:50] = True
+    m2 = np.zeros((h, w), bool); m2[10:50, 90:130] = True
+    regions = [Region(label=1, mask=m1, color_hex="#dc1e1e"),
+               Region(label=2, mask=m2, color_hex="#1e1edc")]
+    fills, remaining = detect_gradients(regions, img)
+    assert fills == [] and {r.label for r in remaining} == {1, 2}   # dom 0.5 < 0.85
+
+
+def test_detect_gradients_smooth_rejects_flat_blob():
+    from vectormark.types import Region
+    from vectormark.gradient import detect_gradients
+    h, w = 50, 50
+    img = np.full((h, w, 3), (40, 120, 200), np.uint8)       # one flat colour
+    regions = [Region(label=1, mask=np.ones((h, w), bool), color_hex="#2878c8")]
+    fills, remaining = detect_gradients(regions, img)
+    assert fills == [] and {r.label for r in remaining} == {1}   # fit_gradient -> None

@@ -11,6 +11,7 @@ from scipy import ndimage as ndi
 from .color import extract_palette, quantize
 from .contour import region_contours
 from .emit import (
+    apply_affine_point,
     linear_gradient_def,
     mirror_use,
     path_svg,
@@ -220,7 +221,7 @@ def _render_body(
     # gradient pass consumes, applied uniformly to the remaining flats and the footprint.
     defs: list[str] = []
     gradient_fills: list[tuple[Region, dict]] = []
-    if rgb is not None and bake is None:
+    if rgb is not None:
         gradient_fills, regions = detect_gradients(regions, rgb)
 
     if axis is not None:
@@ -289,6 +290,8 @@ def _render_body(
             continue
         gid = f"g{len(defs)}"
         gg = model["geometry"]
+        if bake is not None:                       # baked frame: map gradient coords too
+            gg = _bake_gradient_geometry(gg, model["kind"], bake)
         if model["kind"] == "linear":
             defs.append(linear_gradient_def(gid, gg["x1"], gg["y1"], gg["x2"], gg["y2"], model["stops"]))
         else:
@@ -315,6 +318,18 @@ def _rectify_affine(rho: float, w0: int, h0: int, rw: int, rh: int) -> Affine:
     return (m[0, 0], m[1, 0], m[0, 1], m[1, 1], m[0, 2], m[1, 2])
 
 
+def _bake_gradient_geometry(geom: dict, kind: str, bake: Affine) -> dict:
+    """Map gradient geometry from the rectified frame to the original via the bake affine
+    (a, b, c, d, e, f): x' = a*x + c*y + e, y' = b*x + d*y + f. The rectify affine is a rigid
+    rotation+translation, so the radial radius is preserved."""
+    if kind == "linear":
+        x1, y1 = apply_affine_point(bake, geom["x1"], geom["y1"])
+        x2, y2 = apply_affine_point(bake, geom["x2"], geom["y2"])
+        return {"x1": x1, "y1": y1, "x2": x2, "y2": y2}
+    cx, cy = apply_affine_point(bake, geom["cx"], geom["cy"])
+    return {"cx": cx, "cy": cy, "r": geom["r"]}
+
+
 def _idealize_rectified(arr: np.ndarray, opt: Options, rho: float, w0: int, h0: int) -> str | None:
     """Rotate the image so the tilted mirror axis is vertical and idealize there.
     Non-flatten output keeps the symmetry (`<use>` mirror about the vertical axis)
@@ -330,12 +345,13 @@ def _idealize_rectified(arr: np.ndarray, opt: Options, rho: float, w0: int, h0: 
     if detect_axis(np.any([r.mask for r in regions], axis=0)) is None:
         return None
     if opt.flatten:
-        body, _ = _render_body(rw, rh, regions, opt, bake=_rectify_affine(rho, w0, h0, rw, rh))
-        return render_svg_doc(w0, h0, body)
-    body, _ = _render_body(rw, rh, regions, opt)
+        body, defs = _render_body(rw, rh, regions, opt,
+                                  bake=_rectify_affine(rho, w0, h0, rw, rh), rgb=rot)
+        return render_svg_doc(w0, h0, body, defs)
+    body, defs = _render_body(rw, rh, regions, opt, rgb=rot)
     wrap = (f'<g transform="translate({_fmt(w0 / 2)} {_fmt(h0 / 2)}) '
             f'rotate({_fmt(round(-rho, 3))}) translate({_fmt(-rw / 2)} {_fmt(-rh / 2)})">')
-    return render_svg_doc(w0, h0, [wrap, *body, "</g>"])
+    return render_svg_doc(w0, h0, [wrap, *body, "</g>"], defs)
 
 
 def idealize(image, *, options: Options | None = None) -> str:

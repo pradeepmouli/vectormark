@@ -16,6 +16,9 @@ from .types import Region
 _MIN_BANDS = 3
 _RAMP_TOL = 0.06          # max OKLab distance of a band colour from the fitted ramp line
 _GATE_DELTA_E = 0.05      # mean OKLab ΔE bar: a fitted model must re-render within this to be accepted
+_BLOB_DOMINANCE = 0.85   # smooth-gradient path: min fraction of the foreground that must lie
+                         # in a single connected component for the mark to be treated as one
+                         # gradient blob (rejects multi-glyph wordmarks before any fit).
 
 
 def _hex_to_oklab(hex_colors: list[str]) -> np.ndarray:
@@ -328,6 +331,27 @@ def _expand_footprint(model: dict, mask: np.ndarray, rgb_image: np.ndarray) -> n
     return np.isin(labels, list(keep))
 
 
+def _dominant_blob_fraction(mask: np.ndarray) -> float:
+    """Fraction of the foreground occupied by its largest connected component
+    (4-connectivity). 1.0 = one solid blob; ~0 = many disconnected pieces; 0.0 if empty."""
+    total = int(mask.sum())
+    if total == 0:
+        return 0.0
+    labels, n = ndi.label(mask)
+    if n == 0:
+        return 0.0
+    sizes = np.bincount(labels.ravel())[1:]       # drop background label 0
+    return float(sizes.max()) / total
+
+
+def _union_mask(regions: list[Region], shape: tuple[int, int]) -> np.ndarray:
+    """Boolean OR of the masks of `regions`, as an all-False array of `shape` if empty."""
+    m = np.zeros(shape, bool)
+    for r in regions:
+        m |= r.mask
+    return m
+
+
 def detect_gradients(
     regions: list[Region], rgb_image: np.ndarray
 ) -> tuple[list[tuple[Region, dict]], list[Region]]:
@@ -336,9 +360,7 @@ def detect_gradients(
     fills: list[tuple[Region, dict]] = []
     consumed: set[int] = set()
     for group in _ramp_groups(regions):
-        mask = np.zeros(rgb_image.shape[:2], bool)
-        for m in group:
-            mask |= m.mask
+        mask = _union_mask(group, rgb_image.shape[:2])
         model = fit_gradient(mask, rgb_image)
         if model is None:
             continue                                   # dissolve back into flat bands
@@ -347,5 +369,21 @@ def detect_gradients(
         footprint = Region(label=rep.label, mask=mask, color_hex=rep.color_hex)
         fills.append((footprint, model))
         consumed.update(m.label for m in group)
+    # smooth-gradient path: band-grouping only fires on posterized ramps (≥3 adjacent bands).
+    # A smooth ramp collapses to ~1 region at palette extraction, so test the leftover mark as
+    # a single gradient blob fit to the ORIGINAL pixels (see the design spec). Guard with a
+    # dominant-connected-blob check so multi-glyph wordmarks can't be fit as one gradient.
+    # NB: the smooth footprint mask and a band footprint mask are not guaranteed disjoint
+    # (an _expand_footprint-grown band mask can overlap leftover pixels). z-order painting
+    # makes that benign, so a future change must not assume the footprints are disjoint.
+    leftover = [r for r in regions if r.label not in consumed]
+    if leftover:
+        sil = _union_mask(leftover, rgb_image.shape[:2])
+        if _dominant_blob_fraction(sil) >= _BLOB_DOMINANCE:
+            model = fit_gradient(sil, rgb_image)
+            if model is not None:
+                rep = max(leftover, key=lambda r: r.area)
+                fills.append((Region(label=rep.label, mask=sil, color_hex=rep.color_hex), model))
+                consumed.update(r.label for r in leftover)
     remaining = [r for r in regions if r.label not in consumed]
     return fills, remaining
