@@ -22,6 +22,7 @@ from .emit import (
     shape_to_svg,
     transform_path_d,
 )
+from .candidate import Candidate, Fill, FlatFill, LinearGradientFill, RadialGradientFill
 from .fit import Shape, _fmt, fit_path, recognize_polygon, recognize_primitive
 from .gradient import detect_gradients
 from .occlusion import ScenePrimitive, reconstruct_scene
@@ -199,6 +200,60 @@ def _segment_image(arr: np.ndarray, opt: Options) -> tuple[int, int, list[Region
 Affine = tuple[float, float, float, float, float, float]
 
 
+def build_candidates(
+    reconstructed: list, straddlers: list[Region], pairs: list[tuple[Region, Region]],
+    loners: list[Region], gradient_fills: list[tuple[Region, dict]],
+    opt: Options, axis: Axis | None, corner_radius: float,
+) -> list[Candidate]:
+    """Decide geometry + fill per element and return the candidate list in exact
+    paint order: occlusion (by z) -> regions (by area desc) -> gradients (detect
+    order). Elements whose geometry fit returns None are dropped (matching the
+    old per-loop `continue`, so the emit-time id sequence is unchanged)."""
+    cands: list[Candidate] = []
+
+    for elem in sorted(
+        reconstructed,
+        key=lambda e: e.z if isinstance(e, ScenePrimitive) else e.params["z"],
+    ):
+        if isinstance(elem, ScenePrimitive):
+            cands.append(Candidate(Shape(elem.kind, dict(elem.params)),
+                                   FlatFill(elem.color_hex), "occlusion"))
+        else:  # lens Shape("path", {"d", "color_hex", "z"})
+            cands.append(Candidate(Shape("path", {"d": elem.params["d"]}),
+                                   FlatFill(elem.params["color_hex"]), "lens"))
+
+    drawn = (
+        [(r, axis, False) for r in straddlers]
+        + [(canon, None, True) for canon, _ in pairs]
+        + [(r, None, False) for r in loners]
+    )
+    drawn.sort(key=lambda rp: rp[0].area, reverse=True)
+    for region, fit_axis, is_pair in drawn:
+        shape = _fit_region(region, opt, fit_axis, corner_radius)
+        if shape is None:
+            continue
+        cands.append(Candidate(shape, FlatFill(region.color_hex), "region",
+                               mirror=axis if is_pair else None))
+
+    # Gradient footprints paint after all flats/occlusion. _expand_footprint can
+    # grow a footprint over former-background pixels, so strict spatial
+    # disjointness no longer holds; non-matching elements survive as even-odd
+    # holes / separate flats, keeping paint order safe. True behind-a-flat
+    # layering of a gradient footprint is out of scope.
+    for footprint, model in gradient_fills:
+        shape = _fit_region(footprint, opt, None, corner_radius)
+        if shape is None:
+            continue
+        g = model["geometry"]
+        fill: Fill = (
+            LinearGradientFill(g, model["stops"]) if model["kind"] == "linear"
+            else RadialGradientFill(g, model["stops"])
+        )
+        cands.append(Candidate(shape, fill, "gradient"))
+
+    return cands
+
+
 def _render_body(
     w: int, h: int, regions: list[Region], opt: Options, *,
     bake: Affine | None = None, rgb: np.ndarray | None = None,
@@ -229,78 +284,45 @@ def _render_body(
     else:
         straddlers, pairs, loners = list(regions), [], []
 
+    cands = build_candidates(
+        reconstructed, straddlers, pairs, loners, gradient_fills, opt, axis, corner_radius
+    )
+
     def emit(d: str, fill: str, rule: str | None = None) -> str:
         return path_svg(transform_path_d(d, bake) if bake is not None else d, fill, rule)
 
+    def resolve_fill(fill: Fill) -> str:
+        if isinstance(fill, FlatFill):
+            return fill.hex
+        g = fill.geometry
+        if bake is not None:
+            kind = "linear" if isinstance(fill, LinearGradientFill) else "radial"
+            g = _bake_gradient_geometry(g, kind, bake)
+        gid = f"g{len(defs)}"
+        if isinstance(fill, LinearGradientFill):
+            defs.append(linear_gradient_def(gid, g["x1"], g["y1"], g["x2"], g["y2"], fill.stops))
+        else:
+            defs.append(radial_gradient_def(gid, g["cx"], g["cy"], g["r"], fill.stops))
+        return f"url(#{gid})"
+
     body: list[str] = []
     eid = 0
-
-    # 1) reconstructed occlusion primitives + lenses, painted in their own z-order
-    for elem in sorted(reconstructed, key=lambda e: e.z if isinstance(e, ScenePrimitive) else e.params["z"]):
-        if isinstance(elem, ScenePrimitive):
-            shape = Shape(elem.kind, dict(elem.params))
-            if opt.flatten:
-                # an annulus is two same-winding circles: it only reads as a ring
-                # under even-odd fill, so carry that rule onto the baked path too.
-                rule = "evenodd" if elem.kind == "annulus" else None
-                body.append(emit(shape_to_path_d(shape), elem.color_hex, rule))
-            else:
-                body.append(shape_to_svg(shape, elem.color_hex, f"s{eid}"))
-        else:  # lens Shape("path", {"d", "color_hex", "z"})
-            body.append(emit(elem.params["d"], elem.params["color_hex"]))
-        eid += 1
-
-    # 2) everything else through the existing per-region path. Straddlers fit
-    # half-and-mirror about the axis; pairs fit once + <use> mirror; loners
-    # (asymmetric, unpaired) fit as-is with no axis so they aren't force-mirrored.
-    drawn = (
-        [(r, axis, False) for r in straddlers]
-        + [(canon, None, True) for canon, _ in pairs]
-        + [(r, None, False) for r in loners]
-    )
-    drawn.sort(key=lambda rp: rp[0].area, reverse=True)
-    for region, fit_axis, is_pair in drawn:
-        shape = _fit_region(region, opt, fit_axis, corner_radius)
-        if shape is None:
-            continue
+    for cand in cands:
+        geom = cand.geometry
+        fill = resolve_fill(cand.fill)
         if opt.flatten:
-            d = shape_to_path_d(shape)
-            rule = shape.params.get("fill_rule")
-            body.append(emit(d, region.color_hex, rule))
-            if is_pair and axis is not None:
-                body.append(emit(reflect_path_d(d, axis.x), region.color_hex, rule))
+            d = shape_to_path_d(geom)
+            rule = geom.params.get("fill_rule", "evenodd" if geom.kind == "annulus" else None)
+            body.append(emit(d, fill, rule))
+            if cand.mirror is not None:
+                body.append(emit(reflect_path_d(d, cand.mirror.x), fill, rule))
+        elif cand.source == "lens":
+            body.append(emit(geom.params["d"], fill))
         else:
             elem_id = f"s{eid}"
-            body.append(shape_to_svg(shape, region.color_hex, elem_id))
-            if is_pair and axis is not None:
-                body.append(mirror_use(elem_id, axis))
-        eid += 1
-
-    # gradient-filled footprints: fit the outline with the normal recognizers, emit
-    # with fill="url(#gN)" and register the gradient def. axis=None (gradient marks
-    # aren't force-mirrored in this cut). Emitted after all flats/occlusion prims.
-    # NOTE: _expand_footprint can grow a gradient footprint over former-background
-    # pixels, so the strict spatial-disjointness invariant no longer holds; distinct
-    # non-matching elements survive as even-odd holes / separate flats, so paint
-    # order remains safe in practice. True behind-a-flat layering of an idealized
-    # gradient footprint is out of scope in this cut.
-    for footprint, model in gradient_fills:
-        shape = _fit_region(footprint, opt, None, corner_radius)
-        if shape is None:
-            continue
-        gid = f"g{len(defs)}"
-        gg = model["geometry"]
-        if bake is not None:                       # baked frame: map gradient coords too
-            gg = _bake_gradient_geometry(gg, model["kind"], bake)
-        if model["kind"] == "linear":
-            defs.append(linear_gradient_def(gid, gg["x1"], gg["y1"], gg["x2"], gg["y2"], model["stops"]))
-        else:
-            defs.append(radial_gradient_def(gid, gg["cx"], gg["cy"], gg["r"], model["stops"]))
-        fill = f"url(#{gid})"
-        if opt.flatten:
-            body.append(emit(shape_to_path_d(shape), fill, shape.params.get("fill_rule")))
-        else:
-            body.append(shape_to_svg(shape, fill, f"s{eid}"))
+            body.append(shape_to_svg(geom, fill, elem_id))
+            if cand.mirror is not None:
+                body.append(mirror_use(elem_id, cand.mirror))
         eid += 1
 
     return body, defs
