@@ -88,7 +88,8 @@ def _trim_to_ramp(members: list[Region], adj: dict) -> list[Region] | None:
                   if len(adj[m.label] & cur_labels) <= 1]
         if not leaves:
             break                                           # no leaf to trim -> give up
-        # Remove the leaf that least fits the ramp (highest residual after removal)
+        # Remove the worst-fitting leaf: try each, keep the trial whose remaining set
+        # has the LOWEST ramp residual (so dropping the outlier leaf wins).
         best_trim = None
         best_score = np.inf
         for leaf in leaves:

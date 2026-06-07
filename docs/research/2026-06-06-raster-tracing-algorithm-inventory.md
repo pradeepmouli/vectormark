@@ -9,8 +9,11 @@ it segments colored regions, then per region either snaps to an ideal primitive
 corner detection, even-odd holes), plus symmetry and occlusion reconstruction.
 
 **License is load-bearing.** vectormark is MIT; GPL/CPL code is disqualifying for code reuse.
-Algorithms themselves are not copyrightable — only specific source is — so a GPL tool's
-*math* can always be reimplemented clean-room; its *code* cannot be copied.
+As a general rule an algorithm/idea is not protected by copyright (only the specific source
+is), so a GPL tool's *math* can typically be reimplemented clean-room while its *code* cannot
+be copied — but this is a rule of thumb, not legal advice: patents can cover techniques, and
+clean-room reimplementation must avoid copying the original expression. Check specifics before
+relying on any single algorithm.
 
 ## Foundational positioning: idealize vs. reproduce
 
