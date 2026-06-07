@@ -312,3 +312,238 @@ def test_reconstruct_declines_weave():
     reconstructed, remaining = reconstruct_scene(regions, None, (h, w))
     assert reconstructed == []                    # cyclic -> declined
     assert len(remaining) == 3
+
+
+# --- Task 1 (polygon completer): geometry helpers ---
+
+
+def test_fit_line_recovers_horizontal_line():
+    from vectormark.occlusion import _fit_line
+    pts = np.array([[0.0, 5.0], [2.0, 5.0], [4.0, 5.0], [6.0, 5.0]])
+    a, b, c, resid = _fit_line(pts)
+    # line is y == 5  ->  normal is (0, 1), offset c == 5
+    assert resid < 1e-6
+    assert abs(a * 3.0 + b * 5.0 - c) < 1e-6      # a point on the line satisfies ax+by=c
+    assert abs(a * 3.0 + b * 9.0 - c) > 3.0       # a point 4px off has large signed distance
+
+
+def test_fit_line_reports_residual_for_noisy_points():
+    from vectormark.occlusion import _fit_line
+    pts = np.array([[0.0, 0.0], [2.0, 0.0], [4.0, 3.0], [6.0, 0.0]])  # one 3px outlier
+    _, _, _, resid = _fit_line(pts)
+    assert resid > 1.0
+
+
+def test_line_intersect_crossing_lines():
+    from vectormark.occlusion import _fit_line, _line_intersect
+    horiz = _fit_line(np.array([[0.0, 4.0], [8.0, 4.0]]))
+    vert = _fit_line(np.array([[5.0, 0.0], [5.0, 9.0]]))
+    p = _line_intersect(horiz, vert)
+    assert p is not None
+    assert abs(p[0] - 5.0) < 1e-6 and abs(p[1] - 4.0) < 1e-6
+
+
+def test_line_intersect_parallel_returns_none():
+    from vectormark.occlusion import _fit_line, _line_intersect
+    l1 = _fit_line(np.array([[0.0, 0.0], [8.0, 0.0]]))
+    l2 = _fit_line(np.array([[0.0, 3.0], [8.0, 3.0]]))
+    assert _line_intersect(l1, l2) is None
+
+
+def test_is_convex_accepts_square_rejects_arrow():
+    from vectormark.occlusion import _is_convex
+    square = [(0.0, 0.0), (4.0, 0.0), (4.0, 4.0), (0.0, 4.0)]
+    assert _is_convex(square)
+    concave = [(0.0, 0.0), (4.0, 0.0), (2.0, 2.0), (4.0, 4.0), (0.0, 4.0)]  # arrowhead notch
+    assert not _is_convex(concave)
+
+
+def test_own_runs_single_contiguous_arc():
+    from vectormark.occlusion import _own_runs
+    contour = np.array([[float(i), 0.0] for i in range(10)])
+    seam = np.array([False, False, False, True, True, True, False, False, False, False])
+    runs = _own_runs(contour, seam)
+    assert len(runs) == 1                       # the seam splits the cyclic loop into one own arc
+    assert len(runs[0]) == 7                     # indices 6,7,8,9,0,1,2 wrap across 0
+
+
+def test_own_runs_no_seam_returns_whole_contour():
+    from vectormark.occlusion import _own_runs
+    contour = np.array([[float(i), 0.0] for i in range(5)])
+    seam = np.zeros(5, bool)
+    runs = _own_runs(contour, seam)
+    assert len(runs) == 1 and len(runs[0]) == 5
+
+
+def test_own_runs_all_seam_returns_empty():
+    from vectormark.occlusion import _own_runs
+    contour = np.array([[float(i), 0.0] for i in range(5)])
+    runs = _own_runs(contour, np.ones(5, bool))
+    assert runs == []
+
+
+def test_own_runs_two_disjoint_arcs():
+    from vectormark.occlusion import _own_runs
+    contour = np.array([[float(i), 0.0] for i in range(10)])
+    seam = np.array([True, False, False, True, True, False, False, False, True, True])
+    runs = _own_runs(contour, seam)
+    assert len(runs) == 2
+    lengths = sorted(len(r) for r in runs)
+    assert lengths == [2, 3]   # runs [1,2] and [5,6,7]
+
+
+def _diamond_mask(cx, cy, r, h, w):
+    yy, xx = np.ogrid[:h, :w]
+    return (np.abs(xx - cx) + np.abs(yy - cy)) <= r          # L1 ball == axis-aligned diamond
+
+
+def _disk_mask(cx, cy, r, h, w):
+    yy, xx = np.ogrid[:h, :w]
+    return (xx - cx) ** 2 + (yy - cy) ** 2 <= r ** 2
+
+
+def test_complete_polygon_recovers_occluded_diamond():
+    from vectormark.occlusion import complete_polygon, _MAX_RESIDUAL, _MAX_VERTICES
+    h, w = 160, 220
+    cx, cy, r = 80, 80, 46
+    diamond = _diamond_mask(cx, cy, r, h, w) & ~_disk_mask(126, 80, 30, h, w)  # right corner bitten
+    occluder = _disk_mask(126, 80, 30, h, w)
+    region = Region(label=1, mask=diamond, color_hex="#3366cc")
+    other = Region(label=2, mask=occluder, color_hex="#cc3333")
+    prim = complete_polygon(region, [other], max_residual=_MAX_RESIDUAL, max_vertices=_MAX_VERTICES)
+    assert prim is not None and prim["kind"] == "polygon"
+    pts = prim["params"]["points"]
+    assert len(pts) == 4
+    # the four recovered corners are each within tolerance of a true diamond corner
+    truth = [(cx, cy - r), (cx + r, cy), (cx, cy + r), (cx - r, cy)]
+    for tx, ty in truth:
+        assert min(np.hypot(px - tx, py - ty) for px, py in pts) <= 2.5
+
+
+def test_complete_polygon_rejects_curved_disk_fragment():
+    from vectormark.occlusion import complete_polygon, _MAX_RESIDUAL, _MAX_VERTICES
+    h, w = 160, 200
+    disk = _disk_mask(90, 80, 50, h, w) & ~_disk_mask(150, 80, 28, h, w)   # big disk, small bite
+    occluder = _disk_mask(150, 80, 28, h, w)
+    region = Region(label=1, mask=disk, color_hex="#3366cc")
+    other = Region(label=2, mask=occluder, color_hex="#cc3333")
+    # a curved boundary RDP-splits into more than _MAX_VERTICES straight edges -> rejected
+    assert complete_polygon(region, [other], max_residual=_MAX_RESIDUAL, max_vertices=_MAX_VERTICES) is None
+
+
+def test_complete_polygon_recovers_diamond_with_two_corners_bitten():
+    # A diamond clipped by TWO separate occluders (top and bottom corners), with all
+    # four edges still partly visible -> the own boundary is TWO runs. complete_polygon
+    # must collect edge lines across BOTH runs in cyclic order to recover all four
+    # corners (including the two hidden ones). Regression for keeping only the longest
+    # run, which would drop one arc's edges and decline.
+    from vectormark.occlusion import complete_polygon, _MAX_RESIDUAL, _MAX_VERTICES
+    h, w = 180, 180
+    cx, cy, r = 90, 90, 50
+    top = _disk_mask(90, 40, 16, h, w)       # hides top corner (90,40)
+    bot = _disk_mask(90, 140, 16, h, w)      # hides bottom corner (90,140)
+    diamond = _diamond_mask(cx, cy, r, h, w) & ~top & ~bot
+    region = Region(label=1, mask=diamond, color_hex="#3366cc")
+    others = [Region(label=2, mask=top, color_hex="#cc3333"),
+              Region(label=3, mask=bot, color_hex="#cc3333")]
+    prim = complete_polygon(region, others, max_residual=_MAX_RESIDUAL, max_vertices=_MAX_VERTICES)
+    assert prim is not None and prim["kind"] == "polygon"
+    pts = prim["params"]["points"]
+    assert len(pts) == 4
+    truth = [(cx, cy - r), (cx + r, cy), (cx, cy + r), (cx - r, cy)]
+    for tx, ty in truth:
+        assert min(np.hypot(px - tx, py - ty) for px, py in pts) <= 2.5
+
+
+def test_complete_polygon_recovers_diamond_with_midedge_bite():
+    # An occluder biting the MIDDLE of one edge (touching neither corner) splits that
+    # edge into two collinear fitted segments (one each side of the bite). They land at
+    # the start and end of the single own run, so the cyclic wrap pairs them — two
+    # collinear lines whose intersection is None. complete_polygon must COALESCE the
+    # collinear (incl. wraparound) pair before intersecting, else it declines a valid
+    # "every edge partly visible" case. (Codex P2: split collinear edge runs.)
+    from vectormark.occlusion import complete_polygon, _MAX_RESIDUAL, _MAX_VERTICES
+    h, w = 180, 180
+    cx, cy, r = 90, 90, 50
+    bite = _disk_mask(115, 65, 14, h, w)     # midpoint of edge T(90,40)-R(140,90); reaches no corner
+    diamond = _diamond_mask(cx, cy, r, h, w) & ~bite
+    region = Region(label=1, mask=diamond, color_hex="#3366cc")
+    other = Region(label=2, mask=bite, color_hex="#cc3333")
+    prim = complete_polygon(region, [other], max_residual=_MAX_RESIDUAL, max_vertices=_MAX_VERTICES)
+    assert prim is not None and prim["kind"] == "polygon"
+    pts = prim["params"]["points"]
+    assert len(pts) == 4
+    truth = [(cx, cy - r), (cx + r, cy), (cx, cy + r), (cx - r, cy)]
+    for tx, ty in truth:
+        assert min(np.hypot(px - tx, py - ty) for px, py in pts) <= 2.5
+
+
+# --- Task 4 (polygon branch): primitive_mask polygon case ---
+def test_primitive_mask_polygon_membership():
+    from vectormark.occlusion import primitive_mask
+    # an asymmetric rectangle: x in [2,7] (width 5), y in [2,12] (height 10).
+    # Asymmetric extents make the (x,y)->(row,col) swap load-bearing — a reversed
+    # swap would fail these assertions.
+    prim = {"kind": "polygon", "params": {"points": [(2.0, 2.0), (7.0, 2.0), (7.0, 12.0), (2.0, 12.0)]}}
+    mask = primitive_mask(prim, 15, 10)
+    assert mask[6, 4]        # row=6 (y=6 in [2,12]), col=4 (x=4 in [2,7]) -> inside
+    assert not mask[1, 4]    # row=1 (y=1 < 2) -> outside
+    assert not mask[0, 0]    # grid corner -> outside
+    assert mask.dtype == bool
+
+
+# --- Task 5: _complete_member dispatches polygonal fragments ---
+def test_complete_member_dispatches_diamond_to_polygon():
+    from vectormark.occlusion import _complete_member
+    h, w = 160, 220
+    diamond = _diamond_mask(80, 80, 46, h, w) & ~_disk_mask(126, 80, 30, h, w)
+    occluder = _disk_mask(126, 80, 30, h, w)
+    region = Region(label=1, mask=diamond, color_hex="#3366cc")
+    other = Region(label=2, mask=occluder, color_hex="#cc3333")
+    prim = _complete_member(region, [other])
+    assert prim is not None and prim["kind"] == "polygon"
+
+
+# --- Task 7: gate declines polygon with whole edge hidden ---
+def test_reconstruct_scene_declines_polygon_with_whole_edge_hidden():
+    """Safety-contract test: when a WHOLE edge of a polygon is hidden, complete_polygon
+    recovers a wrong corner; the consistency gate (stack_agreement < _GATE_AGREEMENT)
+    must detect the disagreement and decline the group, leaving the region in remaining.
+
+    Fixture: a regular pentagon (5 vertices) whose top-right edge (corner[0]→corner[1])
+    is completely covered by a disk occluder. The disk creates a concave bite, so
+    has_bite is True and a group forms. The two visible edges flanking the seam are
+    non-parallel, so complete_polygon does return *some* polygon — but it is wrong
+    (the recovered corner replaces the two hidden corners with a single intersection
+    point outside the true shape). The gate rejects this and leaves label 1 in remaining.
+    """
+    from skimage.draw import polygon2mask
+    from vectormark.occlusion import _complete_member
+
+    h, w = 200, 240
+    cx, cy, r_pent = 100, 100, 65
+    # Five vertices of a regular pentagon: top first, then clockwise in image coords (y-down).
+    angles = [np.pi / 2 - 2 * np.pi * k / 5 for k in range(5)]
+    pts_xy = [(cx + r_pent * np.cos(a), cy - r_pent * np.sin(a)) for a in angles]
+    # polygon2mask wants (row, col) == (y, x) for each vertex.
+    pentagon = polygon2mask((h, w), np.array([(y, x) for x, y in pts_xy])).astype(bool)
+
+    # Disk occluder centred on the midpoint of the top-right edge (corner 0 → corner 1),
+    # with radius large enough to fully cover both endpoints of that edge.
+    c0, c1 = np.array(pts_xy[0]), np.array(pts_xy[1])
+    mid_xy = (c0 + c1) / 2
+    occ_r = float(np.hypot(c1[0] - c0[0], c1[1] - c0[1])) / 2 + 10
+    occ_mask = _disk_mask(mid_xy[0], mid_xy[1], occ_r, h, w)
+
+    region = Region(label=1, mask=pentagon & ~occ_mask, color_hex="#3366cc")
+    occ = Region(label=2, mask=occ_mask, color_hex="#cc3333")
+
+    # Non-vacuous guard: completion DOES produce a (wrong) convex-polygon candidate
+    # (the two seam-flanking pentagon edges are non-parallel, unlike a diamond's),
+    # so the decline below is the consistency gate rejecting it
+    # (stack_agreement ~= 0.9455 < _GATE_AGREEMENT = 0.96), NOT a silent skip from
+    # has_bite=False or _complete_member returning None.
+    assert _complete_member(region, [occ]) is not None
+    reconstructed, remaining = reconstruct_scene([region, occ], None, (h, w))
+    assert 1 in {r.label for r in remaining}                       # declined -> fallback
+    assert not any(getattr(e, "kind", None) == "polygon" for e in reconstructed)  # nothing emitted

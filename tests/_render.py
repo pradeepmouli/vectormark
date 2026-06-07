@@ -24,3 +24,17 @@ def render_svg(svg: str, width: int, height: int) -> np.ndarray:
 def ssim(a: np.ndarray, b: np.ndarray) -> float:
     """Structural similarity in [0, 1]; 1.0 == identical."""
     return float(structural_similarity(a, b, channel_axis=-1))
+
+
+def paint(layers, h, w) -> np.ndarray:
+    """Composite (mask, color) layers onto a white (h, w, 3) canvas, in order."""
+    img = np.full((h, w, 3), 255, np.uint8)
+    for mask, color in layers:
+        img[mask] = color
+    return img
+
+
+def disk(cx, cy, r, h, w) -> np.ndarray:
+    """Boolean (h, w) mask of a filled disk centered at (cx, cy) with radius r."""
+    yy, xx = np.ogrid[:h, :w]
+    return (xx - cx) ** 2 + (yy - cy) ** 2 <= r ** 2
