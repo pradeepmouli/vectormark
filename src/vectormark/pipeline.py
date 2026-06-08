@@ -23,11 +23,11 @@ from .emit import (
     transform_path_d,
 )
 from .candidate import Candidate, Fill, FlatFill, LinearGradientFill, RadialGradientFill
-from .fit import Shape, _fmt, fit_path, recognize_polygon, recognize_primitive
+from .fit import Shape, _fmt
 from .gradient import detect_gradients
 from .occlusion import ScenePrimitive, reconstruct_scene
-from .refine import half_ellipse_cap_fit, rounded_trapezoid_fit, symmetric_fit, symmetric_polygon_fit
 from .segment import segment
+from .selector import select_geometry
 from .symmetry import classify_regions, detect_axis, detect_symmetry_rotation
 from .types import Axis, Region
 
@@ -83,6 +83,7 @@ class Options:
     flatten: bool = False
     no_symmetry: bool = False
     corner_radius: float | None = None  # shared fillet radius; None = auto from geometry
+    fidelity_tol: float = 0.06        # selector's render-ΔE gate (slice 4a)
 
 
 def _mark_corner_radius(regions: list[Region], axis: Axis | None) -> float:
@@ -105,78 +106,6 @@ def _mark_corner_radius(regions: list[Region], axis: Axis | None) -> float:
     if not heights:
         return 0.0
     return round(_CORNER_RADIUS_FRACTION * heights[len(heights) // 2], 1)
-
-
-def _fit_region(region: Region, opt: Options, axis: Axis | None, corner_radius: float) -> Shape | None:
-    contours = [c for c in region_contours(region.mask) if len(c) >= 3]
-    if not contours:
-        return None
-    if len(contours) > 1:
-        # holes / counters: outer + inner contours as subpaths, even-odd fill.
-        # Skip primitive/polygon recognition (those see the outer ring only and
-        # would fill the hole solid).
-        #
-        # A holed straddler arrives with an axis (post-classification, only
-        # self-symmetric regions carry one), so fit each contour's half-outline
-        # and mirror it → an exactly-symmetric counter. If any contour doesn't
-        # straddle cleanly, fall back to the faithful per-contour fit.
-        if axis is not None:
-            halves = [
-                symmetric_fit(c, axis.x, corner_radius=corner_radius,
-                              epsilon=opt.epsilon, max_error=opt.max_error)
-                for c in contours
-            ]
-            if all(s is not None for s in halves):
-                d = " ".join(s.params["d"] for s in halves)
-                return Shape("path", {"d": d, "fill_rule": "evenodd"})
-        d = " ".join(
-            fit_path(c, epsilon=opt.epsilon, max_error=opt.max_error).params["d"]
-            for c in contours
-        )
-        return Shape("path", {"d": d, "fill_rule": "evenodd"})
-
-    contour = contours[0]
-    shape = recognize_primitive(contour, epsilon=opt.epsilon)
-    if shape is not None:
-        return _snap_to_axis(shape, axis) if axis is not None else shape
-
-    # Straddling, non-primitive region (dome, tip): fit the half-outline and
-    # mirror it → exactly symmetric. (Pairs arrive with axis=None and are
-    # mirrored via <use> instead; no axis → no symmetry to lock.)
-    if axis is not None:
-        # band-like? a clean rounded trapezoid (straight tapering sides + flat
-        # top/bottom + filleted corners) beats the free half-outline fit.
-        trap = rounded_trapezoid_fit(contour, axis.x, radius=corner_radius, max_error=opt.max_error)
-        if trap is not None:
-            return trap
-        # sharp-edged symmetric polygon (a diamond, an arrow)? keep it crisp —
-        # straight edges + sharp corners — instead of letting symmetric_fit curve it.
-        poly = symmetric_polygon_fit(contour, axis.x, epsilon=opt.epsilon)
-        if poly is not None:
-            return poly
-        # flat-based dome cap? a parametric half-ellipse (two convex kappa arcs)
-        # beats the free half-outline fit and is inflection-free by construction.
-        cap = half_ellipse_cap_fit(contour, axis.x, corner_radius=corner_radius, max_error=opt.max_error)
-        if cap is not None:
-            return cap
-        sym = symmetric_fit(contour, axis.x, corner_radius=corner_radius,
-                            epsilon=opt.epsilon, max_error=opt.max_error)
-        if sym is not None:
-            return sym
-
-    shape = recognize_polygon(contour, epsilon=opt.epsilon)
-    if shape is None:
-        shape = fit_path(contour, epsilon=opt.epsilon, max_error=opt.max_error)
-    return shape
-
-
-def _snap_to_axis(shape: Shape, axis: Axis) -> Shape:
-    """Force x-centre of a straddling primitive onto the axis for exact symmetry."""
-    if shape.kind in ("circle", "ellipse"):
-        shape.params["cx"] = axis.x
-    elif shape.kind == "rect":
-        shape.params["x"] = axis.x - shape.params["w"] / 2
-    return shape
 
 
 def _segment_image(arr: np.ndarray, opt: Options) -> tuple[int, int, list[Region]]:
@@ -204,6 +133,7 @@ def build_candidates(
     reconstructed: list, straddlers: list[Region], pairs: list[tuple[Region, Region]],
     loners: list[Region], gradient_fills: list[tuple[Region, dict]],
     opt: Options, axis: Axis | None, corner_radius: float,
+    source_rgb: np.ndarray | None,
 ) -> list[Candidate]:
     """Decide geometry + fill per element and return the candidate list in exact
     paint order: occlusion (by z) -> regions (by area desc) -> gradients (detect
@@ -229,7 +159,7 @@ def build_candidates(
     )
     drawn.sort(key=lambda rp: rp[0].area, reverse=True)
     for region, fit_axis, is_pair in drawn:
-        shape = _fit_region(region, opt, fit_axis, corner_radius)
+        shape = select_geometry(region, opt, fit_axis, corner_radius, source_rgb)
         if shape is None:
             continue
         cands.append(Candidate(shape, FlatFill(region.color_hex), "region",
@@ -241,7 +171,7 @@ def build_candidates(
     # holes / separate flats, keeping paint order safe. True behind-a-flat
     # layering of a gradient footprint is out of scope.
     for footprint, model in gradient_fills:
-        shape = _fit_region(footprint, opt, None, corner_radius)
+        shape = select_geometry(footprint, opt, None, corner_radius, source_rgb)
         if shape is None:
             continue
         g = model["geometry"]
@@ -285,7 +215,7 @@ def _render_body(
         straddlers, pairs, loners = list(regions), [], []
 
     cands = build_candidates(
-        reconstructed, straddlers, pairs, loners, gradient_fills, opt, axis, corner_radius
+        reconstructed, straddlers, pairs, loners, gradient_fills, opt, axis, corner_radius, rgb
     )
 
     def emit(d: str, fill: str, rule: str | None = None) -> str:

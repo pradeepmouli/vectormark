@@ -72,14 +72,28 @@ def _rasterize(svg: str, w: int, h: int) -> np.ndarray:
     return np.asarray(bg, dtype=np.uint8)
 
 
-def render_delta_e(cand: Candidate, source_rgb: np.ndarray, region: Region) -> float:
+def render_delta_e(
+    cand: Candidate, source_rgb: np.ndarray, region: Region, *,
+    bbox: tuple[int, int, int, int] | None = None,
+) -> float:
     """Render the candidate over the source canvas and compare (mean OKLab ΔE)
-    against the source within the region's footprint. 0 = identical."""
+    against the source within the region's footprint. 0 = identical. When `bbox`
+    (x0, y0, x1, y1) is given, the rasterization is still full-canvas (resvg needs
+    the canvas dims), but the ΔE comparison is restricted to that crop (mask
+    intersected with the bbox) — a speed optimization on the comparison; identical
+    result to full-canvas for the compared pixels."""
     h, w = source_rgb.shape[:2]
     mask = region.mask
     if not mask.any():
         return float("inf")
     raster = _rasterize(_candidate_svg(cand, w, h), w, h)
+    if bbox is not None:
+        x0, y0, x1, y1 = bbox
+        x0 = max(0, x0); y0 = max(0, y0); x1 = min(w, x1); y1 = min(h, y1)
+        if x1 > x0 and y1 > y0:
+            sub = mask[y0:y1, x0:x1]
+            if sub.any():
+                return mean_delta_e(source_rgb[y0:y1, x0:x1][sub], raster[y0:y1, x0:x1][sub])
     return mean_delta_e(source_rgb[mask], raster[mask])
 
 
@@ -108,16 +122,17 @@ class ScoreBreakdown:
 
 def rank_candidates(
     cands: list[Candidate], source_rgb: np.ndarray, region: Region, *,
-    fidelity_tol: float = 0.06,
+    fidelity_tol: float = 0.06, bbox: tuple[int, int, int, int] | None = None,
 ) -> list[tuple[Candidate, ScoreBreakdown]]:
     """Rank candidates best-first by the lexicographic rule: qualifiers (priors ok
     AND ΔE <= fidelity_tol) first, ordered by parsimony then ΔE; disqualified
     candidates follow, ordered by ΔE. Returns the full list with breakdowns so a
-    caller can inspect/override."""
+    caller can inspect/override. When `bbox` (x0, y0, x1, y1) is given it is
+    forwarded to render_delta_e for a bbox-cropped fidelity comparison."""
     scored: list[tuple[Candidate, ScoreBreakdown]] = []
     for c in cands:
         ok, reason = structural_priors(c, region)
-        de = render_delta_e(c, source_rgb, region) if ok else float("inf")
+        de = render_delta_e(c, source_rgb, region, bbox=bbox) if ok else float("inf")
         par = parsimony_cost(c)
         scored.append((c, ScoreBreakdown(de, par, ok, reason, ok and de <= fidelity_tol)))
 
