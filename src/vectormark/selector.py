@@ -92,3 +92,31 @@ def generate_geometry_candidates(
         cands.append(fit_path(contour, epsilon=opt.epsilon, max_error=opt.max_error))
 
     return cands
+
+
+def _region_bbox(mask: np.ndarray, margin: int = 2) -> tuple[int, int, int, int] | None:
+    ys, xs = np.where(mask)
+    if len(xs) == 0:
+        return None
+    h, w = mask.shape
+    return (max(0, int(xs.min()) - margin), max(0, int(ys.min()) - margin),
+            min(w, int(xs.max()) + 1 + margin), min(h, int(ys.max()) + 1 + margin))
+
+
+def select_geometry(
+    region: Region, opt, axis: Axis | None, corner_radius: float,
+    source_rgb: np.ndarray | None,
+) -> Shape | None:
+    """Generate geometry candidates, score them (simplest faithful geometry wins),
+    return the winning Shape. Without `source_rgb` (nothing to score against) fall
+    back to candidates[0] = the cascade-priority pick. None if no candidate."""
+    cands = generate_geometry_candidates(region, opt, axis, corner_radius)
+    if not cands:
+        return None
+    if source_rgb is None:
+        return cands[0]
+    wrapped = [Candidate(s, FlatFill(region.color_hex), "region") for s in cands]
+    bbox = _region_bbox(region.mask)
+    tol = getattr(opt, "fidelity_tol", 0.06)
+    ranked = rank_candidates(wrapped, source_rgb, region, fidelity_tol=tol, bbox=bbox)
+    return ranked[0][0].geometry

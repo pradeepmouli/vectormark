@@ -50,3 +50,28 @@ def test_straddler_with_symmetric_candidate_excludes_nonsymmetric_fallback():
     # Assert a trapezoid-like primitive/path is present and there's no separate
     # recognize_polygon fallback duplicate.
     assert len(cands) >= 1
+
+
+from vectormark.selector import select_geometry
+
+
+def test_select_picks_circle_for_clean_disk():
+    h = w = 100
+    src = np.full((h, w, 3), 255, np.uint8)
+    mask = _disk(50, 50, 32, h, w)
+    src[mask] = (30, 100, 235)
+    region = Region(1, mask, "#1e64eb")
+    shape = select_geometry(region, Options(), None, 0.0, src)
+    assert shape is not None and shape.kind == "circle"
+
+
+def test_select_falls_back_to_first_candidate_without_source():
+    h = w = 80
+    region = Region(1, _disk(40, 40, 25, h, w), "#1e64eb")
+    shape = select_geometry(region, Options(), None, 0.0, None)
+    assert shape is not None and shape.kind == "circle"   # candidates[0]
+
+
+def test_select_returns_none_when_no_contour():
+    region = Region(1, np.zeros((20, 20), bool), "#000000")
+    assert select_geometry(region, Options(), None, 0.0, None) is None

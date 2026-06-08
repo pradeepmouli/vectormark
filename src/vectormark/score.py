@@ -121,16 +121,17 @@ class ScoreBreakdown:
 
 def rank_candidates(
     cands: list[Candidate], source_rgb: np.ndarray, region: Region, *,
-    fidelity_tol: float = 0.06,
+    fidelity_tol: float = 0.06, bbox: tuple[int, int, int, int] | None = None,
 ) -> list[tuple[Candidate, ScoreBreakdown]]:
     """Rank candidates best-first by the lexicographic rule: qualifiers (priors ok
     AND ΔE <= fidelity_tol) first, ordered by parsimony then ΔE; disqualified
     candidates follow, ordered by ΔE. Returns the full list with breakdowns so a
-    caller can inspect/override."""
+    caller can inspect/override. When `bbox` (x0, y0, x1, y1) is given it is
+    forwarded to render_delta_e for a bbox-cropped fidelity comparison."""
     scored: list[tuple[Candidate, ScoreBreakdown]] = []
     for c in cands:
         ok, reason = structural_priors(c, region)
-        de = render_delta_e(c, source_rgb, region) if ok else float("inf")
+        de = render_delta_e(c, source_rgb, region, bbox=bbox) if ok else float("inf")
         par = parsimony_cost(c)
         scored.append((c, ScoreBreakdown(de, par, ok, reason, ok and de <= fidelity_tol)))
 
