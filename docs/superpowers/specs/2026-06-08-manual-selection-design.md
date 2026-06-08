@@ -178,6 +178,15 @@ non-breaking to the `idealize -> str` signature):
 
 **Hard error** (not a warning): an unknown strategy label in `allow` or `force`
 raises `ValueError` at validation — a typo must fail loudly, not warn per element.
+Validation is *lazy* — it runs per element when that element's policy is first
+consulted in `select_geometry`. A typo in a `by_id` entry whose element is never
+emitted (or in `default` when nothing is scored) therefore won't raise. This is the
+deliberate per-element-on-use contract; it is not a global up-front check.
+
+Note also that only fitted elements (regions, gradient footprints) are
+policy-addressable. Reconstructed-occlusion / lens primitives consume `sN` ids in the
+emit sequence but are not produced by the strategy selector, so a policy keyed to one
+of their visible ids is silently ignored (out of scope for this slice).
 
 ## Parity gate
 
