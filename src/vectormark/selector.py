@@ -50,7 +50,8 @@ def generate_geometry_candidates(
     each tagged with its producing strategy.
 
     For a straddler (axis set) the non-symmetric fallbacks (recognize_polygon,
-    fit_path) are added ONLY when no symmetric candidate exists — so the scorer can
+    fit_path) are added ONLY when nothing symmetry-preserving was produced — i.e.
+    neither a refine fit (`sym`) NOR an axis-snapped primitive — so the scorer can
     never pick a cheaper non-symmetric geometry over a valid symmetric one."""
     contours = [c for c in region_contours(region.mask) if len(c) >= 3]
     if not contours:

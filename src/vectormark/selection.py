@@ -4,13 +4,14 @@ the auto-scored winner (post-evaluation), addressed per element by the stable `s
 id the emit layer stamps. Imports nothing from the pipeline (kept dependency-free so
 Options can hold it without a cycle).
 
-Only *fitted* elements (regions, gradient footprints) are policy-addressable. The
-emit layer also stamps `sN` ids on reconstructed-occlusion / lens primitives, which
-consume ids in the same sequence but are not produced by the strategy selector — a
-policy keyed to one of those ids is silently ignored (out of scope: manual selection
-steers fitted geometry, not occlusion reconstruction). Labels are validated lazily,
-per element when first consulted, so a typo in a `by_id` entry whose element is never
-emitted will not raise."""
+Only *fitted* elements (regions, gradient footprints) are policy-addressable.
+Reconstructed-occlusion and lens primitives advance the same `sN` index counter
+(occlusion is emitted with a visible `id="sN"`; lens is emitted as a plain path with
+no `id` at all), but neither is produced by the strategy selector — a policy keyed to
+one of those indices is silently ignored (out of scope: manual selection steers fitted
+geometry, not occlusion reconstruction). Labels are validated lazily, per element when
+first consulted, so a typo in a `by_id` entry whose element is never emitted will not
+raise."""
 
 from __future__ import annotations
 

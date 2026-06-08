@@ -154,7 +154,7 @@ def test_selection_none_is_byte_identical_to_default():
     assert a == b
 
 
-def test_force_path_on_s0_emits_path_not_circle():
+def test_force_symmetric_on_s0_emits_path_not_circle():
     from vectormark.selection import SelectionPolicy, ElementSelection
     h = w = 100
     img = np.full((h, w, 3), 255, np.uint8)
@@ -176,7 +176,7 @@ def test_default_policy_restricts_all_elements():
     img = np.full((h, w, 3), 255, np.uint8)
     yy, xx = np.ogrid[:h, :w]
     img[(xx - 50) ** 2 + (yy - 50) ** 2 <= 32 ** 2] = (30, 100, 235)
-    # force="symmetric": same reasoning as test_force_path_on_s0_emits_path_not_circle
+    # force="symmetric": same reasoning as test_force_symmetric_on_s0_emits_path_not_circle
     policy = SelectionPolicy(default=ElementSelection(force="symmetric"))
     out = idealize(img, options=Options(selection=policy))
     assert "<circle" not in out and "<path" in out           # default reached the un-keyed element

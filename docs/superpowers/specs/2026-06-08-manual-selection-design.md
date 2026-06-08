@@ -184,9 +184,10 @@ emitted (or in `default` when nothing is scored) therefore won't raise. This is 
 deliberate per-element-on-use contract; it is not a global up-front check.
 
 Note also that only fitted elements (regions, gradient footprints) are
-policy-addressable. Reconstructed-occlusion / lens primitives consume `sN` ids in the
-emit sequence but are not produced by the strategy selector, so a policy keyed to one
-of their visible ids is silently ignored (out of scope for this slice).
+policy-addressable. Reconstructed-occlusion and lens primitives advance the same `sN`
+index counter (occlusion gets a visible `id="sN"`; lens emits a plain path with no
+`id`), but neither is produced by the strategy selector, so a policy keyed to one of
+those indices is silently ignored (out of scope for this slice).
 
 ## Parity gate
 

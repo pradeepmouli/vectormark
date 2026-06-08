@@ -36,7 +36,7 @@ Fill = FlatFill | LinearGradientFill | RadialGradientFill
 class Candidate:
     """One renderable element: a geometry paired with a fill.
 
-    `source` records the producing strategy ("occlusion" | "lens" | "region" |
+    `source` records the coarse element category ("occlusion" | "lens" | "region" |
     "gradient") — provenance for later agent/user candidate selection, and the
     discriminator for the one legacy emit quirk (lens = plain path, no id).
     `mirror`, when set, means: emit the element AND its mirror twin about that axis.
