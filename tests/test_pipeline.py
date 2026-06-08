@@ -144,3 +144,39 @@ def test_corner_radius_override_changes_output():
     # selected; at cr=0 it does not, so a sharp fit wins. (The selector keeps a *sharp*
     # source sharp regardless of corner_radius — hence this fixture must be rounded.)
     assert sharp != rounded                        # corner_radius drives the selected geometry
+
+
+def test_selection_none_is_byte_identical_to_default():
+    # parity: supplying selection=None must not change output at all
+    img = _rounded_band_img()
+    a = idealize(img, options=Options())
+    b = idealize(img, options=Options(selection=None))
+    assert a == b
+
+
+def test_force_path_on_s0_emits_path_not_circle():
+    from vectormark.selection import SelectionPolicy, ElementSelection
+    h = w = 100
+    img = np.full((h, w, 3), 255, np.uint8)
+    yy, xx = np.ogrid[:h, :w]
+    img[(xx - 50) ** 2 + (yy - 50) ** 2 <= 32 ** 2] = (30, 100, 235)
+    auto = idealize(img, options=Options())
+    assert "<circle" in auto                                  # auto picks a circle
+    # force="symmetric": the circle is on the symmetry axis so only "primitive" and
+    # "symmetric" strategies are generated (PATH is excluded for symmetry-preserving shapes).
+    # "symmetric" produces a <path>, proving sN addressing reached the emit layer.
+    policy = SelectionPolicy(by_id={"s0": ElementSelection(force="symmetric")})
+    forced = idealize(img, options=Options(selection=policy))
+    assert "<circle" not in forced and "<path" in forced     # sN addressing reached emit
+
+
+def test_default_policy_restricts_all_elements():
+    from vectormark.selection import SelectionPolicy, ElementSelection
+    h = w = 100
+    img = np.full((h, w, 3), 255, np.uint8)
+    yy, xx = np.ogrid[:h, :w]
+    img[(xx - 50) ** 2 + (yy - 50) ** 2 <= 32 ** 2] = (30, 100, 235)
+    # force="symmetric": same reasoning as test_force_path_on_s0_emits_path_not_circle
+    policy = SelectionPolicy(default=ElementSelection(force="symmetric"))
+    out = idealize(img, options=Options(selection=policy))
+    assert "<circle" not in out and "<path" in out           # default reached the un-keyed element
