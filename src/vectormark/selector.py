@@ -6,6 +6,7 @@ known-good geometries, never invent a new output type), in cascade-priority orde
 
 from __future__ import annotations
 
+import warnings
 from dataclasses import dataclass
 
 import numpy as np
@@ -20,6 +21,7 @@ from .score import rank_candidates
 from .selection import (
     PRIMITIVE, TRAPEZOID, SYM_POLYGON, CAP, SYMMETRIC, POLYGON, PATH,
     HOLED_SYM, HOLED_PATH,
+    ElementSelection, validate_strategies,
 )
 from .types import Axis, Region
 
@@ -126,19 +128,65 @@ def _region_bbox(mask: np.ndarray, margin: int = 2) -> tuple[int, int, int, int]
 
 def select_geometry(
     region: Region, opt, axis: Axis | None, corner_radius: float,
-    source_rgb: np.ndarray | None,
+    source_rgb: np.ndarray | None, *,
+    element: ElementSelection | None = None, eid: str = "?",
 ) -> Shape | None:
-    """Generate geometry candidates, score them (simplest faithful geometry wins),
-    return the winning Shape. Without `source_rgb` fall back to candidates[0].shape =
-    the cascade-priority pick. None if no candidate."""
+    """Generate geometry candidates, optionally apply a manual `element` policy, score,
+    and return the winning Shape. With `element` None this is the 4a auto-selector
+    (pure pass-through). `eid` only labels warning messages.
+
+    Stages (skipped when element is None): validate the policy's strategy labels;
+    pre-restriction keeps only `allow`ed strategies (warn + restore if that empties the
+    set); post-override returns the highest-ranked candidate whose strategy == `force`
+    (warn + auto winner if absent)."""
+    if element is not None:
+        validate_strategies(element)
+
     cands = generate_geometry_candidates(region, opt, axis, corner_radius)
     if not cands:
         return None
+
+    if element is not None and element.allow is not None:
+        kept = [gc for gc in cands if gc.strategy in element.allow]
+        if not kept:
+            warnings.warn(
+                f"selection {eid}: allow={sorted(element.allow)} removed all candidates "
+                f"(have {[gc.strategy for gc in cands]}); ignoring restriction",
+                UserWarning, stacklevel=2,
+            )
+        else:
+            cands = kept
+
+    force = element.force if element is not None else None
+
     if source_rgb is None:
+        if force is not None:
+            hit = next((gc for gc in cands if gc.strategy == force), None)
+            if hit is None:
+                warnings.warn(
+                    f"selection {eid}: force='{force}' not among "
+                    f"{[gc.strategy for gc in cands]}; using '{cands[0].strategy}'",
+                    UserWarning, stacklevel=2,
+                )
+                hit = cands[0]
+            return hit.shape
         return cands[0].shape
+
     wrapped = [Candidate(gc.shape, FlatFill(region.color_hex), "region", strategy=gc.strategy)
                for gc in cands]
     bbox = _region_bbox(region.mask)
     tol = getattr(opt, "fidelity_tol", 0.06)
     ranked = rank_candidates(wrapped, source_rgb, region, fidelity_tol=tol, bbox=bbox)
+
+    if force is not None:
+        hit = next((c for c, _ in ranked if c.strategy == force), None)
+        if hit is None:
+            warnings.warn(
+                f"selection {eid}: force='{force}' not among "
+                f"{[c.strategy for c, _ in ranked]}; using auto winner "
+                f"'{ranked[0][0].strategy}'",
+                UserWarning, stacklevel=2,
+            )
+            hit = ranked[0][0]
+        return hit.geometry
     return ranked[0][0].geometry
