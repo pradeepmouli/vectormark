@@ -119,19 +119,26 @@ def test_flatten_emits_only_paths():
         assert elem not in flat
 
 
-def _tapered_band_img(H=90, W=120, axis=60):
-    img = np.full((H, W, 3), 255, np.uint8)
-    m = np.zeros((H, W), bool)
-    for y in range(20, 70):
-        hw = int(40 - (y - 20) * 0.2)        # straight taper -> rounded_trapezoid path, not <rect>
-        m[y, axis - hw:axis + hw] = True
-    img[m] = (6, 35, 54)
-    return img
+def _rounded_band_img(H=90, W=120, cx=60, halfw=34, top=18, bot=72, rad=14):
+    """A vertical band with genuinely rounded (antialiased) corners — an axis-symmetric
+    rounded rectangle. Its corners are filleted in the SOURCE, so a corner_radius that
+    matches them yields a more faithful fit than a sharp polygon. (The scored selector
+    keeps a *sharp* source sharp regardless of corner_radius — it only rounds when the
+    rounding is actually more faithful — so this fixture must itself be rounded for
+    corner_radius to drive the output.)"""
+    yy, xx = np.mgrid[0:H, 0:W].astype(float)
+    dx = np.clip(np.abs(xx - cx) - (halfw - rad), 0, None)
+    dy = np.clip(np.abs(yy - (top + bot) / 2) - ((bot - top) / 2 - rad), 0, None)
+    cov = np.clip(0.5 - (np.hypot(dx, dy) - rad), 0, 1)          # antialiased coverage
+    navy = np.array([6, 35, 54])
+    return np.round(255 * (1 - cov)[..., None] + navy * cov[..., None]).astype(np.uint8)
 
 
 def test_corner_radius_override_changes_output():
-    img = _tapered_band_img()
+    img = _rounded_band_img()
     sharp = idealize(img, options=Options(corner_radius=0.0))
     rounded = idealize(img, options=Options(corner_radius=10.0))
-    assert "<rect" not in rounded                  # tapered band -> rounded-trapezoid path
-    assert sharp != rounded                        # the shared radius actually drives geometry
+    assert "<rect" not in rounded                  # rounded band -> rounded-trapezoid path
+    # On a genuinely rounded source the cr=10 rounded-trapezoid fit is more faithful
+    # than the sharp polygon and the scorer selects it, so the output differs from cr=0.
+    assert sharp != rounded                        # corner_radius drives the selected geometry
