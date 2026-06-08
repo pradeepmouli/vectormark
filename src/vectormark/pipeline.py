@@ -161,6 +161,9 @@ def build_candidates(
     )
     drawn.sort(key=lambda rp: rp[0].area, reverse=True)
     for region, fit_axis, is_pair in drawn:
+        # eid = sN where N = current cands length. The occlusion/lens loop already
+        # filled cands[0..]; a None-return below skips the append, so only emitted
+        # elements consume an id — exactly matching the SVG emit-loop's id sequence.
         eid = f"s{len(cands)}"
         element = opt.selection.for_id(eid) if opt.selection is not None else None
         shape = select_geometry(region, opt, fit_axis, corner_radius, source_rgb,
@@ -176,6 +179,7 @@ def build_candidates(
     # holes / separate flats, keeping paint order safe. True behind-a-flat
     # layering of a gradient footprint is out of scope.
     for footprint, model in gradient_fills:
+        # Same sN scheme as the region loop (shared cands counter; gradients emit last).
         eid = f"s{len(cands)}"
         element = opt.selection.for_id(eid) if opt.selection is not None else None
         shape = select_geometry(footprint, opt, None, corner_radius, source_rgb,
