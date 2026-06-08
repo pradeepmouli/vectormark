@@ -2,9 +2,18 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
+> **⚠️ Revised during implementation — read this first.** The literal "floor on cluster
+> **totals** at the end" described below was found to create spurious AA-blend clusters (it broke the
+> band regression). The **shipped** rule is a **seed-floor**: a bin may *seed* a new cluster only if
+> its own aggregate count ≥ `min_fraction × total`; sub-floor bins may only be *absorbed* into an
+> existing cluster. The design-of-record is the reconciled spec
+> (`docs/superpowers/specs/2026-06-07-perceptual-palette-design.md`, §3 "Greedy perceptual clustering
+> with a seed-floor") and the code in `src/vectormark/color.py`. Where this plan still says "floor on
+> cluster totals" (the snippet in Task 1 Step 3 and the self-review), read "seed-floor" per the spec.
+
 **Goal:** Rewrite `extract_palette` so a colour dispersed across many antialiased shades (a thin/small mark like the settir blue) is recovered, instead of being dropped by the per-shade frequency floor.
 
-**Architecture:** Reorder the algorithm to **cluster perceptually → aggregate counts per cluster → apply the `min_fraction` floor to cluster totals**. A coarse 5-bit pre-bin caps the clustering input; each cluster's representative is its most-frequent member (a real colour, never a centroid). Single-function rewrite in `src/vectormark/color.py`; signature, return type, and all callers unchanged.
+**Architecture:** Reorder the algorithm to **cluster perceptually → aggregate counts per cluster → gate cluster *seeding* by the `min_fraction` floor** (a bin seeds a new cluster only if its own aggregate ≥ floor; sub-floor bins are absorbed). A coarse 5-bit pre-bin caps the clustering input; each cluster's representative is its most-frequent member (a real colour, never a centroid). Single-function rewrite in `src/vectormark/color.py`; signature, return type, and all callers unchanged.
 
 **Tech Stack:** Python, numpy, OKLab (`srgb_to_oklab`/`delta_e` already in `color.py`), pytest. End-to-end check via `idealize` + `tests/_render.py`.
 
@@ -192,6 +201,12 @@ def extract_palette(
     return rep_color[[cluster_bin[k] for k in keep]].astype(np.uint8)
 ```
 
+> **As-built deviation (see the banner at the top):** the shipped code does NOT apply the floor only
+> here at the end — it gates cluster **seeding** (`if not placed and bin_total[b] >= floor:`), so
+> sub-floor bins can only be absorbed, never seed. The end-of-loop floor above is then redundant
+> (every seeded cluster is already supra-floor). The authoritative algorithm is the spec's §3 and
+> `src/vectormark/color.py`.
+
 - [ ] **Step 4: Run the core-regression test to verify it passes**
 
 Run: `pytest tests/test_color.py::test_extract_palette_recovers_dispersed_thin_color -v`
@@ -364,8 +379,8 @@ Co-Authored-By: Claude Sonnet 4.6 <noreply@anthropic.com>"
   `test_palette_representatives_are_real_colors` (Step 5).
 - Signature unchanged → Step 3 keeps `(rgb_image, *, max_colors, merge_de, min_fraction)`.
 - Determinism → Step 3 (lexsort + stable argsort, no sets) + `test_palette_is_deterministic`.
-- Floor on cluster totals + cap → Step 3 + `test_palette_honours_max_colors`,
-  `test_palette_excludes_below_floor_block`.
+- Seed-floor (a bin seeds only if supra-floor; sub-floor absorbed) + cap → Step 3 (as-built; see
+  banner) + `test_palette_honours_max_colors`, `test_palette_excludes_below_floor_block`.
 - Fallback for degenerate input → Step 3 (`if not keep: keep = [argmax]`) + empty-image early return.
 - Thin-AA-line fixture, dispersed colour appears, old-would-drop documentation → Step 1.
 - Flat/posterized unchanged → existing `test_extract_palette_finds_two_true_colors_not_the_blend`
