@@ -75,6 +75,11 @@ a perfectly-flat mark fits a tilted "gradient" via edge-smear. Fidelity must be 
 The scorer is what makes "pick the optimal one per image" trustworthy instead of a
 fidelity race to the most complex candidate.
 
+The scorer must also be **transparent and overridable**: it returns the *full ranked list of
+candidates with their score breakdown* (fidelity, parsimony, which structural prior fired), not just
+a single winner. This is what lets an agent or user inspect *why* a candidate won and choose a
+different one (see "Selection is automated **and** manual" under layer 4).
+
 *Risk:* high. There is no off-the-shelf scorer; ΔE+parsimony weighting is a tuning problem
 with real false-accept failure modes. Prototype against the existing scratch corpus before
 committing the API.
@@ -85,6 +90,15 @@ The deterministic driver: for each element, generate candidates (2), score them 
 the winner; compose components (1). Replaces the current `_fit_region` + ad-hoc gradient
 gate with one uniform loop. The emit layer already renders `(geometry, fill)` generically
 (the gradient work proved this), so this is plumbing once 1–3 exist.
+
+**Selection is automated *and* manual (a first-class requirement, not just `cost` ranking).** The
+selector supports human/agent choice *in addition to* automated scoring, at two points:
+- **Pre-execution:** restrict which algorithm/strategy candidates are generated or run for an
+  element (e.g. "only try primitive-snap and smooth-path here") — selection is a *separate stage*
+  from generation, not hardwired into it.
+- **Post-evaluation:** override the auto-scored winner after seeing the ranked candidates and their
+  breakdowns. The scorer's transparent ranked output (layer 3) and each candidate's `source`
+  provenance label (layer 2) are the enablers.
 
 *Risk:* low once the pieces exist; it is glue.
 
