@@ -23,7 +23,7 @@ def test_for_id_returns_specific_then_default_then_none():
 
 
 def test_validate_accepts_known_labels():
-    validate_strategies(ElementSelection(allow=frozenset({PRIMITIVE, PATH}), force=SYMMETRIC))
+    validate_strategies(ElementSelection(allow=frozenset({PRIMITIVE, PATH}), force=SYMMETRIC))  # should not raise
 
 
 def test_validate_rejects_unknown_allow_label():

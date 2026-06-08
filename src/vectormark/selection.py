@@ -6,8 +6,9 @@ Options can hold it without a cycle)."""
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
-from typing import Mapping
+import types
+from collections.abc import Mapping
+from dataclasses import dataclass
 
 # Strategy provenance labels — one per fitter in generate_geometry_candidates.
 PRIMITIVE = "primitive"          # recognize_primitive -> circle/rect/ellipse
@@ -34,12 +35,20 @@ class ElementSelection:
     force: str | None = None
 
 
+_EMPTY: "Mapping[str, ElementSelection]" = types.MappingProxyType({})
+
+
 @dataclass(frozen=True)
 class SelectionPolicy:
     """Per-element selection keyed by emit-time id (`s0`, `s1`, ...), with an optional
     `default` applied to elements that have no explicit entry."""
-    by_id: Mapping[str, ElementSelection] = field(default_factory=dict)
+    by_id: Mapping[str, ElementSelection] = _EMPTY
     default: ElementSelection | None = None
+
+    def __post_init__(self):
+        # freeze the mapping so a frozen policy is truly immutable
+        if not isinstance(self.by_id, types.MappingProxyType):
+            object.__setattr__(self, "by_id", types.MappingProxyType(dict(self.by_id)))
 
     def for_id(self, eid: str) -> ElementSelection | None:
         return self.by_id.get(eid, self.default)
