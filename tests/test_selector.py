@@ -16,9 +16,10 @@ def test_candidates_for_disk_include_circle_and_path_first_is_circle():
     h = w = 80
     region = Region(1, _disk(40, 40, 25, h, w), "#1e64eb")
     cands = generate_geometry_candidates(region, Options(), None, 0.0)
-    kinds = [c.kind for c in cands]
+    kinds = [c.shape.kind for c in cands]
     assert "circle" in kinds and "path" in kinds
-    assert kinds[0] == "circle"          # cascade-priority order: cands[0] == old pick
+    assert cands[0].shape.kind == "circle"        # cascade-priority order preserved
+    assert cands[0].strategy == "primitive"        # the producing fitter is labeled
 
 
 def test_candidates_nonempty_for_organic_blob():
@@ -28,7 +29,8 @@ def test_candidates_nonempty_for_organic_blob():
     mask[20:35, 20:35] = False           # a bite -> not a clean primitive
     region = Region(1, mask, "#222222")
     cands = generate_geometry_candidates(region, Options(), None, 0.0)
-    assert cands and cands[-1].kind == "path"   # fit_path is always the final fallback
+    assert cands and cands[-1].shape.kind == "path"    # fit_path is the final fallback
+    assert cands[-1].strategy == "path"
 
 
 def test_straddler_with_symmetric_candidate_excludes_nonsymmetric_fallback():
@@ -47,11 +49,12 @@ def test_straddler_with_symmetric_candidate_excludes_nonsymmetric_fallback():
     # ABSENT from the candidate set: compute what it would be and assert exclusion.
     contour = [c for c in region_contours(mask) if len(c) >= 3][0]
     fp_d = fit_path(contour, epsilon=Options().epsilon, max_error=Options().max_error).params["d"]
-    assert not any(c.params.get("d") == fp_d and "fill_rule" not in c.params for c in cands)
+    assert not any(c.shape.params.get("d") == fp_d and "fill_rule" not in c.shape.params
+                   for c in cands)
     # and no non-symmetric recognize_polygon fallback slipped in either
     poly = recognize_polygon(contour, epsilon=Options().epsilon)
     if poly is not None:
-        assert not any(c.kind == "polygon" and c.params.get("points") == poly.params["points"]
+        assert not any(c.shape.kind == "polygon" and c.shape.params.get("points") == poly.params["points"]
                        for c in cands)
 
 
@@ -66,9 +69,10 @@ def test_holed_straddler_emits_single_symmetric_evenodd_candidate():
     mask = (r2 <= 46 ** 2) & (r2 >= 22 ** 2)
     region = Region(1, mask, "#142850")
     cands = generate_geometry_candidates(region, Options(), Axis(59.5), 2.0)
-    assert len(cands) == 1                                 # ONLY the symmetric construction
-    assert cands[0].kind == "path"
-    assert cands[0].params.get("fill_rule") == "evenodd"   # the hole survives
+    assert len(cands) == 1
+    assert cands[0].shape.kind == "path"
+    assert cands[0].shape.params.get("fill_rule") == "evenodd"
+    assert cands[0].strategy == "holed_symmetric"
 
 
 def test_primitive_only_straddler_excludes_nonsymmetric_fallback(monkeypatch):
@@ -87,13 +91,14 @@ def test_primitive_only_straddler_excludes_nonsymmetric_fallback(monkeypatch):
     region = Region(1, mask, "#142850")
     cands = sel.generate_geometry_candidates(region, Options(), Axis(49.0), 0.0)
 
-    assert any(c.kind == "circle" for c in cands)          # the snapped primitive survives
+    assert any(c.shape.kind == "circle" for c in cands)
     contour = [c for c in region_contours(mask) if len(c) >= 3][0]
     fp_d = fit_path(contour, epsilon=Options().epsilon, max_error=Options().max_error).params["d"]
-    assert not any(c.params.get("d") == fp_d and "fill_rule" not in c.params for c in cands)
+    assert not any(c.shape.params.get("d") == fp_d and "fill_rule" not in c.shape.params
+                   for c in cands)
     poly = recognize_polygon(contour, epsilon=Options().epsilon)
     if poly is not None:
-        assert not any(c.kind == "polygon" and c.params.get("points") == poly.params["points"]
+        assert not any(c.shape.kind == "polygon" and c.shape.params.get("points") == poly.params["points"]
                        for c in cands)
 
 

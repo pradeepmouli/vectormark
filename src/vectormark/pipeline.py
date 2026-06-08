@@ -27,6 +27,7 @@ from .fit import Shape, _fmt
 from .gradient import detect_gradients
 from .occlusion import ScenePrimitive, reconstruct_scene
 from .segment import segment
+from .selection import SelectionPolicy
 from .selector import select_geometry
 from .symmetry import classify_regions, detect_axis, detect_symmetry_rotation
 from .types import Axis, Region
@@ -84,6 +85,7 @@ class Options:
     no_symmetry: bool = False
     corner_radius: float | None = None  # shared fillet radius; None = auto from geometry
     fidelity_tol: float = 0.06        # selector's render-ΔE gate (slice 4a)
+    selection: SelectionPolicy | None = None  # manual candidate selection (slice 4b)
 
 
 def _mark_corner_radius(regions: list[Region], axis: Axis | None) -> float:
@@ -159,7 +161,13 @@ def build_candidates(
     )
     drawn.sort(key=lambda rp: rp[0].area, reverse=True)
     for region, fit_axis, is_pair in drawn:
-        shape = select_geometry(region, opt, fit_axis, corner_radius, source_rgb)
+        # eid = sN where N = current cands length. The occlusion/lens loop already
+        # filled cands[0..]; a None-return below skips the append, so only emitted
+        # elements consume an id — exactly matching the SVG emit-loop's id sequence.
+        eid = f"s{len(cands)}"
+        element = opt.selection.for_id(eid) if opt.selection is not None else None
+        shape = select_geometry(region, opt, fit_axis, corner_radius, source_rgb,
+                                element=element, eid=eid)
         if shape is None:
             continue
         cands.append(Candidate(shape, FlatFill(region.color_hex), "region",
@@ -171,7 +179,11 @@ def build_candidates(
     # holes / separate flats, keeping paint order safe. True behind-a-flat
     # layering of a gradient footprint is out of scope.
     for footprint, model in gradient_fills:
-        shape = select_geometry(footprint, opt, None, corner_radius, source_rgb)
+        # Same sN scheme as the region loop (shared cands counter; gradients emit last).
+        eid = f"s{len(cands)}"
+        element = opt.selection.for_id(eid) if opt.selection is not None else None
+        shape = select_geometry(footprint, opt, None, corner_radius, source_rgb,
+                                element=element, eid=eid)
         if shape is None:
             continue
         g = model["geometry"]
