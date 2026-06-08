@@ -55,6 +55,9 @@ def generate_geometry_candidates(
         return []
 
     if len(contours) > 1:                       # holed / counter
+        # When every contour straddles cleanly, the symmetric half-mirror is the ONLY
+        # candidate (matching the cascade) — never also offer the non-symmetric
+        # per-contour fit, which the scorer could otherwise pick and break symmetry.
         if axis is not None:
             halves = [
                 symmetric_fit(c, axis.x, corner_radius=corner_radius,
@@ -64,6 +67,7 @@ def generate_geometry_candidates(
             if all(s is not None for s in halves):
                 d = " ".join(s.params["d"] for s in halves)
                 return [GeomCandidate(HOLED_SYM, Shape("path", {"d": d, "fill_rule": "evenodd"}))]
+        # No clean symmetric construction: faithful per-contour fit (even-odd).
         d = " ".join(
             fit_path(c, epsilon=opt.epsilon, max_error=opt.max_error).params["d"]
             for c in contours
@@ -94,8 +98,14 @@ def generate_geometry_candidates(
             sym.append(GeomCandidate(SYMMETRIC, s))
     cands.extend(sym)
 
+    # An axis-snapped primitive is symmetry-preserving (its centre is forced onto the
+    # axis), so a symmetry-preserving candidate exists when EITHER a refine fit (`sym`)
+    # OR a recognized primitive is present.
     has_symmetry_preserving = bool(sym) or (axis is not None and prim is not None)
 
+    # Non-symmetric fallbacks: only when there is no symmetry to preserve (axis None) OR
+    # no symmetry-preserving candidate was produced — guarantees a non-empty set without
+    # ever letting a non-symmetric candidate compete with a symmetric one.
     if axis is None or not has_symmetry_preserving:
         gpoly = recognize_polygon(contour, epsilon=opt.epsilon)
         if gpoly is not None:
