@@ -139,6 +139,8 @@ def test_corner_radius_override_changes_output():
     sharp = idealize(img, options=Options(corner_radius=0.0))
     rounded = idealize(img, options=Options(corner_radius=10.0))
     assert "<rect" not in rounded                  # rounded band -> rounded-trapezoid path
-    # On a genuinely rounded source the cr=10 rounded-trapezoid fit is more faithful
-    # than the sharp polygon and the scorer selects it, so the output differs from cr=0.
+    # corner_radius drives which fitters produce a (winning) candidate: at cr=10
+    # rounded_trapezoid_fit yields a fillet that matches this rounded source and is
+    # selected; at cr=0 it does not, so a sharp fit wins. (The selector keeps a *sharp*
+    # source sharp regardless of corner_radius — hence this fixture must be rounded.)
     assert sharp != rounded                        # corner_radius drives the selected geometry
