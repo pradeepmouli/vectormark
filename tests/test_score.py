@@ -117,3 +117,17 @@ def test_rank_disqualifies_degenerate_gradient_keeps_flat():
     assert ranked[0][0] is flat
     grad_bd = next(b for c, b in ranked if c is grad)
     assert grad_bd.priors_ok is False and grad_bd.qualified is False
+
+
+def test_render_delta_e_bbox_matches_full_canvas():
+    h = w = 120
+    src = np.full((h, w, 3), 255, np.uint8)
+    src[_disk_region(60, 60, 24, h, w, "#1e64eb").mask] = (30, 100, 235)
+    region = _disk_region(60, 60, 24, h, w, "#1e64eb")
+    cand = Candidate(Shape("circle", {"cx": 60, "cy": 60, "r": 24}),
+                     FlatFill("#1e64eb"), "region")
+    full = render_delta_e(cand, src, region)
+    ys, xs = np.where(region.mask)
+    bbox = (int(xs.min()), int(ys.min()), int(xs.max()) + 1, int(ys.max()) + 1)
+    cropped = render_delta_e(cand, src, region, bbox=bbox)
+    assert abs(full - cropped) < 1e-6

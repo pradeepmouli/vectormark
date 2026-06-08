@@ -72,14 +72,27 @@ def _rasterize(svg: str, w: int, h: int) -> np.ndarray:
     return np.asarray(bg, dtype=np.uint8)
 
 
-def render_delta_e(cand: Candidate, source_rgb: np.ndarray, region: Region) -> float:
+def render_delta_e(
+    cand: Candidate, source_rgb: np.ndarray, region: Region, *,
+    bbox: tuple[int, int, int, int] | None = None,
+) -> float:
     """Render the candidate over the source canvas and compare (mean OKLab ΔE)
-    against the source within the region's footprint. 0 = identical."""
+    against the source within the region's footprint. 0 = identical. When `bbox`
+    (x0, y0, x1, y1) is given, render+compare only that crop (mask restricted to
+    it) — a speed optimization; identical result to full-canvas for the compared
+    pixels."""
     h, w = source_rgb.shape[:2]
     mask = region.mask
     if not mask.any():
         return float("inf")
     raster = _rasterize(_candidate_svg(cand, w, h), w, h)
+    if bbox is not None:
+        x0, y0, x1, y1 = bbox
+        x0 = max(0, x0); y0 = max(0, y0); x1 = min(w, x1); y1 = min(h, y1)
+        if x1 > x0 and y1 > y0:
+            sub = mask[y0:y1, x0:x1]
+            if sub.any():
+                return mean_delta_e(source_rgb[y0:y1, x0:x1][sub], raster[y0:y1, x0:x1][sub])
     return mean_delta_e(source_rgb[mask], raster[mask])
 
 
