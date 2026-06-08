@@ -55,6 +55,48 @@ def test_straddler_with_symmetric_candidate_excludes_nonsymmetric_fallback():
                        for c in cands)
 
 
+def test_holed_straddler_emits_single_symmetric_evenodd_candidate():
+    # A centered annulus is a holed straddler whose every contour fits symmetrically.
+    # The selector must return EXACTLY ONE candidate — the mirrored-half even-odd path —
+    # never also the per-contour fit_path (which the scorer could pick and break exact
+    # symmetry). Locks the early-return in the holed branch.
+    h = w = 120
+    yy, xx = np.ogrid[:h, :w]
+    r2 = (xx - 59.5) ** 2 + (yy - 59.5) ** 2
+    mask = (r2 <= 46 ** 2) & (r2 >= 22 ** 2)
+    region = Region(1, mask, "#142850")
+    cands = generate_geometry_candidates(region, Options(), Axis(59.5), 2.0)
+    assert len(cands) == 1                                 # ONLY the symmetric construction
+    assert cands[0].kind == "path"
+    assert cands[0].params.get("fill_rule") == "evenodd"   # the hole survives
+
+
+def test_primitive_only_straddler_excludes_nonsymmetric_fallback(monkeypatch):
+    # When NO refine fit succeeds (sym empty) but a primitive IS recognized, the
+    # snapped primitive is the symmetry-preserving candidate — so the non-symmetric
+    # recognize_polygon/fit_path fallbacks must still be excluded. Forcing the four
+    # refine fitters to None is the only way to reach the prim-clause of
+    # has_symmetry_preserving (on natural straddlers symmetric_fit always succeeds).
+    import vectormark.selector as sel
+    for name in ("symmetric_fit", "rounded_trapezoid_fit",
+                 "half_ellipse_cap_fit", "symmetric_polygon_fit"):
+        monkeypatch.setattr(sel, name, lambda *a, **k: None)
+
+    h = w = 100
+    mask = _disk(49, 49, 30, h, w)
+    region = Region(1, mask, "#142850")
+    cands = sel.generate_geometry_candidates(region, Options(), Axis(49.0), 0.0)
+
+    assert any(c.kind == "circle" for c in cands)          # the snapped primitive survives
+    contour = [c for c in region_contours(mask) if len(c) >= 3][0]
+    fp_d = fit_path(contour, epsilon=Options().epsilon, max_error=Options().max_error).params["d"]
+    assert not any(c.params.get("d") == fp_d and "fill_rule" not in c.params for c in cands)
+    poly = recognize_polygon(contour, epsilon=Options().epsilon)
+    if poly is not None:
+        assert not any(c.kind == "polygon" and c.params.get("points") == poly.params["points"]
+                       for c in cands)
+
+
 from vectormark.selector import select_geometry
 
 

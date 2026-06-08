@@ -42,7 +42,9 @@ def generate_geometry_candidates(
         return []
 
     if len(contours) > 1:                       # holed / counter
-        cands: list[Shape] = []
+        # When every contour straddles cleanly, the symmetric half-mirror is the ONLY
+        # candidate (matching the cascade) — never also offer the non-symmetric
+        # per-contour fit, which the scorer could otherwise pick and break symmetry.
         if axis is not None:
             halves = [
                 symmetric_fit(c, axis.x, corner_radius=corner_radius,
@@ -51,13 +53,13 @@ def generate_geometry_candidates(
             ]
             if all(s is not None for s in halves):
                 d = " ".join(s.params["d"] for s in halves)
-                cands.append(Shape("path", {"d": d, "fill_rule": "evenodd"}))
+                return [Shape("path", {"d": d, "fill_rule": "evenodd"})]
+        # No clean symmetric construction: faithful per-contour fit (even-odd).
         d = " ".join(
             fit_path(c, epsilon=opt.epsilon, max_error=opt.max_error).params["d"]
             for c in contours
         )
-        cands.append(Shape("path", {"d": d, "fill_rule": "evenodd"}))
-        return cands
+        return [Shape("path", {"d": d, "fill_rule": "evenodd"})]
 
     contour = contours[0]
     cands = []
@@ -83,9 +85,15 @@ def generate_geometry_candidates(
             sym.append(s)
     cands.extend(sym)
 
+    # An axis-snapped primitive is itself symmetry-preserving (its centre is forced
+    # onto the axis). So for a straddler a symmetry-preserving candidate exists when
+    # EITHER a refine fit (`sym`) OR a recognized primitive is present.
+    has_symmetry_preserving = bool(sym) or (axis is not None and prim is not None)
+
     # Non-symmetric fallbacks: only when there is no symmetry to preserve (axis is
-    # None) OR no symmetric candidate was produced. Guarantees a non-empty set.
-    if axis is None or not sym:
+    # None) OR no symmetry-preserving candidate was produced. Guarantees a non-empty
+    # set without ever letting a non-symmetric candidate compete with a symmetric one.
+    if axis is None or not has_symmetry_preserving:
         gpoly = recognize_polygon(contour, epsilon=opt.epsilon)
         if gpoly is not None:
             cands.append(gpoly)

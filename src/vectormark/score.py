@@ -78,9 +78,10 @@ def render_delta_e(
 ) -> float:
     """Render the candidate over the source canvas and compare (mean OKLab ΔE)
     against the source within the region's footprint. 0 = identical. When `bbox`
-    (x0, y0, x1, y1) is given, render+compare only that crop (mask restricted to
-    it) — a speed optimization; identical result to full-canvas for the compared
-    pixels."""
+    (x0, y0, x1, y1) is given, the rasterization is still full-canvas (resvg needs
+    the canvas dims), but the ΔE comparison is restricted to that crop (mask
+    intersected with the bbox) — a speed optimization on the comparison; identical
+    result to full-canvas for the compared pixels."""
     h, w = source_rgb.shape[:2]
     mask = region.mask
     if not mask.any():
