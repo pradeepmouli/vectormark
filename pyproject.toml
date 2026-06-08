@@ -11,10 +11,11 @@ dependencies = [
     "scikit-image>=0.24",
     "shapely>=2.0",
     "pillow>=10.0",
+    "resvg-py>=0.1.7",
 ]
 
 [project.optional-dependencies]
-dev = ["pytest>=8.0", "resvg-py>=0.1.7"]
+dev = ["pytest>=8.0"]
 
 [project.scripts]
 vectormark = "vectormark.cli:main"
