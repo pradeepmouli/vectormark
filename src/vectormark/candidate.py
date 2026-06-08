@@ -40,8 +40,11 @@ class Candidate:
     "gradient") — provenance for later agent/user candidate selection, and the
     discriminator for the one legacy emit quirk (lens = plain path, no id).
     `mirror`, when set, means: emit the element AND its mirror twin about that axis.
+    `strategy` is the finer-grained fitter provenance (e.g. "symmetric" vs "path")
+    used by manual selection; `source` stays the coarse element category.
     """
     geometry: Shape
     fill: Fill
     source: str
     mirror: Axis | None = None
+    strategy: str | None = None   # fitter provenance (slice 4b); None for occlusion/lens/gradient

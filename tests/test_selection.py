@@ -34,3 +34,15 @@ def test_validate_rejects_unknown_allow_label():
 def test_validate_rejects_unknown_force_label_even_when_allow_none():
     with pytest.raises(ValueError, match="blob"):
         validate_strategies(ElementSelection(force="blob"))
+
+
+from vectormark.candidate import Candidate, FlatFill
+from vectormark.fit import Shape
+
+
+def test_candidate_strategy_defaults_none_and_is_settable():
+    c0 = Candidate(Shape("circle", {}), FlatFill("#000000"), "region")
+    assert c0.strategy is None                       # backward compatible default
+    c1 = Candidate(Shape("path", {"d": "M0 0"}), FlatFill("#000000"),
+                   "region", strategy="path")
+    assert c1.strategy == "path"
