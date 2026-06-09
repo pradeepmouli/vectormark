@@ -180,3 +180,54 @@ def test_default_policy_restricts_all_elements():
     policy = SelectionPolicy(default=ElementSelection(force="symmetric"))
     out = idealize(img, options=Options(selection=policy))
     assert "<circle" not in out and "<path" in out           # default reached the un-keyed element
+
+
+def _gradient_bar(img, r0, r1, c0, c1, c_lo, c_hi):
+    # horizontal left->right gradient from c_lo to c_hi inside the box
+    width = c1 - c0
+    for i, x in enumerate(range(c0, c1)):
+        t = i / max(1, width - 1)
+        img[r0:r1, x] = tuple(int(round(c_lo[k] + t * (c_hi[k] - c_lo[k]))) for k in range(3))
+
+
+def test_two_separated_gradient_blobs_emit_two_gradients():
+    # two gradient bars separated by a wide vertical gutter: each is a single dominant
+    # blob within its own component, so both pass the single-blob gate (this is the
+    # multi-blob unblock — together they would fail _dominant_blob_fraction).
+    h, w = 60, 200
+    img = np.full((h, w, 3), 255, np.uint8)
+    _gradient_bar(img, 15, 45, 10, 70, (10, 20, 200), (200, 40, 20))      # left bar  cols 10..70
+    _gradient_bar(img, 15, 45, 130, 190, (20, 200, 30), (10, 40, 220))    # right bar cols 130..190
+    # gutter cols 70..130 = 60 wide; block extent 10..190 = 180; threshold 0.3*180=54 -> splits
+    svg = idealize(img)
+    assert svg.count("<linearGradient") + svg.count("<radialGradient") >= 2
+
+
+def test_two_component_ids_are_continuous_no_collision():
+    # two separated solid blobs -> two components -> ids s0, s1 with no gap/collision
+    import re
+    h, w = 60, 160
+    img = np.full((h, w, 3), 255, np.uint8)
+    img[15:45, 10:50] = (10, 30, 90)       # left square  cols 10..50
+    img[15:45, 110:150] = (90, 30, 10)     # right square cols 110..150 (gutter 50..110 = 60)
+    svg = idealize(img)
+    ids = re.findall(r'id="(s\d+)"', svg)
+    assert ids == ["s0", "s1"]             # global, continuous across the component boundary
+
+
+def test_per_component_vertical_symmetry_emits_mirror_use():
+    # LEFT component: a mirror PAIR of squares about col 30 (cols 10-25 and 35-50).
+    # RIGHT component: a single offset square (cols 120-150). The WHOLE silhouette has
+    # no vertical mirror, so the pre-slice-5 mark-wide axis is None and the left pair is
+    # NOT deduped (no <use>). Per component, the left component's local axis (col 30)
+    # makes the two squares a mirror pair -> one element + a <use> mirror.
+    from vectormark.symmetry import detect_axis
+    h, w = 70, 170
+    img = np.full((h, w, 3), 255, np.uint8)
+    img[20:50, 10:25] = (20, 40, 80)       # left-of-pair
+    img[20:50, 35:50] = (20, 40, 80)       # right-of-pair (mirror about col 30)
+    img[20:50, 120:150] = (20, 40, 80)     # lone square right (gutter 50..120 = 70 wide)
+    silhouette = np.any(img != 255, axis=2)
+    assert detect_axis(silhouette) is None              # premise: no global vertical axis
+    svg = idealize(img)
+    assert "<use" in svg                                # the pair dedups only per-component

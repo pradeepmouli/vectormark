@@ -23,6 +23,7 @@ from .emit import (
     transform_path_d,
 )
 from .candidate import Candidate, Fill, FlatFill, LinearGradientFill, RadialGradientFill
+from .components import decompose_components
 from .fit import Shape, _fmt
 from .gradient import detect_gradients
 from .occlusion import ScenePrimitive, reconstruct_scene
@@ -207,28 +208,30 @@ def _render_body(
     When `bake` is given (only in flatten mode), the inverse transform is applied
     directly to each path's coordinates instead — flatten emits pure baked geometry
     with no wrapping `<g transform>`."""
-    silhouette = np.any([r.mask for r in regions], axis=0)
-    axis = None if opt.no_symmetry else detect_axis(silhouette)
-    corner_radius = opt.corner_radius if opt.corner_radius is not None else _mark_corner_radius(regions, axis)
-
-    reconstructed, regions = reconstruct_scene(regions, axis, (h, w))
-
-    # NOTE: silhouette/axis/corner_radius above are measured on the full pre-strip mark
-    # by design — one stable mark-wide fillet radius, independent of which bands the
-    # gradient pass consumes, applied uniformly to the remaining flats and the footprint.
+    components = decompose_components(regions, (h, w))
     defs: list[str] = []
-    gradient_fills: list[tuple[Region, dict]] = []
-    if rgb is not None:
-        gradient_fills, regions = detect_gradients(regions, rgb)
+    cands: list[Candidate] = []
+    for comp in components:
+        silhouette = np.any([r.mask for r in comp], axis=0)
+        axis = None if opt.no_symmetry else detect_axis(silhouette)
+        corner_radius = opt.corner_radius if opt.corner_radius is not None else _mark_corner_radius(comp, axis)
 
-    if axis is not None:
-        straddlers, pairs, loners = classify_regions(regions, axis)
-    else:
-        straddlers, pairs, loners = list(regions), [], []
+        reconstructed, comp = reconstruct_scene(comp, axis, (h, w))
 
-    cands = build_candidates(
-        reconstructed, straddlers, pairs, loners, gradient_fills, opt, axis, corner_radius, rgb
-    )
+        # Per component: one local axis + fillet radius, its own occlusion/gradient pass.
+        # (Single-component marks take this loop exactly once -> identical to pre-slice-5.)
+        gradient_fills: list[tuple[Region, dict]] = []
+        if rgb is not None:
+            gradient_fills, comp = detect_gradients(comp, rgb)
+
+        if axis is not None:
+            straddlers, pairs, loners = classify_regions(comp, axis)
+        else:
+            straddlers, pairs, loners = list(comp), [], []
+
+        cands += build_candidates(
+            reconstructed, straddlers, pairs, loners, gradient_fills, opt, axis, corner_radius, rgb
+        )
 
     def emit(d: str, fill: str, rule: str | None = None) -> str:
         return path_svg(transform_path_d(d, bake) if bake is not None else d, fill, rule)
