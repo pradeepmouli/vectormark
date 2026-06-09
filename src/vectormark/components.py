@@ -69,7 +69,7 @@ def _best_gutter(sil: np.ndarray) -> tuple[str, float] | None:
 
     if not cands:
         return None
-    cands.sort(key=lambda t: (-t[0], t[1]))           # widest, then most even
+    cands.sort(key=lambda t: (-t[0], t[1]))           # widest first, then most centred on tie
     _, _, axis, cut = cands[0]
     return (axis, cut)
 
