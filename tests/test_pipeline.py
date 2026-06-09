@@ -251,9 +251,10 @@ def test_multicomponent_selection_addresses_global_sn():
 
 
 def test_rgba_file_input_composites_on_white(tmp_path):
-    # A semi-transparent block: 50% red flattens to pink on WHITE but to dark red on
-    # black (PIL's drop-alpha default). idealize() of the file path must equal idealizing
-    # the manually-on-white-composited array — proving it composites on white, not black.
+    # A semi-transparent block: composited on WHITE, 50%-alpha red becomes pink. PIL's
+    # convert("RGB") instead DROPS alpha (keeps the stored RGB), yielding over-saturated
+    # full red (#FF0000). idealize() of the file path must equal idealizing the manually
+    # on-white-composited array — proving it composites on white, not drop-alpha.
     from PIL import Image
     h = w = 60
     rgba = np.zeros((h, w, 4), np.uint8)
@@ -265,5 +266,6 @@ def test_rgba_file_input_composites_on_white(tmp_path):
         np.uint8,
     )
     assert idealize(str(tmp_path / "b.png")) == idealize(on_white)
-    # and the emitted fill is the pink composite (G,B raised), never the on-black #FF0000
+    # the emitted fill is the pink composite (G,B raised), never #FF0000 — the
+    # over-saturated result of dropping alpha instead of compositing it on white
     assert "#FF0000" not in idealize(str(tmp_path / "b.png"))

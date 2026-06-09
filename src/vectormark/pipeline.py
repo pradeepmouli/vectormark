@@ -320,9 +320,10 @@ def _idealize_rectified(arr: np.ndarray, opt: Options, rho: float, w0: int, h0: 
 
 def _flatten_on_white(im: Image.Image) -> np.ndarray:
     """RGB (H,W,3) uint8 with any alpha composited onto WHITE (a transparent surround is
-    background, not a mark). PIL's plain `convert("RGB")` drops alpha onto black, which
-    turns transparent icon backgrounds into a black region and leaves a spurious white
-    anti-aliasing ring — mangling the most common logo input."""
+    background, not a mark). PIL's plain `convert("RGB")` instead DROPS alpha, keeping each
+    pixel's stored RGB — so transparent icon backgrounds (typically stored black) become a
+    black region, semi-transparent edges keep over-saturated colours, and a spurious white
+    anti-aliasing ring appears: mangling the most common logo input."""
     if im.mode in ("RGBA", "LA") or (im.mode == "P" and "transparency" in im.info):
         rgba = im.convert("RGBA")
         bg = Image.new("RGBA", rgba.size, (255, 255, 255, 255))
