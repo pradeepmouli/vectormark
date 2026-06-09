@@ -201,9 +201,11 @@ def _render_body(
     w: int, h: int, regions: list[Region], opt: Options, *,
     bake: Affine | None = None, rgb: np.ndarray | None = None,
 ) -> tuple[list[str], list[str]]:
-    """Detect symmetry, reconstruct occlusion, fit and emit every region in
-    z-order. Operates entirely in the frame of `regions` (which may be a rectified
-    frame) so the caller can wrap the result in an inverse transform.
+    """Decompose regions into gutter-separated components, then per component detect
+    symmetry, reconstruct occlusion, and fit regions — accumulating candidates that the
+    single emit loop renders in z-order with globally continuous sN ids. Operates
+    entirely in the frame of `regions` (which may be a rectified frame) so the caller
+    can wrap the result in an inverse transform.
 
     When `bake` is given (only in flatten mode), the inverse transform is applied
     directly to each path's coordinates instead — flatten emits pure baked geometry
