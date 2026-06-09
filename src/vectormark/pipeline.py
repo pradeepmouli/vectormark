@@ -136,7 +136,7 @@ def build_candidates(
     reconstructed: list, straddlers: list[Region], pairs: list[tuple[Region, Region]],
     loners: list[Region], gradient_fills: list[tuple[Region, dict]],
     opt: Options, axis: Axis | None, corner_radius: float,
-    source_rgb: np.ndarray | None,
+    source_rgb: np.ndarray | None, *, base: int = 0,
 ) -> list[Candidate]:
     """Decide geometry + fill per element and return the candidate list in exact
     paint order: occlusion (by z) -> regions (by area desc) -> gradients (detect
@@ -162,10 +162,11 @@ def build_candidates(
     )
     drawn.sort(key=lambda rp: rp[0].area, reverse=True)
     for region, fit_axis, is_pair in drawn:
-        # eid = sN where N = current cands length. The occlusion/lens loop already
+        # eid = sN where N = base + current cands length. The occlusion/lens loop already
         # filled cands[0..]; a None-return below skips the append, so only emitted
-        # elements consume an id — exactly matching the SVG emit-loop's id sequence.
-        eid = f"s{len(cands)}"
+        # elements consume an id — exactly matching the SVG emit-loop's GLOBAL id sequence
+        # (base = candidates from prior components, so per-component lookups address sN).
+        eid = f"s{base + len(cands)}"
         element = opt.selection.for_id(eid) if opt.selection is not None else None
         shape = select_geometry(region, opt, fit_axis, corner_radius, source_rgb,
                                 element=element, eid=eid)
@@ -180,8 +181,8 @@ def build_candidates(
     # holes / separate flats, keeping paint order safe. True behind-a-flat
     # layering of a gradient footprint is out of scope.
     for footprint, model in gradient_fills:
-        # Same sN scheme as the region loop (shared cands counter; gradients emit last).
-        eid = f"s{len(cands)}"
+        # Same sN scheme as the region loop (shared base + cands counter; gradients emit last).
+        eid = f"s{base + len(cands)}"
         element = opt.selection.for_id(eid) if opt.selection is not None else None
         shape = select_geometry(footprint, opt, None, corner_radius, source_rgb,
                                 element=element, eid=eid)
@@ -232,7 +233,8 @@ def _render_body(
             straddlers, pairs, loners = list(comp), [], []
 
         cands += build_candidates(
-            reconstructed, straddlers, pairs, loners, gradient_fills, opt, axis, corner_radius, rgb
+            reconstructed, straddlers, pairs, loners, gradient_fills, opt, axis, corner_radius, rgb,
+            base=len(cands),
         )
 
     def emit(d: str, fill: str, rule: str | None = None) -> str:

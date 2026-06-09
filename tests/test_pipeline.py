@@ -231,3 +231,20 @@ def test_per_component_vertical_symmetry_emits_mirror_use():
     assert detect_axis(silhouette) is None              # premise: no global vertical axis
     svg = idealize(img)
     assert "<use" in svg                                # the pair dedups only per-component
+
+
+def test_multicomponent_selection_addresses_global_sn():
+    # two separated squares -> components s0 (left), s1 (right). A policy keyed to the
+    # GLOBAL id "s1" must reach the SECOND component. With the per-component-local eid
+    # bug, for_id was queried with "s0","s0" and this policy was silently ignored.
+    import pytest
+    from vectormark.selection import SelectionPolicy, ElementSelection
+    h, w = 60, 160
+    img = np.full((h, w, 3), 255, np.uint8)
+    img[15:45, 10:50] = (10, 30, 90)        # left square  -> s0
+    img[15:45, 110:150] = (90, 30, 10)      # right square -> s1
+    # force a known-but-unavailable strategy on s1: the second element's policy IS
+    # consulted (warns naming s1) only if global sN addressing reaches build_candidates.
+    policy = SelectionPolicy(by_id={"s1": ElementSelection(force="holed_symmetric")})
+    with pytest.warns(UserWarning, match="s1"):
+        idealize(img, options=Options(selection=policy))
