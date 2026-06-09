@@ -318,13 +318,28 @@ def _idealize_rectified(arr: np.ndarray, opt: Options, rho: float, w0: int, h0: 
     return render_svg_doc(w0, h0, [wrap, *body, "</g>"], defs)
 
 
+def _flatten_on_white(im: Image.Image) -> np.ndarray:
+    """RGB (H,W,3) uint8 with any alpha composited onto WHITE (a transparent surround is
+    background, not a mark). PIL's plain `convert("RGB")` instead DROPS alpha, keeping each
+    pixel's stored RGB — so transparent icon backgrounds (typically stored black) become a
+    black region, semi-transparent edges keep over-saturated colours, and a spurious white
+    anti-aliasing ring appears: mangling the most common logo input."""
+    if im.mode in ("RGBA", "LA") or (im.mode == "P" and "transparency" in im.info):
+        rgba = im.convert("RGBA")
+        bg = Image.new("RGBA", rgba.size, (255, 255, 255, 255))
+        im = Image.alpha_composite(bg, rgba)
+    return np.asarray(im.convert("RGB"), dtype=np.uint8)
+
+
 def idealize(image, *, options: Options | None = None) -> str:
     opt = options or Options()
     if isinstance(image, str):
         with Image.open(image) as im:
-            arr = np.asarray(im.convert("RGB"), dtype=np.uint8)
+            arr = _flatten_on_white(im)
     else:
         arr = np.asarray(image, dtype=np.uint8)
+        if arr.ndim == 3 and arr.shape[2] == 4:            # RGBA array -> composite on white
+            arr = _flatten_on_white(Image.fromarray(arr, "RGBA"))
     h0, w0 = arr.shape[:2]
 
     w, h, regions = _segment_image(arr, opt)

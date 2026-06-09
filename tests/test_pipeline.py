@@ -248,3 +248,24 @@ def test_multicomponent_selection_addresses_global_sn():
     policy = SelectionPolicy(by_id={"s1": ElementSelection(force="holed_symmetric")})
     with pytest.warns(UserWarning, match="s1"):
         idealize(img, options=Options(selection=policy))
+
+
+def test_rgba_file_input_composites_on_white(tmp_path):
+    # A semi-transparent block: composited on WHITE, 50%-alpha red becomes pink. PIL's
+    # convert("RGB") instead DROPS alpha (keeps the stored RGB), yielding over-saturated
+    # full red (#FF0000). idealize() of the file path must equal idealizing the manually
+    # on-white-composited array — proving it composites on white, not drop-alpha.
+    from PIL import Image
+    h = w = 60
+    rgba = np.zeros((h, w, 4), np.uint8)
+    rgba[10:50, 10:50] = (255, 0, 0, 128)           # 50%-alpha red on transparent ground
+    Image.fromarray(rgba, "RGBA").save(tmp_path / "b.png")
+    on_white = np.asarray(
+        Image.alpha_composite(Image.new("RGBA", (w, h), (255, 255, 255, 255)),
+                              Image.fromarray(rgba, "RGBA")).convert("RGB"),
+        np.uint8,
+    )
+    assert idealize(str(tmp_path / "b.png")) == idealize(on_white)
+    # the emitted fill is the pink composite (G,B raised), never #FF0000 — the
+    # over-saturated result of dropping alpha instead of compositing it on white
+    assert "#FF0000" not in idealize(str(tmp_path / "b.png"))
