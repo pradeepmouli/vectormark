@@ -23,6 +23,7 @@ from .emit import (
     transform_path_d,
 )
 from .candidate import Candidate, Fill, FlatFill, LinearGradientFill, RadialGradientFill
+from .components import decompose_components
 from .fit import Shape, _fmt
 from .gradient import detect_gradients
 from .occlusion import ScenePrimitive, reconstruct_scene
@@ -135,7 +136,7 @@ def build_candidates(
     reconstructed: list, straddlers: list[Region], pairs: list[tuple[Region, Region]],
     loners: list[Region], gradient_fills: list[tuple[Region, dict]],
     opt: Options, axis: Axis | None, corner_radius: float,
-    source_rgb: np.ndarray | None,
+    source_rgb: np.ndarray | None, *, base: int = 0,
 ) -> list[Candidate]:
     """Decide geometry + fill per element and return the candidate list in exact
     paint order: occlusion (by z) -> regions (by area desc) -> gradients (detect
@@ -161,10 +162,11 @@ def build_candidates(
     )
     drawn.sort(key=lambda rp: rp[0].area, reverse=True)
     for region, fit_axis, is_pair in drawn:
-        # eid = sN where N = current cands length. The occlusion/lens loop already
+        # eid = sN where N = base + current cands length. The occlusion/lens loop already
         # filled cands[0..]; a None-return below skips the append, so only emitted
-        # elements consume an id — exactly matching the SVG emit-loop's id sequence.
-        eid = f"s{len(cands)}"
+        # elements consume an id — exactly matching the SVG emit-loop's GLOBAL id sequence
+        # (base = candidates from prior components, so per-component lookups address sN).
+        eid = f"s{base + len(cands)}"
         element = opt.selection.for_id(eid) if opt.selection is not None else None
         shape = select_geometry(region, opt, fit_axis, corner_radius, source_rgb,
                                 element=element, eid=eid)
@@ -179,8 +181,8 @@ def build_candidates(
     # holes / separate flats, keeping paint order safe. True behind-a-flat
     # layering of a gradient footprint is out of scope.
     for footprint, model in gradient_fills:
-        # Same sN scheme as the region loop (shared cands counter; gradients emit last).
-        eid = f"s{len(cands)}"
+        # Same sN scheme as the region loop (shared base + cands counter; gradients emit last).
+        eid = f"s{base + len(cands)}"
         element = opt.selection.for_id(eid) if opt.selection is not None else None
         shape = select_geometry(footprint, opt, None, corner_radius, source_rgb,
                                 element=element, eid=eid)
@@ -200,35 +202,40 @@ def _render_body(
     w: int, h: int, regions: list[Region], opt: Options, *,
     bake: Affine | None = None, rgb: np.ndarray | None = None,
 ) -> tuple[list[str], list[str]]:
-    """Detect symmetry, reconstruct occlusion, fit and emit every region in
-    z-order. Operates entirely in the frame of `regions` (which may be a rectified
-    frame) so the caller can wrap the result in an inverse transform.
+    """Decompose regions into gutter-separated components, then per component detect
+    symmetry, reconstruct occlusion, and fit regions — accumulating candidates that the
+    single emit loop renders in z-order with globally continuous sN ids. Operates
+    entirely in the frame of `regions` (which may be a rectified frame) so the caller
+    can wrap the result in an inverse transform.
 
     When `bake` is given (only in flatten mode), the inverse transform is applied
     directly to each path's coordinates instead — flatten emits pure baked geometry
     with no wrapping `<g transform>`."""
-    silhouette = np.any([r.mask for r in regions], axis=0)
-    axis = None if opt.no_symmetry else detect_axis(silhouette)
-    corner_radius = opt.corner_radius if opt.corner_radius is not None else _mark_corner_radius(regions, axis)
-
-    reconstructed, regions = reconstruct_scene(regions, axis, (h, w))
-
-    # NOTE: silhouette/axis/corner_radius above are measured on the full pre-strip mark
-    # by design — one stable mark-wide fillet radius, independent of which bands the
-    # gradient pass consumes, applied uniformly to the remaining flats and the footprint.
+    components = decompose_components(regions, (h, w))
     defs: list[str] = []
-    gradient_fills: list[tuple[Region, dict]] = []
-    if rgb is not None:
-        gradient_fills, regions = detect_gradients(regions, rgb)
+    cands: list[Candidate] = []
+    for comp in components:
+        silhouette = np.any([r.mask for r in comp], axis=0)
+        axis = None if opt.no_symmetry else detect_axis(silhouette)
+        corner_radius = opt.corner_radius if opt.corner_radius is not None else _mark_corner_radius(comp, axis)
 
-    if axis is not None:
-        straddlers, pairs, loners = classify_regions(regions, axis)
-    else:
-        straddlers, pairs, loners = list(regions), [], []
+        reconstructed, comp = reconstruct_scene(comp, axis, (h, w))
 
-    cands = build_candidates(
-        reconstructed, straddlers, pairs, loners, gradient_fills, opt, axis, corner_radius, rgb
-    )
+        # Per component: one local axis + fillet radius, its own occlusion/gradient pass.
+        # (Single-component marks take this loop exactly once -> identical to pre-slice-5.)
+        gradient_fills: list[tuple[Region, dict]] = []
+        if rgb is not None:
+            gradient_fills, comp = detect_gradients(comp, rgb)
+
+        if axis is not None:
+            straddlers, pairs, loners = classify_regions(comp, axis)
+        else:
+            straddlers, pairs, loners = list(comp), [], []
+
+        cands += build_candidates(
+            reconstructed, straddlers, pairs, loners, gradient_fills, opt, axis, corner_radius, rgb,
+            base=len(cands),
+        )
 
     def emit(d: str, fill: str, rule: str | None = None) -> str:
         return path_svg(transform_path_d(d, bake) if bake is not None else d, fill, rule)
