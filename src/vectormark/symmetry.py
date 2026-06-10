@@ -7,6 +7,14 @@ from scipy import ndimage as ndi
 
 from .types import Axis, Region
 
+# One tolerance for "is this bilaterally symmetric?", shared by every acceptance site
+# so they cannot disagree. It is a reflection *mismatch* fraction: a shape counts as
+# symmetric about an axis when at most SYM_TOL of it fails to overlap its reflection
+# (equivalently, reflection IoU >= 1 - SYM_TOL). Using a looser bar for the straddle
+# gate than for axis detection let near-symmetric *pointed* regions be force-mirrored
+# about an axis their apex misses, splitting the apex into a fork.
+SYM_TOL = 0.10
+
 
 def _reflect_cols(mask: np.ndarray, axis_x: float) -> np.ndarray:
     """Reflect a boolean mask across the vertical line x = axis_x (nearest col)."""
@@ -26,7 +34,7 @@ def _mismatch(mask: np.ndarray, axis_x: float) -> float:
     return 1.0 - (inter / union if union else 1.0)
 
 
-def detect_axis(silhouette: np.ndarray, *, tol: float = 0.10) -> Axis | None:
+def detect_axis(silhouette: np.ndarray, *, tol: float = SYM_TOL) -> Axis | None:
     """Find the best vertical symmetry axis; None if mismatch exceeds `tol`.
 
     Searches candidate columns near the foreground centroid at 0.5px resolution.
@@ -66,7 +74,7 @@ def _axis_mismatch(
     return float((dist[ri, ci] > tol_px).mean())
 
 
-def detect_symmetry_rotation(silhouette: np.ndarray, *, tol: float = 0.10) -> float | None:
+def detect_symmetry_rotation(silhouette: np.ndarray, *, tol: float = SYM_TOL) -> float | None:
     """Degrees of rotation that bring a *tilted* mirror axis to vertical, or None.
 
     For an off-axis bilaterally-symmetric mark the mirror line is one of the two PCA
@@ -110,7 +118,8 @@ def _iou(a: np.ndarray, b: np.ndarray) -> float:
 
 
 def classify_regions(
-    regions: list[Region], axis: Axis, *, pair_iou: float = 0.6, straddle_iou: float = 0.5,
+    regions: list[Region], axis: Axis, *, pair_iou: float = 0.6,
+    straddle_iou: float = 1.0 - SYM_TOL,
 ) -> tuple[list[Region], list[tuple[Region, Region]], list[Region]]:
     """Split regions into self-symmetric straddlers, mirror pairs, and lone
     asymmetric leftovers.
@@ -118,7 +127,12 @@ def classify_regions(
     The three categories must be fit differently, so they are kept distinct: a
     straddler is fit half-and-mirrored about the axis, a pair is fit once and
     `<use>`-mirrored, and a loner is fit as-is with no symmetry (forcing the
-    half-outline mirror onto a genuinely asymmetric region would distort it)."""
+    half-outline mirror onto a genuinely asymmetric region would distort it).
+
+    A region is a straddler only if it clears the SAME symmetry bar `detect_axis`
+    uses (reflection IoU >= `straddle_iou` = 1 - SYM_TOL). A looser gate admits
+    near-symmetric but pointed regions whose apex lies off the axis; half-mirroring
+    then splits the apex into a fork, so those fall through to loners instead."""
     straddlers: list[Region] = []
     pairs: list[tuple[Region, Region]] = []
     loners: list[Region] = []
