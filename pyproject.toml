@@ -11,14 +11,22 @@ dependencies = [
     "scikit-image>=0.24",
     "shapely>=2.0",
     "pillow>=10.0",
-    "resvg-py>=0.1.7",
 ]
 
 [project.optional-dependencies]
-dev = ["pytest>=8.0"]
+# render-ΔE scored candidate selection (without it, selection falls back to the
+# cascade-priority pick and warns once — see vectormark.score).
+scoring = ["resvg-py>=0.1.7"]
+# the MCP server (`vectormark-mcp`); only needed to expose vectormark over MCP.
+server = ["mcp>=1.13"]
+dev = [
+    "pytest>=8.0",
+    "vectormark[scoring,server]",
+]
 
 [project.scripts]
 vectormark = "vectormark.cli:main"
+vectormark-mcp = "vectormark.mcp_server:main"
 
 [build-system]
 requires = ["hatchling"]

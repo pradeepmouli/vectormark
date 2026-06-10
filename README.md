@@ -26,6 +26,19 @@ uv run vectormark path/to/logo.png -o out.svg
 uv run pytest
 ```
 
+MCP integration is available for AI clients that can call local stdio servers
+(the server lives in the optional `server` extra; scored selection needs the
+`scoring` extra — without it, selection falls back to the cascade pick):
+
+```bash
+uv sync --extra server --extra scoring
+npm --prefix integrations/mcp-app install
+npm --prefix integrations/mcp-app run build
+uv run vectormark-mcp
+```
+
+See [`docs/mcp.md`](docs/mcp.md) for client configuration and hosted app notes.
+
 ## Pipeline (v1)
 
 ```

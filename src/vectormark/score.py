@@ -6,11 +6,13 @@ from __future__ import annotations
 
 import io
 import re
+import warnings
 from dataclasses import dataclass
 
 import numpy as np
-import resvg_py
 from PIL import Image
+
+_renderer_warned = False   # warn at most once per process when resvg is unavailable
 
 from .candidate import Candidate, FlatFill, LinearGradientFill, RadialGradientFill
 from .color import mean_delta_e
@@ -53,7 +55,24 @@ def parsimony_cost(cand: Candidate) -> float:
     return geom + fill
 
 
-# --- fidelity (render-ΔE via resvg) ---------------------------------------------
+# --- fidelity (render-ΔE via optional resvg) -------------------------------------
+class SvgRendererUnavailable(RuntimeError):
+    """Raised when SVG rasterization is unavailable in the current runtime."""
+
+
+def _warn_renderer_unavailable() -> None:
+    """Surface the silent scoring downgrade once per process (not per region/element)."""
+    global _renderer_warned
+    if not _renderer_warned:
+        _renderer_warned = True
+        warnings.warn(
+            "resvg-py is not installed: render-ΔE scoring is disabled, so candidate "
+            "selection falls back to the cascade-priority pick. Install the scoring "
+            "extra (pip install 'vectormark[scoring]') to enable scored selection.",
+            RuntimeWarning, stacklevel=2,
+        )
+
+
 def _candidate_svg(cand: Candidate, w: int, h: int) -> str:
     defs: list[str] = []
     fill = resolve_fill(cand.fill, defs)
@@ -65,6 +84,11 @@ def _candidate_svg(cand: Candidate, w: int, h: int) -> str:
 def _rasterize(svg: str, w: int, h: int) -> np.ndarray:
     """SVG -> (h, w, 3) uint8 composited on white. (Mirrors tests/_render.render_svg;
     kept local so src/ does not import test helpers — unify in a later DRY pass.)"""
+    try:
+        import resvg_py
+    except ModuleNotFoundError as exc:
+        raise SvgRendererUnavailable("install resvg-py to enable render-based scoring") from exc
+
     png = resvg_py.svg_to_bytes(svg_string=svg, width=w, height=h)
     img = Image.open(io.BytesIO(bytes(png)))
     bg = Image.new("RGB", img.size, (255, 255, 255))
@@ -130,11 +154,25 @@ def rank_candidates(
     caller can inspect/override. When `bbox` (x0, y0, x1, y1) is given it is
     forwarded to render_delta_e for a bbox-cropped fidelity comparison."""
     scored: list[tuple[Candidate, ScoreBreakdown]] = []
+    renderer_available = True
     for c in cands:
         ok, reason = structural_priors(c, region)
-        de = render_delta_e(c, source_rgb, region, bbox=bbox) if ok else float("inf")
+        de = float("inf")
+        if ok and renderer_available:
+            try:
+                de = render_delta_e(c, source_rgb, region, bbox=bbox)
+            except SvgRendererUnavailable:
+                renderer_available = False
+                _warn_renderer_unavailable()
         par = parsimony_cost(c)
         scored.append((c, ScoreBreakdown(de, par, ok, reason, ok and de <= fidelity_tol)))
+
+    if not renderer_available:
+        # No fidelity signal: keep the candidates' incoming (cascade-priority) order,
+        # priors-failures last. scored[0] is then the cascade pick — the pre-scoring
+        # behaviour, made explicit (and surfaced via the one-time warning above).
+        scored.sort(key=lambda cb: not cb[1].priors_ok)
+        return scored
 
     scored.sort(key=lambda cb: (
         not cb[1].qualified,

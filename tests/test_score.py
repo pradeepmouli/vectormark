@@ -30,6 +30,7 @@ def test_parsimony_polygon_scales_with_vertices():
 
 
 import numpy as np
+import pytest
 from vectormark.types import Region
 from vectormark.score import render_delta_e
 
@@ -86,7 +87,7 @@ def test_priors_pass_flat_and_primitive():
     assert ok is True and reason is None
 
 
-from vectormark.score import ScoreBreakdown, rank_candidates
+from vectormark.score import ScoreBreakdown, SvgRendererUnavailable, rank_candidates
 
 
 def test_rank_prefers_parsimony_among_fidelity_qualifiers():
@@ -102,6 +103,41 @@ def test_rank_prefers_parsimony_among_fidelity_qualifiers():
     assert ranked[0][0] is circle
     assert all(isinstance(b, ScoreBreakdown) for _, b in ranked)
     assert ranked[0][1].qualified is True
+
+
+def test_rank_preserves_candidate_order_without_svg_renderer(monkeypatch):
+    h = w = 60
+    src = np.full((h, w, 3), 255, np.uint8)
+    region = _disk_region(30, 30, 18, h, w, "#1e64eb")
+    first = Candidate(Shape("path", {"d": "M12 30 L30 12 L48 30 L30 48 Z"}),
+                      FlatFill("#1e64eb"), "region")
+    second = Candidate(Shape("circle", {"cx": 30, "cy": 30, "r": 18}),
+                       FlatFill("#1e64eb"), "region")
+
+    def unavailable(*args, **kwargs):
+        raise SvgRendererUnavailable("missing renderer")
+
+    monkeypatch.setattr("vectormark.score.render_delta_e", unavailable)
+
+    ranked = rank_candidates([first, second], src, region)
+
+    assert [candidate for candidate, _ in ranked] == [first, second]
+    assert all(breakdown.qualified is False for _, breakdown in ranked)
+
+
+def test_rank_warns_when_svg_renderer_unavailable(monkeypatch):
+    import vectormark.score as score
+    monkeypatch.setattr(score, "_renderer_warned", False)   # reset the once-per-process latch
+
+    h = w = 60
+    src = np.full((h, w, 3), 255, np.uint8)
+    region = _disk_region(30, 30, 18, h, w, "#1e64eb")
+    cand = Candidate(Shape("circle", {"cx": 30, "cy": 30, "r": 18}), FlatFill("#1e64eb"), "region")
+    monkeypatch.setattr("vectormark.score.render_delta_e",
+                        lambda *a, **k: (_ for _ in ()).throw(SvgRendererUnavailable("x")))
+
+    with pytest.warns(RuntimeWarning, match="resvg-py"):    # silent downgrade is surfaced
+        rank_candidates([cand], src, region)
 
 
 def test_rank_disqualifies_degenerate_gradient_keeps_flat():
