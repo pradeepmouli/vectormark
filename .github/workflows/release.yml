@@ -16,7 +16,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
-      - uses: astral-sh/setup-uv@v8
+      - uses: astral-sh/setup-uv@v7   # v7 is the latest *moving* major (Node 24); setup-uv has no `v8` tag, only v8.x
       - name: Build distributions
         run: uv build
       - name: Check metadata
