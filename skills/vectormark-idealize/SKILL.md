@@ -50,9 +50,11 @@ wheel), drop `[scoring]` — vectormark still works, just with the cascade pick.
 > - Requires Python ≥ 3.12. vectormark's own wheel is pure-Python; its
 >   dependencies and the `scoring` extra ship prebuilt manylinux/musllinux/
 >   macOS/Windows wheels, so this works in any networked environment.
-> - **No PyPI / fully offline?** Use the source URL in place of `vectormark`,
->   e.g. `uvx --from "git+https://github.com/pradeepmouli/vectormark" vectormark`
->   or `pip install "git+https://github.com/pradeepmouli/vectormark"`.
+> - **No PyPI?** Install from the git source instead. Minimal:
+>   `uvx --from "git+https://github.com/pradeepmouli/vectormark" vectormark`.
+>   With scoring, use the PEP 508 form so the extra is carried:
+>   `uvx --from "vectormark[scoring] @ git+https://github.com/pradeepmouli/vectormark" vectormark`
+>   (same `"<spec> @ git+…"` form for `pip install`).
 
 ## Step 2 — Get the raster onto disk
 
@@ -60,8 +62,9 @@ You need a PNG/JPG file path. Two cases:
 
 - **The user already gave you an image file** → use that path; skip to Step 3.
 - **You are generating the logo** (image-gen tool / model) → generate it, then
-  **save the bytes to a file**, e.g. `/tmp/vm-logo.png`. In a sandbox, the
-  generated image is already a file there; otherwise write it out explicitly.
+  **save the bytes to a file**, e.g. `/tmp/vm-logo.png`. Some hosts already
+  expose the generated image as a file in the working sandbox; if so, use that
+  path. Otherwise write the bytes out explicitly before Step 3.
 
 The CLI reads the file from disk, so the generator and `vectormark` must share a
 filesystem — true when both run locally, or both run inside the same sandbox.
