@@ -100,7 +100,11 @@ Use `--flatten` only if the consumer can't handle `<use>`/native primitives.
 
 ## Step 4 — Deliver the result
 
-- Show or save the SVG at the output path.
+- **The deliverable is the SVG itself** — report it and its output path, nothing
+  more. vectormark emits one SVG string; do **not** fabricate optimization stats,
+  file-size tables, color-swatch grids, "production ready" checklists, or a
+  multi-panel contact sheet around it. Those are invented, not produced by the
+  tool, and only add noise.
 - To preview, open the file (`open /tmp/vm-logo.svg` on macOS,
   `xdg-open` on Linux) or read the SVG text back to the user — an `<svg>`
   document renders directly in any browser or markdown preview.
