@@ -359,7 +359,7 @@ def _flatten_on_white(im: Image.Image) -> np.ndarray:
     return np.asarray(im.convert("RGB"), dtype=np.uint8)
 
 
-def idealize(image, *, options: Options | None = None, report: bool = False):
+def idealize(image, *, options: Options | None = None, report: bool = False) -> str | tuple[str, IdealizeReport]:
     """Idealize a raster mark into SVG. With `report=True`, returns
     `(svg, IdealizeReport)`; otherwise returns the SVG string (back-compatible)."""
     opt = options or Options()

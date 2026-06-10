@@ -19,8 +19,9 @@ def test_idealize_report_returns_strategy_counts():
     svg, report = idealize(_disc(), report=True)
     assert isinstance(svg, str) and svg.startswith("<svg ")
     assert isinstance(report, IdealizeReport)
-    assert report.strategies.get("primitive", 0) >= 1
-    assert report.elements >= 1
+    # a clean disc is one region recognised as a single primitive (circle)
+    assert report.strategies == {"primitive": 1}
+    assert report.elements == 1
     assert report.gradients == 0
 
 
