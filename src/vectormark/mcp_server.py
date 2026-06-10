@@ -2,13 +2,15 @@
 
 from __future__ import annotations
 
+import base64
+import io
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
 from mcp.server.fastmcp import FastMCP
 from PIL import Image
 
-from .pipeline import Options, idealize
+from .pipeline import Options, _flatten_on_white, idealize
 
 WIDGET_URI = "ui://vectormark/logo-widget.html"
 _WIDGET_HTML_PATH = Path(__file__).parents[2] / "integrations" / "mcp-app" / "dist" / "mcp-app.html"
@@ -95,6 +97,59 @@ def idealize_logo_file(
     )
 
 
+def _decode_image_base64(image_base64: str) -> bytes:
+    """Decode a base64 raster, tolerating a `data:image/...;base64,` URI prefix.
+    Raises ValueError on invalid base64."""
+    data = image_base64.strip()
+    if data.startswith("data:"):
+        _, _, data = data.partition(",")   # drop the data-URI media-type prefix
+    try:
+        return base64.b64decode(data, validate=True)   # binascii.Error is a ValueError
+    except ValueError as exc:
+        raise ValueError("image_base64 is not valid base64") from exc
+
+
+def idealize_logo_bytes(
+    image_bytes: bytes,
+    *,
+    output_path: str | None = None,
+    epsilon: float = 1.5,
+    max_error: float = 1.0,
+    colors: int = 16,
+    flatten: bool = False,
+    no_symmetry: bool = False,
+) -> IdealizeLogoResult:
+    """Idealize an in-memory raster (e.g. an image an agent just generated) into SVG,
+    with no local file needed. Alpha is composited on white via the shared pipeline
+    helper, matching file input."""
+
+    arr = _flatten_on_white(Image.open(io.BytesIO(image_bytes)))
+    height, width = arr.shape[:2]
+    options = Options(
+        epsilon=epsilon,
+        max_error=max_error,
+        max_colors=colors,
+        flatten=flatten,
+        no_symmetry=no_symmetry,
+    )
+    svg = idealize(arr, options=options)
+
+    destination: Path | None = None
+    if output_path is not None:
+        destination = Path(output_path).expanduser().resolve()
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        destination.write_text(svg)
+
+    return IdealizeLogoResult(
+        image_path="(inline base64 image)",
+        output_path=str(destination) if destination is not None else None,
+        width=width,
+        height=height,
+        svg_bytes=len(svg.encode()),
+        svg=svg,
+    )
+
+
 mcp = FastMCP(
     "vectormark",
     instructions=(
@@ -127,6 +182,42 @@ def idealize_logo(
 
     return idealize_logo_file(
         image_path,
+        output_path=output_path,
+        epsilon=epsilon,
+        max_error=max_error,
+        colors=colors,
+        flatten=flatten,
+        no_symmetry=no_symmetry,
+    ).to_dict()
+
+
+@mcp.tool(
+    title="Idealize logo from data",
+    description=(
+        "Idealize a base64-encoded raster image (e.g. one an agent just generated) into "
+        "structured SVG, without needing a local file path. Accepts a bare base64 string "
+        "or a data:image/...;base64,... URI."
+    ),
+    meta={
+        "ui": {"resourceUri": WIDGET_URI},
+        "openai/outputTemplate": WIDGET_URI,
+        "openai/toolInvocation/invoking": "Idealizing image...",
+        "openai/toolInvocation/invoked": "Idealized image.",
+    },
+)
+def idealize_logo_data(
+    image_base64: str,
+    output_path: str | None = None,
+    epsilon: float = 1.5,
+    max_error: float = 1.0,
+    colors: int = 16,
+    flatten: bool = False,
+    no_symmetry: bool = False,
+) -> dict[str, object]:
+    """Convert a base64-encoded raster image into structured SVG."""
+
+    return idealize_logo_bytes(
+        _decode_image_base64(image_base64),
         output_path=output_path,
         epsilon=epsilon,
         max_error=max_error,

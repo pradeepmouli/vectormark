@@ -67,9 +67,53 @@ def test_stdio_server_exposes_idealize_logo_tool():
 
     assert "idealize_logo" in tool_meta
     assert tool_meta["idealize_logo"]["meta"]["ui"]["resourceUri"] == WIDGET_URI
+    assert "idealize_logo_data" in tool_meta
     assert "render_idealized_logo" in tool_meta
     assert WIDGET_URI in resource_uris
     assert "Logo idealizer" in widget_text
     assert "vectormark" in widget_text
     assert structured["svg"].startswith("<svg ")
     assert structured["image_path"].endswith("tests/fixtures/daikonic/source.png")
+
+
+def _png_b64(width=60, height=60):
+    import base64
+    import io
+
+    image = Image.new("RGB", (width, height), "white")
+    draw = ImageDraw.Draw(image)
+    draw.rectangle((10, 10, 50, 50), fill=(10, 30, 90))
+    buf = io.BytesIO()
+    image.save(buf, format="PNG")
+    return base64.b64encode(buf.getvalue()).decode()
+
+
+def test_idealize_logo_bytes_returns_svg_and_writes_output(tmp_path):
+    import base64
+
+    from vectormark.mcp_server import idealize_logo_bytes
+
+    raw = base64.b64decode(_png_b64(64, 48))
+    output = tmp_path / "data.svg"
+    result = idealize_logo_bytes(raw, output_path=str(output), colors=4)
+
+    assert result.width == 64 and result.height == 48
+    assert result.svg.startswith("<svg ")
+    assert result.svg_bytes == len(result.svg.encode())
+    assert result.image_path == "(inline base64 image)"   # no source path for inline data
+    assert output.read_text() == result.svg
+
+
+def test_decode_image_base64_accepts_data_uri_and_rejects_garbage():
+    import base64
+
+    import pytest
+
+    from vectormark.mcp_server import _decode_image_base64
+
+    b64 = _png_b64()
+    raw = base64.b64decode(b64)
+    assert _decode_image_base64(b64) == raw
+    assert _decode_image_base64("data:image/png;base64," + b64) == raw   # data URI prefix stripped
+    with pytest.raises(ValueError):
+        _decode_image_base64("@@@ not base64 @@@")

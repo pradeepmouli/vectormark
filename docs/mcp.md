@@ -15,11 +15,15 @@ npm --prefix integrations/mcp-app run build
 uv run vectormark-mcp
 ```
 
-The server exposes two tools:
+The server exposes three tools:
 
-- `idealize_logo` converts a local raster logo into structured SVG.
-- `render_idealized_logo` renders an existing `idealize_logo` result in the app
-  resource. Text-only clients can ignore it.
+- `idealize_logo` converts a local raster logo **file** into structured SVG.
+- `idealize_logo_data` converts a **base64-encoded** raster (a bare base64 string
+  or a `data:image/...;base64,...` URI) into structured SVG — no local file needed.
+  This is the handoff for a "draw then idealize" agent flow: an image-generation
+  tool emits the raster as bytes/base64, which this tool idealizes directly.
+- `render_idealized_logo` renders an existing result in the app resource. Text-only
+  clients can ignore it.
 
 Tool arguments:
 
