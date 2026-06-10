@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import base64
 import io
+import os
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
@@ -11,6 +12,13 @@ from mcp.server.fastmcp import FastMCP
 from PIL import Image
 
 from .pipeline import Options, _flatten_on_white, idealize
+
+# Transport is chosen at startup. stdio = local, full-trust (your own machine, your
+# files). Any HTTP transport is potentially network-reachable, so the filesystem tools
+# (arbitrary-path READ via idealize_logo, WRITE via output_path) are withheld and only
+# the byte-in/SVG-out tools are exposed. See docs/mcp.md.
+_TRANSPORT = (os.environ.get("VECTORMARK_MCP_TRANSPORT") or "stdio").strip()
+_LOCAL_TRUST = _TRANSPORT == "stdio"
 
 WIDGET_URI = "ui://vectormark/logo-widget.html"
 _WIDGET_HTML_PATH = Path(__file__).parents[2] / "integrations" / "mcp-app" / "dist" / "mcp-app.html"
@@ -159,16 +167,6 @@ mcp = FastMCP(
 )
 
 
-@mcp.tool(
-    title="Idealize logo",
-    description="Convert a local raster logo file into structured SVG with an interactive preview.",
-    meta={
-        "ui": {"resourceUri": WIDGET_URI},
-        "openai/outputTemplate": WIDGET_URI,
-        "openai/toolInvocation/invoking": "Idealizing logo...",
-        "openai/toolInvocation/invoked": "Idealized logo.",
-    },
-)
 def idealize_logo(
     image_path: str,
     output_path: str | None = None,
@@ -189,6 +187,22 @@ def idealize_logo(
         flatten=flatten,
         no_symmetry=no_symmetry,
     ).to_dict()
+
+
+# Filesystem-reading tool: registered only under the local stdio transport. Over an
+# HTTP transport the server may be network-reachable, so arbitrary-path file reads are
+# withheld; remote callers use idealize_logo_data (base64) instead.
+if _LOCAL_TRUST:
+    idealize_logo = mcp.tool(
+        title="Idealize logo",
+        description="Convert a local raster logo file into structured SVG with an interactive preview.",
+        meta={
+            "ui": {"resourceUri": WIDGET_URI},
+            "openai/outputTemplate": WIDGET_URI,
+            "openai/toolInvocation/invoking": "Idealizing logo...",
+            "openai/toolInvocation/invoked": "Idealized logo.",
+        },
+    )(idealize_logo)
 
 
 @mcp.tool(
@@ -216,9 +230,10 @@ def idealize_logo_data(
 ) -> dict[str, object]:
     """Convert a base64-encoded raster image into structured SVG."""
 
+    # No host-filesystem writes unless local-trust (stdio): drop output_path otherwise.
     return idealize_logo_bytes(
         _decode_image_base64(image_base64),
-        output_path=output_path,
+        output_path=output_path if _LOCAL_TRUST else None,
         epsilon=epsilon,
         max_error=max_error,
         colors=colors,
@@ -285,7 +300,18 @@ def logo_widget() -> str:
 
 
 def main() -> None:
-    mcp.run("stdio")
+    """Run the server. Transport from VECTORMARK_MCP_TRANSPORT (stdio | sse |
+    streamable-http; default stdio). For HTTP transports, VECTORMARK_MCP_HOST /
+    VECTORMARK_MCP_PORT set the bind address (default 127.0.0.1:8000; the MCP endpoint
+    is served at /mcp)."""
+    if _TRANSPORT != "stdio":
+        host = os.environ.get("VECTORMARK_MCP_HOST")
+        port = os.environ.get("VECTORMARK_MCP_PORT")
+        if host:
+            mcp.settings.host = host
+        if port:
+            mcp.settings.port = int(port)
+    mcp.run(_TRANSPORT)
 
 
 if __name__ == "__main__":

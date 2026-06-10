@@ -96,6 +96,41 @@ It is **not safe to expose as-is over the network.** Before hosting the server
   defense-in-depth for any non-`<img>` consumer. The widget CSP (empty
   `connect`/`resource` domains) limits but does not eliminate this.
 
+## ChatGPT desktop (remote HTTP transport)
+
+ChatGPT does not launch local stdio servers — it connects to a **remote HTTPS MCP
+server** and renders the widget from the `openai/outputTemplate` meta the tools
+already carry. So expose vectormark over HTTP and give ChatGPT an HTTPS URL.
+
+The server runs an HTTP transport when `VECTORMARK_MCP_TRANSPORT` is set
+(`streamable-http` or `sse`); `VECTORMARK_MCP_HOST` / `VECTORMARK_MCP_PORT` set the
+bind address (default `127.0.0.1:8000`, endpoint at `/mcp`):
+
+```bash
+VECTORMARK_MCP_TRANSPORT=streamable-http VECTORMARK_MCP_PORT=8000 \
+  uv run --extra server --extra scoring vectormark-mcp
+```
+
+Give it a public HTTPS URL (a tunnel is fine for personal testing):
+
+```bash
+brew install cloudflared        # one-time
+cloudflared tunnel --url http://localhost:8000   # prints https://<name>.trycloudflare.com
+```
+
+Then in ChatGPT: **Settings → Connectors → Developer mode → Add** the URL
+`https://<name>.trycloudflare.com/mcp`.
+
+**Safe-by-default over HTTP.** Because an HTTP transport can be network-reachable,
+the filesystem tools are withheld automatically: `idealize_logo` (arbitrary-path
+file read) is **not registered**, and `idealize_logo_data` **ignores `output_path`**
+(no host writes). Only `idealize_logo_data` (base64 in, SVG out), the preview
+renderer, and the widget are exposed — which is exactly the ChatGPT flow: an
+image-generation tool emits the raster as base64, ChatGPT passes it to
+`idealize_logo_data`, and the widget previews the SVG. A trycloudflare URL is
+unauthenticated, so keep it ephemeral or put Cloudflare Access / OAuth in front for
+anything beyond personal testing.
+
 ## Hosted MCP app
 
 A hosted app has three parts:

@@ -117,3 +117,15 @@ def test_decode_image_base64_accepts_data_uri_and_rejects_garbage():
     assert _decode_image_base64("data:image/png;base64," + b64) == raw   # data URI prefix stripped
     with pytest.raises(ValueError):
         _decode_image_base64("@@@ not base64 @@@")
+
+
+def test_data_tool_ignores_output_path_in_http_mode(tmp_path, monkeypatch):
+    # Under a network transport (_LOCAL_TRUST False) the data tool must NOT write to the
+    # host filesystem even if a remote caller supplies output_path.
+    import vectormark.mcp_server as srv
+    monkeypatch.setattr(srv, "_LOCAL_TRUST", False)
+    out = tmp_path / "should_not_exist.svg"
+    result = srv.idealize_logo_data(_png_b64(), output_path=str(out))
+    assert result["svg"].startswith("<svg ")
+    assert result["output_path"] is None       # write suppressed
+    assert not out.exists()                     # nothing written to disk
