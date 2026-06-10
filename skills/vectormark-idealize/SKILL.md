@@ -105,6 +105,11 @@ Use `--flatten` only if the consumer can't handle `<use>`/native primitives.
   file-size tables, color-swatch grids, "production ready" checklists, or a
   multi-panel contact sheet around it. Those are invented, not produced by the
   tool, and only add noise.
+- **If you can't run vectormark, do not try to draw the SVG yourself.** Never
+  hand-author, guess, or hallucinate an output. If the tool didn't actually run
+  (not installed, no network, an error, or you only have the input image), say so
+  and stop — a fabricated SVG is worse than none, and only vectormark's real
+  output is meaningful here.
 - To preview, open the file (`open /tmp/vm-logo.svg` on macOS,
   `xdg-open` on Linux) or read the SVG text back to the user — an `<svg>`
   document renders directly in any browser or markdown preview.
