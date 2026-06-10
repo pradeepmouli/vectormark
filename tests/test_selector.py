@@ -111,17 +111,20 @@ def test_select_picks_circle_for_clean_disk():
     mask = _disk(50, 50, 32, h, w)
     src[mask] = (30, 100, 235)
     region = Region(1, mask, "#1e64eb")
-    shape = select_geometry(region, Options(), None, 0.0, src)
+    shape, strategy = select_geometry(region, Options(), None, 0.0, src)
     assert shape is not None and shape.kind == "circle"
+    assert strategy == "primitive"
 
 
 def test_select_falls_back_to_first_candidate_without_source():
     h = w = 80
     region = Region(1, _disk(40, 40, 25, h, w), "#1e64eb")
-    shape = select_geometry(region, Options(), None, 0.0, None)
+    shape, strategy = select_geometry(region, Options(), None, 0.0, None)
     assert shape is not None and shape.kind == "circle"   # candidates[0]
+    assert strategy == "primitive"
 
 
 def test_select_returns_none_when_no_contour():
     region = Region(1, np.zeros((20, 20), bool), "#000000")
-    assert select_geometry(region, Options(), None, 0.0, None) is None
+    shape, strategy = select_geometry(region, Options(), None, 0.0, None)
+    assert shape is None and strategy is None

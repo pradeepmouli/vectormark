@@ -131,10 +131,10 @@ def select_geometry(
     region: Region, opt, axis: Axis | None, corner_radius: float,
     source_rgb: np.ndarray | None, *,
     element: ElementSelection | None = None, eid: str = "?",
-) -> Shape | None:
+) -> tuple[Shape | None, str | None]:
     """Generate geometry candidates, optionally apply a manual `element` policy, score,
-    and return the winning Shape. With `element` None this is the 4a auto-selector
-    (pure pass-through). `eid` only labels warning messages.
+    and return `(winning_shape, strategy_label)`. With `element` None this is the 4a
+    auto-selector (pure pass-through). `eid` only labels warning messages.
 
     Stages (skipped when element is None): validate the policy's strategy labels;
     pre-restriction keeps only `allow`ed strategies (warn + restore if that empties the
@@ -145,7 +145,7 @@ def select_geometry(
 
     cands = generate_geometry_candidates(region, opt, axis, corner_radius)
     if not cands:
-        return None
+        return None, None
 
     if element is not None and element.allow is not None:
         kept = [gc for gc in cands if gc.strategy in element.allow]
@@ -170,8 +170,8 @@ def select_geometry(
                     UserWarning, stacklevel=2,
                 )
                 hit = cands[0]
-            return hit.shape
-        return cands[0].shape
+            return hit.shape, hit.strategy
+        return cands[0].shape, cands[0].strategy
 
     wrapped = [Candidate(gc.shape, FlatFill(region.color_hex), "region", strategy=gc.strategy)
                for gc in cands]
@@ -189,5 +189,6 @@ def select_geometry(
                 UserWarning, stacklevel=2,
             )
             hit = ranked[0][0]
-        return hit.geometry
-    return ranked[0][0].geometry
+        return hit.geometry, hit.strategy
+    winner = ranked[0][0]
+    return winner.geometry, winner.strategy

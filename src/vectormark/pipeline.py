@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import types
+from collections.abc import Mapping
 from dataclasses import dataclass
 
 import numpy as np
@@ -132,6 +134,32 @@ def _segment_image(arr: np.ndarray, opt: Options) -> tuple[int, int, list[Region
 Affine = tuple[float, float, float, float, float, float]
 
 
+@dataclass(frozen=True)
+class IdealizeReport:
+    """What the pipeline actually emitted for one idealize() run: the histogram of
+    fitter strategies the scorer chose per region, the gradient-fill count, and the
+    total emitted element count. Diagnostic annotation for the variant matrix."""
+
+    strategies: Mapping[str, int]
+    gradients: int
+    elements: int
+
+    @staticmethod
+    def empty() -> "IdealizeReport":
+        return IdealizeReport(types.MappingProxyType({}), 0, 0)
+
+
+def _report_from_cands(cands: list[Candidate]) -> IdealizeReport:
+    strategies: dict[str, int] = {}
+    gradients = 0
+    for c in cands:
+        if c.source == "gradient":
+            gradients += 1
+        if c.strategy is not None:                 # None for occlusion / lens / gradient
+            strategies[c.strategy] = strategies.get(c.strategy, 0) + 1
+    return IdealizeReport(types.MappingProxyType(dict(strategies)), gradients, len(cands))
+
+
 def build_candidates(
     reconstructed: list, straddlers: list[Region], pairs: list[tuple[Region, Region]],
     loners: list[Region], gradient_fills: list[tuple[Region, dict]],
@@ -168,12 +196,12 @@ def build_candidates(
         # (base = candidates from prior components, so per-component lookups address sN).
         eid = f"s{base + len(cands)}"
         element = opt.selection.for_id(eid) if opt.selection is not None else None
-        shape = select_geometry(region, opt, fit_axis, corner_radius, source_rgb,
-                                element=element, eid=eid)
+        shape, strategy = select_geometry(region, opt, fit_axis, corner_radius, source_rgb,
+                                          element=element, eid=eid)
         if shape is None:
             continue
         cands.append(Candidate(shape, FlatFill(region.color_hex), "region",
-                               mirror=axis if is_pair else None))
+                               mirror=axis if is_pair else None, strategy=strategy))
 
     # Gradient footprints paint after all flats/occlusion. _expand_footprint can
     # grow a footprint over former-background pixels, so strict spatial
@@ -184,8 +212,8 @@ def build_candidates(
         # Same sN scheme as the region loop (shared base + cands counter; gradients emit last).
         eid = f"s{base + len(cands)}"
         element = opt.selection.for_id(eid) if opt.selection is not None else None
-        shape = select_geometry(footprint, opt, None, corner_radius, source_rgb,
-                                element=element, eid=eid)
+        shape, _strategy = select_geometry(footprint, opt, None, corner_radius, source_rgb,
+                                           element=element, eid=eid)
         if shape is None:
             continue
         g = model["geometry"]
@@ -201,7 +229,7 @@ def build_candidates(
 def _render_body(
     w: int, h: int, regions: list[Region], opt: Options, *,
     bake: Affine | None = None, rgb: np.ndarray | None = None,
-) -> tuple[list[str], list[str]]:
+) -> tuple[list[str], list[str], list[Candidate]]:
     """Decompose regions into gutter-separated components, then per component detect
     symmetry, reconstruct occlusion, and fit regions — accumulating candidates that the
     single emit loop renders in z-order with globally continuous sN ids. Operates
@@ -267,7 +295,7 @@ def _render_body(
                 body.append(mirror_use(elem_id, cand.mirror))
         eid += 1
 
-    return body, defs
+    return body, defs, cands
 
 
 def _rectify_affine(rho: float, w0: int, h0: int, rw: int, rh: int) -> Affine:
@@ -294,28 +322,28 @@ def _bake_gradient_geometry(geom: dict, kind: str, bake: Affine) -> dict:
     return {"cx": cx, "cy": cy, "r": geom["r"]}
 
 
-def _idealize_rectified(arr: np.ndarray, opt: Options, rho: float, w0: int, h0: int) -> str | None:
+def _idealize_rectified(arr: np.ndarray, opt: Options, rho: float, w0: int, h0: int) -> tuple[str | None, list[Candidate]]:
     """Rotate the image so the tilted mirror axis is vertical and idealize there.
     Non-flatten output keeps the symmetry (`<use>` mirror about the vertical axis)
     and is wrapped in one inverse-rotation `<g>`; flatten output bakes that same
-    rotation into the path coordinates so no transform survives. Returns None (so
-    the caller falls back to upright) if the rectified frame yields no usable
+    rotation into the path coordinates so no transform survives. Returns (None, [])
+    (so the caller falls back to upright) if the rectified frame yields no usable
     regions or its vertical symmetry no longer registers."""
     rot = ndi.rotate(arr.astype(float), -rho, reshape=True, order=1, cval=255.0)
     rot = np.clip(rot, 0.0, 255.0).astype(np.uint8)
     rw, rh, regions = _segment_image(rot, opt)
     if not regions:
-        return None
+        return None, []
     if detect_axis(np.any([r.mask for r in regions], axis=0)) is None:
-        return None
+        return None, []
     if opt.flatten:
-        body, defs = _render_body(rw, rh, regions, opt,
-                                  bake=_rectify_affine(rho, w0, h0, rw, rh), rgb=rot)
-        return render_svg_doc(w0, h0, body, defs)
-    body, defs = _render_body(rw, rh, regions, opt, rgb=rot)
+        body, defs, cands = _render_body(rw, rh, regions, opt,
+                                         bake=_rectify_affine(rho, w0, h0, rw, rh), rgb=rot)
+        return render_svg_doc(w0, h0, body, defs), cands
+    body, defs, cands = _render_body(rw, rh, regions, opt, rgb=rot)
     wrap = (f'<g transform="translate({_fmt(w0 / 2)} {_fmt(h0 / 2)}) '
             f'rotate({_fmt(round(-rho, 3))}) translate({_fmt(-rw / 2)} {_fmt(-rh / 2)})">')
-    return render_svg_doc(w0, h0, [wrap, *body, "</g>"], defs)
+    return render_svg_doc(w0, h0, [wrap, *body, "</g>"], defs), cands
 
 
 def _flatten_on_white(im: Image.Image) -> np.ndarray:
@@ -331,7 +359,9 @@ def _flatten_on_white(im: Image.Image) -> np.ndarray:
     return np.asarray(im.convert("RGB"), dtype=np.uint8)
 
 
-def idealize(image, *, options: Options | None = None) -> str:
+def idealize(image, *, options: Options | None = None, report: bool = False):
+    """Idealize a raster mark into SVG. With `report=True`, returns
+    `(svg, IdealizeReport)`; otherwise returns the SVG string (back-compatible)."""
     opt = options or Options()
     if isinstance(image, str):
         with Image.open(image) as im:
@@ -344,19 +374,20 @@ def idealize(image, *, options: Options | None = None) -> str:
 
     w, h, regions = _segment_image(arr, opt)
     if not regions:
-        return render_svg_doc(w, h, [])
+        svg, cands = render_svg_doc(w, h, []), []
+    else:
+        svg, cands = None, []
+        # Any-axis symmetry: rectify a tilted mirror upright, idealize there, wrap back.
+        if not opt.no_symmetry:
+            silhouette = np.any([r.mask for r in regions], axis=0)
+            if detect_axis(silhouette) is None:
+                rho = detect_symmetry_rotation(silhouette)
+                if rho is not None:
+                    rectified, rcands = _idealize_rectified(arr, opt, rho, w0, h0)
+                    if rectified is not None:
+                        svg, cands = rectified, rcands
+        if svg is None:
+            body, defs, cands = _render_body(w, h, regions, opt, rgb=arr)
+            svg = render_svg_doc(w, h, body, defs)
 
-    # Any-axis symmetry: if the mark has no *vertical* mirror but a tilted one,
-    # rectify it upright, idealize there, and wrap the body back into place — so
-    # the existing vertical machinery (<use> mirror, pair dedup) does the work.
-    if not opt.no_symmetry:
-        silhouette = np.any([r.mask for r in regions], axis=0)
-        if detect_axis(silhouette) is None:
-            rho = detect_symmetry_rotation(silhouette)
-            if rho is not None:
-                rectified = _idealize_rectified(arr, opt, rho, w0, h0)
-                if rectified is not None:
-                    return rectified
-
-    body, defs = _render_body(w, h, regions, opt, rgb=arr)
-    return render_svg_doc(w, h, body, defs)
+    return (svg, _report_from_cands(cands)) if report else svg
