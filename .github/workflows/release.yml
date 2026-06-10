@@ -1,0 +1,45 @@
+name: Release
+
+# Build and publish to PyPI on a version tag (e.g. v0.0.1).
+# Publishing uses PyPI Trusted Publishing (OIDC) — no API token is stored in
+# this repo. Configure the trusted publisher once on pypi.org first; see
+# docs/releasing.md.
+
+on:
+  push:
+    tags:
+      - "v*"
+
+jobs:
+  build:
+    name: Build sdist + wheel
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+      - name: Build distributions
+        run: uv build
+      - name: Check metadata
+        run: uvx twine check dist/*
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist
+          path: dist/
+
+  publish:
+    name: Publish to PyPI
+    needs: build
+    runs-on: ubuntu-latest
+    # Bind to a GitHub Environment so the trusted publisher can be scoped to it
+    # on PyPI. Create an environment named "pypi" in repo settings.
+    environment:
+      name: pypi
+      url: https://pypi.org/project/vectormark/
+    permissions:
+      id-token: write # required for OIDC trusted publishing
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist/
+      - uses: pypa/gh-action-pypi-publish@release/v1

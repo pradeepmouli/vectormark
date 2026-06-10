@@ -4,7 +4,19 @@ version = "0.0.1"
 description = "Deterministic logo idealizer — rendered logo raster to clean, editable, symmetric SVG."
 readme = "README.md"
 requires-python = ">=3.12"
-license = { text = "MIT" }
+license = "MIT"
+license-files = ["LICENSE"]
+keywords = ["svg", "vectorization", "logo", "raster-to-vector", "image-tracing", "idealize"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Multimedia :: Graphics",
+    "Topic :: Scientific/Engineering :: Image Recognition",
+]
 dependencies = [
     "numpy>=2.0",
     "scipy>=1.13",
@@ -12,6 +24,11 @@ dependencies = [
     "shapely>=2.0",
     "pillow>=10.0",
 ]
+
+[project.urls]
+Homepage = "https://github.com/pradeepmouli/vectormark"
+Repository = "https://github.com/pradeepmouli/vectormark"
+Issues = "https://github.com/pradeepmouli/vectormark/issues"
 
 [project.optional-dependencies]
 # render-ΔE scored candidate selection (without it, selection falls back to the
