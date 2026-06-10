@@ -61,3 +61,38 @@ def test_write_variant_set_writes_svgs_and_manifest(tmp_path):
     assert first["file"] == "variant-e0_5-m1.svg"
     assert first["svg_bytes"] > 0
     assert isinstance(first["strategies"], dict) and first["elements"] >= 1
+
+
+import io
+
+import pytest
+
+import vectormark.variants as V
+from vectormark.score import SvgRendererUnavailable
+
+
+def _renderer_available():
+    try:
+        import resvg_py  # noqa: F401
+        return True
+    except ModuleNotFoundError:
+        return False
+
+
+@pytest.mark.skipif(not _renderer_available(), reason="needs resvg-py")
+def test_contact_sheet_renders_grid_png():
+    eps, mes = (0.5, 3.0), (0.5, 2.5)
+    variants = generate_variants(_mark(), epsilons=eps, max_errors=mes)
+    png = V.compose_contact_sheet(variants, epsilons=eps, max_errors=mes)
+    assert isinstance(png, (bytes, bytearray)) and len(png) > 0
+    img = Image.open(io.BytesIO(bytes(png)))
+    assert img.width > 0 and img.height > 0
+
+
+def test_contact_sheet_none_without_renderer(monkeypatch):
+    def boom(*a, **k):
+        raise SvgRendererUnavailable("no renderer")
+    monkeypatch.setattr(V, "_rasterize", boom)
+    eps, mes = (0.5,), (0.5,)
+    variants = generate_variants(_mark(), epsilons=eps, max_errors=mes)
+    assert V.compose_contact_sheet(variants, epsilons=eps, max_errors=mes) is None

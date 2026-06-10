@@ -4,15 +4,17 @@ grid, for SVG export, a JSON manifest, and an annotated contact sheet."""
 
 from __future__ import annotations
 
+import io
 import json
 from dataclasses import dataclass, replace
 from pathlib import Path
 
 import numpy as np
-from PIL import Image
+from PIL import Image, ImageDraw
 
 from .fit import _fmt
 from .pipeline import IdealizeReport, Options, _flatten_on_white, idealize
+from .score import SvgRendererUnavailable, _rasterize
 
 DEFAULT_EPSILONS = (0.5, 1.5, 3.0)
 DEFAULT_MAX_ERRORS = (0.5, 1.0, 2.5)
@@ -112,3 +114,71 @@ def generate_variants(
             except Exception as exc:                       # one bad cell must not kill the grid
                 out.append(Variant(eps, me, "", IdealizeReport.empty(), error=str(exc)))
     return out
+
+
+# ---------------------------------------------------------------------------
+# Contact-sheet composer
+# ---------------------------------------------------------------------------
+
+_TILE = 220          # rendered variant size (px)
+_PAD = 10            # gap between tiles
+_LABEL_H = 26        # caption strip height under each tile
+_AXIS_W = 80         # left gutter for epsilon row labels
+_AXIS_H = 24         # top strip for max_error column labels
+
+
+def _histogram_caption(report: IdealizeReport) -> str:
+    """Compact strategy histogram, e.g. 'prim×3 sym_poly×2 path×1'."""
+    short = {"primitive": "prim", "sym_polygon": "sym_poly", "trapezoid": "trap",
+             "symmetric": "sym", "polygon": "poly", "holed_symmetric": "holed_sym",
+             "holed_path": "holed", "cap": "cap", "path": "path"}
+    parts = [f"{short.get(k, k)}×{n}" for k, n in sorted(report.strategies.items())]
+    if report.gradients:
+        parts.append(f"grad×{report.gradients}")
+    return "  ".join(parts) or "(none)"
+
+
+def _render_tile(v: Variant) -> Image.Image:
+    """One variant rendered into a _TILE×_TILE white tile, or a placeholder for a
+    failed cell. Raises SvgRendererUnavailable if the renderer is missing."""
+    tile = Image.new("RGB", (_TILE, _TILE), "white")
+    if v.error is None and v.svg:
+        arr = _rasterize(v.svg, _TILE, _TILE)          # may raise SvgRendererUnavailable
+        tile = Image.fromarray(arr)
+    else:
+        ImageDraw.Draw(tile).text((8, _TILE // 2), "failed", fill=(180, 40, 40))
+    return tile
+
+
+def compose_contact_sheet(variants: list[Variant], *, epsilons, max_errors) -> bytes | None:
+    """Render the variants into an annotated grid PNG (epsilon rows × max_error
+    columns), each tile captioned with its strategy histogram and the axes labelled.
+    Returns PNG bytes, or None if the SVG renderer is unavailable."""
+    by_cell = {(v.epsilon, v.max_error): v for v in variants}
+    cell_w = _TILE + _PAD
+    cell_h = _TILE + _LABEL_H + _PAD
+    sheet_w = _AXIS_W + len(max_errors) * cell_w + _PAD
+    sheet_h = _AXIS_H + len(epsilons) * cell_h + _PAD
+    sheet = Image.new("RGB", (sheet_w, sheet_h), "white")
+    draw = ImageDraw.Draw(sheet)
+
+    for ci, me in enumerate(max_errors):
+        x = _AXIS_W + ci * cell_w + _PAD
+        draw.text((x, 6), f"max_error={_fmt(me)}", fill=(20, 30, 40))
+
+    try:
+        for ri, eps in enumerate(epsilons):
+            y0 = _AXIS_H + ri * cell_h + _PAD
+            draw.text((8, y0 + _TILE // 2), f"ε={_fmt(eps)}", fill=(20, 30, 40))
+            for ci, me in enumerate(max_errors):
+                v = by_cell[(eps, me)]
+                tile = _render_tile(v)                  # may raise SvgRendererUnavailable
+                x = _AXIS_W + ci * cell_w + _PAD
+                sheet.paste(tile, (x, y0))
+                draw.text((x, y0 + _TILE + 4), _histogram_caption(v.report), fill=(60, 70, 80))
+    except SvgRendererUnavailable:
+        return None
+
+    buf = io.BytesIO()
+    sheet.save(buf, format="PNG")
+    return buf.getvalue()
