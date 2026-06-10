@@ -1,6 +1,18 @@
 import numpy as np
-from vectormark.types import Region
-from vectormark.symmetry import detect_axis, classify_regions
+from vectormark.types import Axis, Region
+from vectormark.symmetry import _iou, _reflect_cols, classify_regions, detect_axis
+
+
+def _leaning_triangle(apex_x, H=44, W=40, base_l=6, base_r=33, base_y=38, apex_y=5):
+    """A pointed triangle with its base centred on x=19.5 but its apex shifted to
+    `apex_x` — i.e. a tip whose extreme point lies off the symmetry axis."""
+    m = np.zeros((H, W), bool)
+    for y in range(apex_y, base_y + 1):
+        t = (y - apex_y) / (base_y - apex_y)
+        xl = int(round(apex_x + (base_l - apex_x) * t))
+        xr = int(round(apex_x + (base_r - apex_x) * t))
+        m[y, xl:xr + 1] = True
+    return m
 
 
 def _sym_masks():
@@ -44,6 +56,21 @@ def test_classify_isolates_lone_asymmetric_region():
     straddlers, pairs, loners = classify_regions(regions, axis)
     assert [r.label for r in loners] == [4]
     assert 4 not in [r.label for r in straddlers]
+
+
+def test_classify_demotes_pointed_offaxis_region_to_loner():
+    # A leaning, pointed region overlaps its own reflection enough to clear a loose
+    # IoU gate, but its apex sits well off the axis: half-mirroring it about the axis
+    # would split that single apex into a fork (two prongs + a central notch). It must
+    # be classified as a loner (fit as-is), NOT a self-symmetric straddler.
+    axis = Axis(x=19.5)
+    tri = _leaning_triangle(apex_x=24)
+    # in the band the old 0.5 gate wrongly admitted, yet with no true vertical axis
+    assert 0.5 <= _iou(tri, _reflect_cols(tri, axis.x)) < 0.90
+    assert detect_axis(tri) is None
+    straddlers, pairs, loners = classify_regions([Region(1, tri, "#ff0000")], axis)
+    assert [r.label for r in loners] == [1]
+    assert straddlers == [] and pairs == []
 
 
 def test_no_symmetry_returns_none():
