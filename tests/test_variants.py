@@ -38,3 +38,26 @@ def test_generate_variants_params_take_effect():
     variants = generate_variants(_mark(), epsilons=(0.3, 6.0), max_errors=(0.5,))
     # a very loose epsilon must change the geometry vs a very tight one
     assert variants[0].svg != variants[1].svg
+
+
+import json
+
+from vectormark.variants import write_variant_set
+
+
+def test_write_variant_set_writes_svgs_and_manifest(tmp_path):
+    variants = generate_variants(_mark(), epsilons=(0.5, 3.0), max_errors=(1.0,))
+    write_variant_set(variants, tmp_path, source="mark.png")
+
+    assert (tmp_path / "variant-e0_5-m1.svg").read_text().startswith("<svg ")
+    assert (tmp_path / "variant-e3-m1.svg").exists()
+
+    manifest = json.loads((tmp_path / "manifest.json").read_text())
+    assert manifest["source"] == "mark.png"
+    assert manifest["axes"] == {"epsilon": [0.5, 3.0], "max_error": [1.0]}
+    assert len(manifest["variants"]) == 2
+    first = manifest["variants"][0]
+    assert first["epsilon"] == 0.5 and first["max_error"] == 1.0
+    assert first["file"] == "variant-e0_5-m1.svg"
+    assert first["svg_bytes"] > 0
+    assert isinstance(first["strategies"], dict) and first["elements"] >= 1
