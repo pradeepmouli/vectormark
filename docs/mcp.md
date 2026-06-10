@@ -85,11 +85,12 @@ It is **not safe to expose as-is over the network.** Before hosting the server
   directory and reject anything that escapes it (no arbitrary read/write).
 - **Require auth** — put the endpoint behind Cloudflare Access or OAuth (never an
   open `/mcp`).
-- **Treat caller SVG as untrusted** — vectormark's own output is script-free, but
-  `render_idealized_logo` renders whatever SVG it is handed; sanitize it (or only
-  render server-produced SVG) so a hostile `<script>`/`onload` cannot run in the
-  widget. The widget CSP (empty `connect`/`resource` domains) limits but does not
-  eliminate this.
+- **Treat caller SVG as untrusted** — `render_idealized_logo` echoes whatever SVG
+  it is handed. The bundled app renders the preview via an `<img>` data URI (an
+  `<img>`-loaded SVG cannot execute scripts), so hostile `<script>`/`onload` cannot
+  run in the widget; still strip scripts/event-handlers/external refs server-side as
+  defense-in-depth for any non-`<img>` consumer. The widget CSP (empty
+  `connect`/`resource` domains) limits but does not eliminate this.
 
 ## Hosted MCP app
 

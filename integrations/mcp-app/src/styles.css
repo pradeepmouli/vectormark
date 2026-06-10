@@ -200,7 +200,8 @@ h1 {
   overflow: hidden;
 }
 
-.preview-stage svg {
+.preview-stage svg,
+.preview-stage img {
   display: block;
   width: min(100%, 440px);
   max-height: 380px;

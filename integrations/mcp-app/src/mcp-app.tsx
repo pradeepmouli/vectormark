@@ -292,9 +292,16 @@ function VectormarkApp({
 }
 
 function LogoPreview({ result }: { result: IdealizeLogoResult }) {
+  // Render via <img> data URI, NOT dangerouslySetInnerHTML: an <img>-loaded SVG cannot
+  // execute scripts or event handlers, so a hostile `svg` (e.g. from render_idealized_logo,
+  // which echoes caller-supplied SVG) can't run in the widget. encodeURIComponent keeps it
+  // UTF-8 safe (btoa would choke on non-Latin1).
+  const svgSrc = `data:image/svg+xml,${encodeURIComponent(result.svg)}`;
   return (
     <>
-      <div className="preview-stage" dangerouslySetInnerHTML={{ __html: result.svg }} />
+      <div className="preview-stage">
+        <img src={svgSrc} alt="Idealized logo preview" />
+      </div>
       <dl className="metrics">
         <div>
           <dt>Canvas</dt>
