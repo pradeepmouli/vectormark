@@ -160,7 +160,8 @@ def _inject_axes(svg: str, axes: tuple[AxisLine, ...]) -> str:
     extent = max(float(m.group(1)), float(m.group(2))) if m else 100.0
     stroke_w = max(1.0, extent / 250.0)
     fragment = "".join(_axis_line_svg(a, stroke_w) for a in axes)
-    return svg.replace("</svg>", fragment + "</svg>")
+    head, _, tail = svg.rpartition("</svg>")          # inject before the LAST </svg> only
+    return f"{head}{fragment}</svg>{tail}" if head else svg + fragment
 
 
 def _render_tile(v: Variant, *, draw_axes: bool = False) -> Image.Image:
