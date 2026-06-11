@@ -96,3 +96,25 @@ def test_contact_sheet_none_without_renderer(monkeypatch):
     eps, mes = (0.5,), (0.5,)
     variants = generate_variants(_mark(), epsilons=eps, max_errors=mes)
     assert V.compose_contact_sheet(variants, epsilons=eps, max_errors=mes) is None
+
+
+from vectormark.cli import main as cli_main
+
+
+def test_cli_variants_writes_set(tmp_path):
+    src = tmp_path / "mark.png"
+    Image.fromarray(_mark()).save(src)
+    out = tmp_path / "looks"
+    rc = cli_main([str(src), "--variants", "--out-dir", str(out),
+                   "--epsilons", "0.5,3", "--max-errors", "1"])
+    assert rc == 0
+    assert (out / "manifest.json").exists()
+    assert (out / "variant-e0_5-m1.svg").exists()
+    assert (out / "variant-e3-m1.svg").exists()
+
+
+def test_cli_variants_rejects_bad_axis(tmp_path):
+    src = tmp_path / "mark.png"
+    Image.fromarray(_mark()).save(src)
+    with pytest.raises(SystemExit):
+        cli_main([str(src), "--variants", "--epsilons", "abc"])
