@@ -1,7 +1,8 @@
 import numpy as np
 from PIL import Image, ImageDraw
 
-from vectormark.pipeline import IdealizeReport, idealize
+from tests._render import render_svg
+from vectormark.pipeline import AxisLine, IdealizeReport, Options, idealize
 
 
 def _disc(n=64):
@@ -29,10 +30,6 @@ def test_report_empty_for_blank_image():
     blank = np.full((40, 40, 3), 255, dtype=np.uint8)
     svg, report = idealize(blank, report=True)
     assert report.elements == 0 and dict(report.strategies) == {}
-
-
-from tests._render import render_svg
-from vectormark.pipeline import AxisLine, Options
 
 
 def _arch_svg(deg):
