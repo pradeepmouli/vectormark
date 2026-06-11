@@ -37,6 +37,9 @@ uv run vectormark logo.png --variants --out-dir ./looks/
 uv run vectormark logo.png --variants --epsilons 0.5,2,4 --max-errors 0.5,2
 ```
 
+Add `--axes` to draw each detected symmetry axis over the contact-sheet tiles —
+a quick visual check of what the symmetry detector found.
+
 Writes `variant-e<ε>-m<max_error>.svg` per cell and a `manifest.json` listing each
 variant's params and the fitter strategies it used. With the `scoring` extra
 installed it also renders an annotated `contact-sheet.png` (one tile per cell,

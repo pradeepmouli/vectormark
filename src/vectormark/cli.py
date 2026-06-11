@@ -29,10 +29,15 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--no-symmetry", action="store_true", help="disable symmetry detection")
     ap.add_argument("--variants", action="store_true",
                     help="write an epsilon × max_error matrix of variants to a directory")
+    ap.add_argument("--axes", action="store_true",
+                    help="overlay detected symmetry axes on the contact-sheet tiles (with --variants)")
     ap.add_argument("--out-dir", help="output directory for --variants (default: ./<stem>-variants)")
     ap.add_argument("--epsilons", type=_floats, help="--variants epsilon axis, e.g. 0.5,1.5,3")
     ap.add_argument("--max-errors", type=_floats, help="--variants max_error axis, e.g. 0.5,1,2.5")
     args = ap.parse_args(argv)
+
+    if args.axes and not args.variants:
+        print("note: --axes only applies in --variants mode; ignoring it", file=sys.stderr)
 
     base = Options(max_colors=args.colors, flatten=args.flatten, no_symmetry=args.no_symmetry)
 
@@ -53,7 +58,7 @@ def main(argv: list[str] | None = None) -> int:
 
         variants = generate_variants(args.input, epsilons=epsilons, max_errors=max_errors, base=base)
         write_variant_set(variants, out_dir, source=args.input)
-        png = compose_contact_sheet(variants, epsilons=epsilons, max_errors=max_errors)
+        png = compose_contact_sheet(variants, epsilons=epsilons, max_errors=max_errors, draw_axes=args.axes)
         if png is not None:
             (out_dir / "contact-sheet.png").write_bytes(png)
         else:

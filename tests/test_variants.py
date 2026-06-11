@@ -144,3 +144,24 @@ def test_contact_sheet_with_axes_renders():
     variants = generate_variants(_mark(), epsilons=eps, max_errors=mes)
     png = V.compose_contact_sheet(variants, epsilons=eps, max_errors=mes, draw_axes=True)
     assert isinstance(png, (bytes, bytearray)) and len(png) > 0
+
+
+def test_cli_variants_axes_writes_contact_sheet(tmp_path):
+    src = tmp_path / "mark.png"
+    Image.fromarray(_mark()).save(src)
+    out = tmp_path / "looks"
+    rc = cli_main([str(src), "--variants", "--axes", "--out-dir", str(out),
+                   "--epsilons", "0.5,3", "--max-errors", "1"])
+    assert rc == 0
+    assert (out / "manifest.json").exists()
+    if _renderer_available():
+        assert (out / "contact-sheet.png").exists()
+
+
+def test_cli_axes_without_variants_is_noted(tmp_path, capsys):
+    src = tmp_path / "mark.png"
+    Image.fromarray(_mark()).save(src)
+    out = tmp_path / "out.svg"
+    rc = cli_main([str(src), "--axes", "-o", str(out)])
+    assert rc == 0 and out.exists()
+    assert "axes" in capsys.readouterr().err.lower()
