@@ -265,7 +265,7 @@ def _render_body(
         axis = None if opt.no_symmetry else detect_axis(silhouette)
         if axis is not None:
             ys = np.nonzero(silhouette)[0]
-            frame_axes.append(AxisLine(axis.x, float(ys.min()), axis.x, float(ys.max())))
+            frame_axes.append(AxisLine(float(axis.x), float(ys.min()), float(axis.x), float(ys.max())))
         corner_radius = opt.corner_radius if opt.corner_radius is not None else _mark_corner_radius(comp, axis)
 
         reconstructed, comp = reconstruct_scene(comp, axis, (h, w))
