@@ -26,6 +26,22 @@ uv run vectormark path/to/logo.png -o out.svg
 uv run pytest
 ```
 
+### Variant matrix
+
+Explore the geometric design space in one shot — `idealize` swept across an
+`epsilon × max_error` grid:
+
+```bash
+uv run vectormark logo.png --variants                       # 3×3 grid -> ./logo-variants/
+uv run vectormark logo.png --variants --out-dir ./looks/
+uv run vectormark logo.png --variants --epsilons 0.5,2,4 --max-errors 0.5,2
+```
+
+Writes `variant-e<ε>-m<max_error>.svg` per cell and a `manifest.json` listing each
+variant's params and the fitter strategies it used. With the `scoring` extra
+installed it also renders an annotated `contact-sheet.png` (one tile per cell,
+labelled with its strategy histogram).
+
 MCP integration is available for AI clients that can call local stdio servers
 (the server lives in the optional `server` extra; scored selection needs the
 `scoring` extra — without it, selection falls back to the cascade pick):

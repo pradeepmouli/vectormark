@@ -72,10 +72,11 @@ def _disk_region_and_src():
 
 def test_allow_restricts_winner_to_allowed_strategy():
     region, src = _disk_region_and_src()
-    assert select_geometry(region, Options(), None, 0.0, src).kind == "circle"  # auto baseline
+    shape, _ = select_geometry(region, Options(), None, 0.0, src)
+    assert shape.kind == "circle"  # auto baseline
     # auto would pick "primitive" (circle); restrict to path -> a path must win
     sel = ElementSelection(allow=frozenset({PATH}))
-    shape = select_geometry(region, Options(), None, 0.0, src, element=sel)
+    shape, _ = select_geometry(region, Options(), None, 0.0, src, element=sel)
     assert shape.kind == "path"
 
 
@@ -83,14 +84,14 @@ def test_allow_empty_set_warns_and_falls_back_to_auto():
     region, src = _disk_region_and_src()
     sel = ElementSelection(allow=frozenset({SYMMETRIC}))  # no symmetric cand for a plain disk
     with pytest.warns(UserWarning, match="removed all candidates"):
-        shape = select_geometry(region, Options(), None, 0.0, src, element=sel, eid="s0")
+        shape, _ = select_geometry(region, Options(), None, 0.0, src, element=sel, eid="s0")
     assert shape.kind == "circle"                         # auto winner survives
 
 
 def test_force_present_strategy_overrides_auto_winner():
     region, src = _disk_region_and_src()
     sel = ElementSelection(force=PATH)                    # auto picks circle; force path
-    shape = select_geometry(region, Options(), None, 0.0, src, element=sel)
+    shape, _ = select_geometry(region, Options(), None, 0.0, src, element=sel)
     assert shape.kind == "path"
 
 
@@ -98,7 +99,7 @@ def test_force_absent_strategy_warns_and_returns_auto_winner():
     region, src = _disk_region_and_src()
     sel = ElementSelection(force=SYMMETRIC)               # not generated for a plain disk
     with pytest.warns(UserWarning, match="not among"):
-        shape = select_geometry(region, Options(), None, 0.0, src, element=sel, eid="s0")
+        shape, _ = select_geometry(region, Options(), None, 0.0, src, element=sel, eid="s0")
     assert shape.kind == "circle"
 
 
@@ -111,20 +112,22 @@ def test_unknown_force_label_raises_valueerror():
 def test_force_works_without_source_rgb():
     region, _ = _disk_region_and_src()
     sel = ElementSelection(force=PATH)
-    shape = select_geometry(region, Options(), None, 0.0, None, element=sel)
+    shape, _ = select_geometry(region, Options(), None, 0.0, None, element=sel)
     assert shape.kind == "path"
 
 
 def test_element_none_is_pure_passthrough():
     region, src = _disk_region_and_src()
-    assert select_geometry(region, Options(), None, 0.0, src).kind == "circle"
-    assert select_geometry(region, Options(), None, 0.0, src, element=None).kind == "circle"
+    shape1, _ = select_geometry(region, Options(), None, 0.0, src)
+    assert shape1.kind == "circle"
+    shape2, _ = select_geometry(region, Options(), None, 0.0, src, element=None)
+    assert shape2.kind == "circle"
 
 
 def test_force_after_allow_operates_on_narrowed_set():
     region, src = _disk_region_and_src()
     sel = ElementSelection(allow=frozenset({PATH}), force=PATH)   # path survives allow; force finds it
-    shape = select_geometry(region, Options(), None, 0.0, src, element=sel)
+    shape, _ = select_geometry(region, Options(), None, 0.0, src, element=sel)
     assert shape.kind == "path"
 
 
@@ -134,5 +137,5 @@ def test_force_absent_after_allow_warns_and_falls_back_within_narrowed_set():
     # warn + fall back to the narrowed auto winner (path), NOT the original circle.
     sel = ElementSelection(allow=frozenset({PATH}), force=SYMMETRIC)
     with pytest.warns(UserWarning, match="not among"):
-        shape = select_geometry(region, Options(), None, 0.0, src, element=sel)
+        shape, _ = select_geometry(region, Options(), None, 0.0, src, element=sel)
     assert shape.kind == "path"   # fallback drawn from the narrowed set, proving stage order
