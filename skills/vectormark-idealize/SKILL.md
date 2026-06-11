@@ -98,13 +98,39 @@ Guidance: start with defaults. Raise `--colors` for richer marks; lower it to
 force a flatter palette. Raise `--epsilon` if curves are coming out too busy.
 Use `--flatten` only if the consumer can't handle `<use>`/native primitives.
 
+## Step 3b — Explore looks across the geometry space (optional)
+
+When the user wants to **compare options or pick a look**, `--variants` idealizes
+the mark across an `epsilon × max_error` grid and writes the set to a directory —
+no need to hand-tune flags one run at a time:
+
+```bash
+# 3×3 default grid -> ./<stem>-variants/
+<VM> /tmp/vm-logo.png --variants --out-dir /tmp/vm-looks
+# custom axes (any grid):
+<VM> /tmp/vm-logo.png --variants --out-dir /tmp/vm-looks --epsilons 0.5,2,4 --max-errors 0.5,2
+# also overlay the detected symmetry axis on each tile (a diagnostic view):
+<VM> /tmp/vm-logo.png --variants --axes --out-dir /tmp/vm-looks
+```
+
+It writes one `variant-e<ε>-m<max_error>.svg` per cell, a `manifest.json` (each
+variant's params **and the fitter strategies it actually used**), and — when the
+`scoring` extra is installed — an annotated `contact-sheet.png`. Show the user the
+contact sheet (or summarize the manifest); let them pick a cell; then deliver that
+variant's SVG as the result.
+
+The `contact-sheet.png` here is a **real artifact the tool produced** — that is
+exactly what Step 4's "don't fabricate a contact sheet" rule does NOT forbid.
+Show vectormark's real sheet; never invent one.
+
 ## Step 4 — Deliver the result
 
-- **The deliverable is the SVG itself** — report it and its output path, nothing
-  more. vectormark emits one SVG string; do **not** fabricate optimization stats,
-  file-size tables, color-swatch grids, "production ready" checklists, or a
-  multi-panel contact sheet around it. Those are invented, not produced by the
-  tool, and only add noise.
+- **For a single run, the deliverable is the SVG itself** — report it and its
+  output path, nothing more. vectormark emits one SVG string; do **not** fabricate
+  optimization stats, file-size tables, color-swatch grids, "production ready"
+  checklists, or a multi-panel contact sheet around it. Those are *invented*, not
+  produced by the tool, and only add noise. (The real `contact-sheet.png` from
+  `--variants` is a different thing — it's an actual tool output; show that.)
 - **If you can't run vectormark, do not try to draw the SVG yourself.** Never
   hand-author, guess, or hallucinate an output. If the tool didn't actually run
   (not installed, no network, an error, or you only have the input image), say so
