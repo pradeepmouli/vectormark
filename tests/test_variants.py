@@ -7,10 +7,11 @@ from PIL import Image, ImageDraw
 
 import vectormark.variants as V
 from vectormark.cli import main as cli_main
-from vectormark.pipeline import IdealizeReport
+from vectormark.pipeline import AxisLine, IdealizeReport
 from vectormark.score import SvgRendererUnavailable
 from vectormark.variants import (
-    DEFAULT_EPSILONS, DEFAULT_MAX_ERRORS, Variant, generate_variants, write_variant_set,
+    DEFAULT_EPSILONS, DEFAULT_MAX_ERRORS, Variant, _axis_line_svg, _inject_axes,
+    generate_variants, write_variant_set,
 )
 
 
@@ -122,3 +123,45 @@ def test_cli_variants_rejects_bad_axis(tmp_path):
     Image.fromarray(_mark()).save(src)
     with pytest.raises(SystemExit):
         cli_main([str(src), "--variants", "--epsilons", "abc"])
+
+
+def test_axis_line_svg_emits_line():
+    frag = _axis_line_svg(AxisLine(10.0, 0.0, 10.0, 40.0), 1.5)
+    assert frag.startswith("<line ") and 'x1="10' in frag and "stroke" in frag
+
+
+def test_inject_axes_inserts_before_closing_svg():
+    svg = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 40 40" width="40" height="40"><circle/></svg>'
+    out = _inject_axes(svg, (AxisLine(20.0, 0.0, 20.0, 40.0),))
+    assert "<line " in out
+    assert out.rstrip().endswith("</svg>")
+    assert out.index("<line ") < out.index("</svg>")
+
+
+@pytest.mark.skipif(not _renderer_available(), reason="needs resvg-py")
+def test_contact_sheet_with_axes_renders():
+    eps, mes = (0.5, 3.0), (1.0,)
+    variants = generate_variants(_mark(), epsilons=eps, max_errors=mes)
+    png = V.compose_contact_sheet(variants, epsilons=eps, max_errors=mes, draw_axes=True)
+    assert isinstance(png, (bytes, bytearray)) and len(png) > 0
+
+
+def test_cli_variants_axes_writes_contact_sheet(tmp_path):
+    src = tmp_path / "mark.png"
+    Image.fromarray(_mark()).save(src)
+    out = tmp_path / "looks"
+    rc = cli_main([str(src), "--variants", "--axes", "--out-dir", str(out),
+                   "--epsilons", "0.5,3", "--max-errors", "1"])
+    assert rc == 0
+    assert (out / "manifest.json").exists()
+    if _renderer_available():
+        assert (out / "contact-sheet.png").exists()
+
+
+def test_cli_axes_without_variants_is_noted(tmp_path, capsys):
+    src = tmp_path / "mark.png"
+    Image.fromarray(_mark()).save(src)
+    out = tmp_path / "out.svg"
+    rc = cli_main([str(src), "--axes", "-o", str(out)])
+    assert rc == 0 and out.exists()
+    assert "axes" in capsys.readouterr().err.lower()

@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import io
 import json
+import re
 from dataclasses import dataclass, replace
 from pathlib import Path
 
@@ -13,7 +14,7 @@ import numpy as np
 from PIL import Image, ImageDraw
 
 from .fit import _fmt
-from .pipeline import IdealizeReport, Options, _flatten_on_white, idealize
+from .pipeline import AxisLine, IdealizeReport, Options, _flatten_on_white, idealize
 from .score import SvgRendererUnavailable, _rasterize
 
 DEFAULT_EPSILONS = (0.5, 1.5, 3.0)
@@ -142,19 +143,41 @@ def _histogram_caption(report: IdealizeReport) -> str:
     return "  ".join(parts) or "(none)"
 
 
-def _render_tile(v: Variant) -> Image.Image:
+_AXIS_STROKE = "#e000a0"   # magenta — distinct from typical logo palettes
+
+
+def _axis_line_svg(a: AxisLine, stroke_w: float) -> str:
+    dash = max(6.0, stroke_w * 4.0)
+    return (f'<line x1="{a.x1:.1f}" y1="{a.y1:.1f}" x2="{a.x2:.1f}" y2="{a.y2:.1f}" '
+            f'stroke="{_AXIS_STROKE}" stroke-width="{stroke_w:.2f}" '
+            f'stroke-dasharray="{dash:.1f},{dash * 0.7:.1f}" stroke-opacity="0.85"/>')
+
+
+def _inject_axes(svg: str, axes: tuple[AxisLine, ...]) -> str:
+    """Insert one dashed <line> per axis (already in viewBox coords) just before the
+    closing </svg>, scaling stroke width to the viewBox so it renders at any size."""
+    m = re.search(r'viewBox="0 0 ([\d.]+) ([\d.]+)"', svg)
+    extent = max(float(m.group(1)), float(m.group(2))) if m else 100.0
+    stroke_w = max(1.0, extent / 250.0)
+    fragment = "".join(_axis_line_svg(a, stroke_w) for a in axes)
+    head, _, tail = svg.rpartition("</svg>")          # inject before the LAST </svg> only
+    return f"{head}{fragment}</svg>{tail}" if head else svg + fragment
+
+
+def _render_tile(v: Variant, *, draw_axes: bool = False) -> Image.Image:
     """One variant rendered into a _TILE×_TILE white tile, or a placeholder for a
     failed cell. Raises SvgRendererUnavailable if the renderer is missing."""
     tile = Image.new("RGB", (_TILE, _TILE), "white")
     if v.error is None and v.svg:
-        arr = _rasterize(v.svg, _TILE, _TILE)          # may raise SvgRendererUnavailable
+        svg = _inject_axes(v.svg, v.report.axes) if draw_axes and v.report.axes else v.svg
+        arr = _rasterize(svg, _TILE, _TILE)          # may raise SvgRendererUnavailable
         tile = Image.fromarray(arr)
     else:
         ImageDraw.Draw(tile).text((8, _TILE // 2), "failed", fill=(180, 40, 40))
     return tile
 
 
-def compose_contact_sheet(variants: list[Variant], *, epsilons, max_errors) -> bytes | None:
+def compose_contact_sheet(variants: list[Variant], *, epsilons, max_errors, draw_axes: bool = False) -> bytes | None:
     """Render the variants into an annotated grid PNG (epsilon rows × max_error
     columns), each tile captioned with its strategy histogram and the axes labelled.
     Returns PNG bytes, or None if the SVG renderer is unavailable."""
@@ -176,7 +199,7 @@ def compose_contact_sheet(variants: list[Variant], *, epsilons, max_errors) -> b
             draw.text((8, y0 + _TILE // 2), f"eps={_fmt(eps)}", fill=(20, 30, 40))
             for ci, me in enumerate(max_errors):
                 v = by_cell[(eps, me)]
-                tile = _render_tile(v)                  # may raise SvgRendererUnavailable
+                tile = _render_tile(v, draw_axes=draw_axes)  # may raise SvgRendererUnavailable
                 x = _AXIS_W + ci * cell_w + _PAD
                 sheet.paste(tile, (x, y0))
                 draw.text((x, y0 + _TILE + 4), _histogram_caption(v.report), fill=(60, 70, 80))
