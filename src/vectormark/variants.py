@@ -50,6 +50,7 @@ def _axis_tag(value: float) -> str:
 
 
 def variant_filename(v: Variant) -> str:
+    """SVG filename for one matrix cell, e.g. 'variant-e0_5-m1.svg'."""
     return f"variant-e{_axis_tag(v.epsilon)}-m{_axis_tag(v.max_error)}.svg"
 
 
@@ -128,13 +129,16 @@ _AXIS_H = 24         # top strip for max_error column labels
 
 
 def _histogram_caption(report: IdealizeReport) -> str:
-    """Compact strategy histogram, e.g. 'prim×3 sym_poly×2 path×1'."""
+    """Compact strategy histogram, e.g. 'path:12 holed:3 prim:1'. ASCII only — the
+    contact sheet draws with PIL's default bitmap font, which has no glyph for × / ε."""
     short = {"primitive": "prim", "sym_polygon": "sym_poly", "trapezoid": "trap",
              "symmetric": "sym", "polygon": "poly", "holed_symmetric": "holed_sym",
              "holed_path": "holed", "cap": "cap", "path": "path"}
-    parts = [f"{short.get(k, k)}×{n}" for k, n in sorted(report.strategies.items())]
+    # dominant strategy first (count desc, then name)
+    ordered = sorted(report.strategies.items(), key=lambda kv: (-kv[1], kv[0]))
+    parts = [f"{short.get(k, k)}:{n}" for k, n in ordered]
     if report.gradients:
-        parts.append(f"grad×{report.gradients}")
+        parts.append(f"grad:{report.gradients}")
     return "  ".join(parts) or "(none)"
 
 
@@ -169,7 +173,7 @@ def compose_contact_sheet(variants: list[Variant], *, epsilons, max_errors) -> b
     try:
         for ri, eps in enumerate(epsilons):
             y0 = _AXIS_H + ri * cell_h + _PAD
-            draw.text((8, y0 + _TILE // 2), f"ε={_fmt(eps)}", fill=(20, 30, 40))
+            draw.text((8, y0 + _TILE // 2), f"eps={_fmt(eps)}", fill=(20, 30, 40))
             for ci, me in enumerate(max_errors):
                 v = by_cell[(eps, me)]
                 tile = _render_tile(v)                  # may raise SvgRendererUnavailable

@@ -37,6 +37,9 @@ def main(argv: list[str] | None = None) -> int:
     base = Options(max_colors=args.colors, flatten=args.flatten, no_symmetry=args.no_symmetry)
 
     if args.variants:
+        if args.epsilon != 1.5 or args.max_error != 1.0:
+            print("note: --epsilon/--max-error are ignored in --variants mode "
+                  "(the matrix sets them; use --epsilons/--max-errors)", file=sys.stderr)
         from pathlib import Path
 
         from .variants import (

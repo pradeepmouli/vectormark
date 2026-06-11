@@ -1,8 +1,16 @@
+import io
+import json
+
 import numpy as np
+import pytest
 from PIL import Image, ImageDraw
 
+import vectormark.variants as V
+from vectormark.cli import main as cli_main
+from vectormark.pipeline import IdealizeReport
+from vectormark.score import SvgRendererUnavailable
 from vectormark.variants import (
-    DEFAULT_EPSILONS, DEFAULT_MAX_ERRORS, Variant, generate_variants,
+    DEFAULT_EPSILONS, DEFAULT_MAX_ERRORS, Variant, generate_variants, write_variant_set,
 )
 
 
@@ -40,9 +48,16 @@ def test_generate_variants_params_take_effect():
     assert variants[0].svg != variants[1].svg
 
 
-import json
-
-from vectormark.variants import write_variant_set
+def test_generate_variants_captures_failed_cell(monkeypatch):
+    # a cell whose idealize raises must be captured as a failed Variant (error set,
+    # empty svg) without aborting the grid.
+    def boom(*a, **k):
+        raise RuntimeError("kaboom")
+    monkeypatch.setattr("vectormark.variants.idealize", boom)
+    variants = generate_variants(_mark(), epsilons=(0.5, 3.0), max_errors=(1.0,))
+    assert len(variants) == 2
+    assert all(v.error == "kaboom" and v.svg == "" for v in variants)
+    assert all(isinstance(v.report, IdealizeReport) for v in variants)
 
 
 def test_write_variant_set_writes_svgs_and_manifest(tmp_path):
@@ -61,14 +76,6 @@ def test_write_variant_set_writes_svgs_and_manifest(tmp_path):
     assert first["file"] == "variant-e0_5-m1.svg"
     assert first["svg_bytes"] > 0
     assert isinstance(first["strategies"], dict) and first["elements"] >= 1
-
-
-import io
-
-import pytest
-
-import vectormark.variants as V
-from vectormark.score import SvgRendererUnavailable
 
 
 def _renderer_available():
@@ -96,9 +103,6 @@ def test_contact_sheet_none_without_renderer(monkeypatch):
     eps, mes = (0.5,), (0.5,)
     variants = generate_variants(_mark(), epsilons=eps, max_errors=mes)
     assert V.compose_contact_sheet(variants, epsilons=eps, max_errors=mes) is None
-
-
-from vectormark.cli import main as cli_main
 
 
 def test_cli_variants_writes_set(tmp_path):
