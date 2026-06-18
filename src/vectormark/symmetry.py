@@ -118,7 +118,7 @@ def _iou(a: np.ndarray, b: np.ndarray) -> float:
 
 
 def classify_regions(
-    regions: list[Region], axis: Axis, *, pair_iou: float = 0.6,
+    regions: list[Region], axis: Axis, *, pair_iou: float = 1.0 - SYM_TOL,
     straddle_iou: float = 1.0 - SYM_TOL,
 ) -> tuple[list[Region], list[tuple[Region, Region]], list[Region]]:
     """Split regions into self-symmetric straddlers, mirror pairs, and lone
@@ -129,10 +129,13 @@ def classify_regions(
     `<use>`-mirrored, and a loner is fit as-is with no symmetry (forcing the
     half-outline mirror onto a genuinely asymmetric region would distort it).
 
-    A region is a straddler only if it clears the SAME symmetry bar `detect_axis`
-    uses (reflection IoU >= `straddle_iou` = 1 - SYM_TOL). A looser gate admits
-    near-symmetric but pointed regions whose apex lies off the axis; half-mirroring
-    then splits the apex into a fork, so those fall through to loners instead."""
+    Both the straddle gate and the pair gate use the SAME symmetry bar `detect_axis`
+    uses (reflection IoU >= 1 - SYM_TOL). Loosening either admits coincidental
+    matches: a near-symmetric pointed region forks under half-mirror, and two
+    merely-similar regions (e.g. a "B" and an "R") get `<use>`-mirrored — substituting
+    one with the mirror of the other. Below the bar, both fall through to loners
+    (fit as-is) instead. (Corpus check: genuine mirror-twin pairs score IoU >= 0.96;
+    false pairs sit at <= 0.74, so the bar cleanly separates them.)"""
     straddlers: list[Region] = []
     pairs: list[tuple[Region, Region]] = []
     loners: list[Region] = []
