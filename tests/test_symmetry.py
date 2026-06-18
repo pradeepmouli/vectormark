@@ -73,6 +73,33 @@ def test_classify_demotes_pointed_offaxis_region_to_loner():
     assert straddlers == [] and pairs == []
 
 
+def test_pairs_reject_coincidental_non_twins():
+    # two same-colour blobs that are only COARSELY mirror-similar about x=19.5:
+    # reflect(left) overlaps right enough to clear the OLD 0.6 gate, but is well
+    # under the 0.90 (= 1 - SYM_TOL) symmetry bar. They are NOT mirror twins (think
+    # the "B" and "R" of a wordmark), so they must fall through to loners — never a
+    # `<use>`-mirror pair (which would substitute one with the mirror of the other).
+    axis = Axis(x=19.5)
+    left = np.zeros((40, 40), bool); left[8:20, 6:14] = True
+    right = np.zeros((40, 40), bool); right[10:22, 26:34] = True   # shifted off the exact mirror
+    iou = _iou(_reflect_cols(left, axis.x), right)
+    assert 0.6 <= iou < 0.90
+    straddlers, pairs, loners = classify_regions(
+        [Region(1, left, "#abcabc"), Region(2, right, "#abcabc")], axis)
+    assert pairs == []
+    assert {r.label for r in loners} == {1, 2}
+
+
+def test_pairs_keep_genuine_mirror_twins():
+    # an exact mirror twin (IoU ~1.0) must still pair and `<use>`-mirror.
+    axis = Axis(x=19.5)
+    left = np.zeros((40, 40), bool); left[8:20, 6:14] = True
+    right = _reflect_cols(left, axis.x)
+    straddlers, pairs, loners = classify_regions(
+        [Region(1, left, "#abcabc"), Region(2, right, "#abcabc")], axis)
+    assert len(pairs) == 1 and loners == []
+
+
 def test_no_symmetry_returns_none():
     # a centered square IS bilaterally symmetric — knock out one corner so the
     # shape has no vertical axis at all
