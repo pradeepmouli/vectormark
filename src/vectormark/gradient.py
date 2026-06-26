@@ -123,10 +123,12 @@ def _stop_colors_oklab(stops: list[tuple[float, str]]) -> np.ndarray:
 
 
 def _stop_span(stops: list[tuple[float, str]]) -> float:
-    """OKLab distance between the first and last stop colours: how far the gradient travels
-    end to end. ~0 for a flat region fit as a near-constant gradient."""
+    """Max OKLab distance of any stop from the first stop — the gradient's largest colour
+    travel. Uses max-from-first rather than first-vs-last so a cyclic field (e.g. a halo
+    that returns to its starting colour) still registers travel; ~0 for a flat region fit
+    as a near-constant gradient."""
     cols = _stop_colors_oklab(stops)
-    return float(np.linalg.norm(cols[0] - cols[-1]))
+    return float(np.linalg.norm(cols - cols[0], axis=1).max())
 
 
 def _reduce_stops(stops: list[tuple[float, str]], *, max_delta_e: float) -> list[tuple[float, str]]:
@@ -430,7 +432,13 @@ def _fit_stretch(mask: np.ndarray, rgb_image: np.ndarray) -> dict | None:
     bw, bh = x1 - x0, y1 - y0
     if bw < 2 or bh < 2:
         return None
-    crop = rgb_image[y0:y1, x0:x1]
+    sub = mask[y0:y1, x0:x1]
+    if sub.all():
+        crop = rgb_image[y0:y1, x0:x1]                 # no hole: unchanged fast path
+    else:
+        crop = rgb_image[y0:y1, x0:x1].astype(float)
+        crop[~sub] = rgb_image[ys, xs].astype(float).mean(axis=0)   # footprint mean; no outside-mask bleed
+        crop = crop.round().astype(np.uint8)
     ry, rx = ys - y0, xs - x0
     truth = srgb_to_oklab(rgb_image[ys, xs].astype(float) / 255.0)
     geometry = {"x": float(x0), "y": float(y0), "w": float(bw), "h": float(bh)}

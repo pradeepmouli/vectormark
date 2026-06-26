@@ -454,3 +454,37 @@ def test_group_is_fillable_rejects_dominant_two_tone_flats():
     m2 = np.zeros((h, w), bool); m2[:, w // 2:] = True
     group = [Region(1, m1, "#3c5ac8"), Region(2, m2, "#5c80ca")]
     assert _group_is_fillable(group, float(m1.sum() + m2.sum()), img) is False
+
+
+def test_stop_span_registers_cyclic_travel():
+    # a cyclic stop set (returns to its starting colour) must register travel, not ~0.
+    from vectormark.gradient import _stop_span, _MIN_STOP_SPAN
+    cyclic = [(0.0, "#ff0000"), (0.5, "#0000ff"), (1.0, "#ff0000")]   # red -> blue -> red
+    assert _stop_span(cyclic) > _MIN_STOP_SPAN
+    # a monotone ramp is unchanged (max-from-first == last-from-first)
+    mono = [(0.0, "#ff0000"), (0.5, "#7f007f"), (1.0, "#0000ff")]
+    # this triple is ~collinear in OKLab, so max-from-first == last-from-first; for a
+    # curved/cyclic stop path the new span is >= the old, never less (so the gate only
+    # admits MORE fields, never fewer).
+    assert abs(_stop_span(mono) - _stop_span([mono[0], mono[-1]])) < 1e-9
+
+
+def test_fit_stretch_masks_outside_pixels():
+    # a smooth footprint whose bbox also contains a contrasting OUTSIDE-mask patch (a hole):
+    # the bright hole colour must NOT bleed into the downsampled fill (it is replaced by the
+    # footprint mean before downsampling).
+    from vectormark.gradient import _fit_stretch
+    import base64, io
+    from PIL import Image
+    h, w = 64, 64
+    yy, xx = np.mgrid[:h, :w]
+    img = np.zeros((h, w, 3), np.uint8)
+    img[:, :, 0] = np.clip(30 + xx * 3, 0, 255)        # smooth blue->red-ish horizontal field
+    img[:, :, 2] = np.clip(200 - xx * 3, 0, 255)
+    mask = np.ones((h, w), bool); mask[24:40, 24:40] = False   # a hole
+    img[~mask] = (0, 255, 0)                            # bright green in the hole (outside-mask)
+    model = _fit_stretch(mask, img)
+    assert model is not None and model["kind"] == "raster"
+    small = np.asarray(Image.open(io.BytesIO(base64.b64decode(model["png_b64"]))).convert("RGB"))
+    # the green hole colour must be absent from the downsampled fill (it was masked out)
+    assert float(np.linalg.norm(small.reshape(-1, 3).astype(float) - np.array([0, 255, 0]), axis=1).min()) > 60.0
