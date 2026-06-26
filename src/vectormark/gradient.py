@@ -30,13 +30,6 @@ _STRETCH_GRID_STEPS = (8, 16, 24, 32, 48)   # NxN downsample sizes for the stret
                                             # the renderer bilinearly stretches the grid
                                             # back over the footprint. Last entry is the cap.
 _STRETCH_TARGET = 0.05                       # grow the grid until mean per-pixel ΔE <= this.
-_SMOOTH_BAND_MIN = 10        # min quantized bands (len(leftover)) for the smooth-blob fallback:
-                            # a posterized continuous tone has many; faceted art has few.
-_SMOOTH_MEDIAN_TOL = 0.05    # max median per-pixel ΔE of the best parametric fit: the bulk of a
-                            # gradient follows some smooth model even when its mean ΔE is high
-                            # (the 2-D residual is a minority). Faceted art fails this.
-_PARAM_FALLBACK_TOL = 0.07   # mean ΔE bound to still prefer the editable parametric gradient
-                            # over a raster stretch-fill.
 
 
 def _hex_to_oklab(hex_colors: list[str]) -> np.ndarray:
@@ -510,32 +503,6 @@ def _union_mask(regions: list[Region], shape: tuple[int, int]) -> np.ndarray:
     return m
 
 
-def _fit_smooth_blob(leftover: list[Region], sil: np.ndarray,
-                     rgb_image: np.ndarray) -> dict | None:
-    """Decide how to fill one smooth dominant blob the band-merge path didn't consume:
-
-    1. strict parametric (existing behaviour) — a clean gradient, accepted at <=_GATE_DELTA_E.
-    2. smoothness guard — band_count >= _SMOOTH_BAND_MIN AND median per-pixel ΔE of the best
-       searched parametric fit <= _SMOOTH_MEDIAN_TOL. Fails -> None (stay flat; faceted art).
-    3. loose parametric — best searched model with mean ΔE <= _PARAM_FALLBACK_TOL (editable).
-    4. stretch-fill — a 2-D field no gradient expresses.
-    """
-    strict = fit_gradient(sil, rgb_image)
-    if strict is not None:
-        return strict
-    if len(leftover) < _SMOOTH_BAND_MIN:
-        return None
-    bp = _best_parametric(sil, rgb_image)
-    if bp is None:
-        return None
-    model, mean_de, median_de = bp
-    if median_de > _SMOOTH_MEDIAN_TOL:
-        return None                                  # faceted art -> stays flat
-    if mean_de <= _PARAM_FALLBACK_TOL:
-        return model                                 # editable parametric gradient
-    return _fit_stretch(sil, rgb_image)              # 2-D field -> raster
-
-
 def detect_gradients(
     regions: list[Region], rgb_image: np.ndarray
 ) -> tuple[list[tuple[Region, dict]], list[Region]]:
@@ -564,7 +531,7 @@ def detect_gradients(
     if leftover:
         sil = _union_mask(leftover, rgb_image.shape[:2])
         if _dominant_blob_fraction(sil) >= _BLOB_DOMINANCE:
-            model = _fit_smooth_blob(leftover, sil, rgb_image)
+            model = fit_gradient(sil, rgb_image)
             if model is not None:
                 rep = max(leftover, key=lambda r: r.area)
                 fills.append((Region(label=rep.label, mask=sil, color_hex=rep.color_hex), model))
