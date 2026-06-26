@@ -343,3 +343,33 @@ def test_best_parametric_returns_none_for_flat():
     from vectormark.gradient import _best_parametric
     img = np.full((40, 40, 3), (50, 100, 150), np.uint8)
     assert _best_parametric(np.ones((40, 40), bool), img) is None   # span below minimum
+
+
+def _diagonal_2d_field(h, w):
+    """A separable 2-D field (horizontal hue x vertical luminance) that NO single
+    linear/radial gradient fits: hue runs left->right, brightness runs top->bottom."""
+    yy, xx = np.mgrid[:h, :w]
+    tx = xx / (w - 1)
+    ty = yy / (h - 1)
+    img = np.empty((h, w, 3))
+    img[:, :, 0] = 30 + tx * 200                       # R climbs with x
+    img[:, :, 1] = 20 + ty * 200                       # G climbs with y
+    img[:, :, 2] = 200 - tx * 160                      # B falls with x
+    return img.round().astype(np.uint8)
+
+
+def test_fit_stretch_returns_raster_model_under_target():
+    from vectormark.gradient import _fit_stretch, _STRETCH_TARGET
+    img = _diagonal_2d_field(96, 96)
+    model = _fit_stretch(np.ones((96, 96), bool), img)
+    assert model is not None and model["kind"] == "raster"
+    g = model["geometry"]
+    assert (g["x"], g["y"], g["w"], g["h"]) == (0.0, 0.0, 96.0, 96.0)
+    assert isinstance(model["png_b64"], str) and len(model["png_b64"]) > 0
+
+
+def test_fit_stretch_none_for_degenerate_bbox():
+    from vectormark.gradient import _fit_stretch
+    m = np.zeros((40, 40), bool)
+    m[10, 5:9] = True                                  # 1px tall footprint
+    assert _fit_stretch(m, np.zeros((40, 40, 3), np.uint8)) is None

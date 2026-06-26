@@ -6,7 +6,11 @@ docs/superpowers/specs/2026-06-06-gradient-handling-design.md)."""
 
 from __future__ import annotations
 
+import base64
+import io
+
 import numpy as np
+from PIL import Image
 from scipy import ndimage as ndi
 
 from .color import srgb_to_oklab
@@ -22,6 +26,10 @@ _MIN_STOP_SPAN = 0.02    # OKLab end-to-end travel a fit must show to count as a
 _BLOB_DOMINANCE = 0.85   # smooth-gradient path: min fraction of the foreground that must lie
                          # in a single connected component for the mark to be treated as one
                          # gradient blob (rejects multi-glyph wordmarks before any fit).
+_STRETCH_GRID_STEPS = (8, 16, 24, 32, 48)   # NxN downsample sizes for the stretch-fill;
+                                            # the renderer bilinearly stretches the grid
+                                            # back over the footprint. Last entry is the cap.
+_STRETCH_TARGET = 0.05                       # grow the grid until mean per-pixel ΔE <= this.
 
 
 def _hex_to_oklab(hex_colors: list[str]) -> np.ndarray:
@@ -448,6 +456,42 @@ def _dominant_blob_fraction(mask: np.ndarray) -> float:
         return 0.0
     sizes = np.bincount(labels.ravel())[1:]       # drop background label 0
     return float(sizes.max()) / total
+
+
+def _png_b64(small: np.ndarray) -> str:
+    """Bare base64 PNG (no data-URI prefix) of an HxWx3 uint8 array."""
+    buf = io.BytesIO()
+    Image.fromarray(small.astype(np.uint8)).save(buf, format="PNG")
+    return base64.b64encode(buf.getvalue()).decode("ascii")
+
+
+def _fit_stretch(mask: np.ndarray, rgb_image: np.ndarray) -> dict | None:
+    """Downsample the footprint bbox to NxN and let the renderer stretch it back
+    (bilinear) to reproduce a smooth 2-D field one gradient can't. Grows N over
+    _STRETCH_GRID_STEPS until the upsampled reconstruction's mean per-pixel ΔE over
+    the footprint is <= _STRETCH_TARGET, else returns the largest grid. None if the
+    bbox is degenerate (<2px a side)."""
+    ys, xs = np.where(mask)
+    y0, y1 = int(ys.min()), int(ys.max()) + 1
+    x0, x1 = int(xs.min()), int(xs.max()) + 1
+    bw, bh = x1 - x0, y1 - y0
+    if bw < 2 or bh < 2:
+        return None
+    crop = rgb_image[y0:y1, x0:x1]
+    ry, rx = ys - y0, xs - x0
+    truth = srgb_to_oklab(rgb_image[ys, xs].astype(float) / 255.0)
+    geometry = {"x": float(x0), "y": float(y0), "w": float(bw), "h": float(bh)}
+    best = None
+    for n in _STRETCH_GRID_STEPS:
+        small = np.asarray(Image.fromarray(crop).resize((n, n), Image.BILINEAR))
+        up = np.asarray(Image.fromarray(small).resize((bw, bh), Image.BILINEAR)).astype(float)
+        recon = up[ry, rx]
+        de = float(np.linalg.norm(srgb_to_oklab(recon / 255.0) - truth, axis=1).mean())
+        if best is None or de < best[0]:
+            best = (de, small)
+        if de <= _STRETCH_TARGET:
+            break
+    return {"kind": "raster", "geometry": geometry, "png_b64": _png_b64(best[1])}
 
 
 def _union_mask(regions: list[Region], shape: tuple[int, int]) -> np.ndarray:
