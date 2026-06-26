@@ -70,3 +70,28 @@ def test_annulus_renders_hollow_center():
     img = render_svg(svg, 120, 120)
     assert tuple(img[60, 60]) == (255, 255, 255)   # center is the hole -> white
     assert tuple(img[60, 26]) == (0, 0, 0)         # on the ring band -> black
+
+
+def test_pattern_image_def_emits_stretched_image():
+    from vectormark.emit import pattern_image_def
+    s = pattern_image_def("g0", 10.0, 20.0, 100.0, 80.0, "AAAA")
+    assert 'id="g0"' in s and 'patternUnits="userSpaceOnUse"' in s
+    assert 'width="100" height="80"' in s
+    assert 'href="data:image/png;base64,AAAA"' in s
+    assert 'preserveAspectRatio="none"' in s
+    assert "patternTransform" not in s            # no transform given
+
+
+def test_pattern_image_def_emits_transform_matrix():
+    from vectormark.emit import pattern_image_def
+    s = pattern_image_def("g1", 0.0, 0.0, 4.0, 4.0, "BBBB", transform=(1.0, 0.0, 0.0, 1.0, 5.0, 6.0))
+    assert 'patternTransform="matrix(1 0 0 1 5 6)"' in s
+
+
+def test_resolve_fill_registers_pattern_for_rasterfill():
+    from vectormark.candidate import RasterFill
+    from vectormark.emit import resolve_fill
+    defs = []
+    out = resolve_fill(RasterFill({"x": 0.0, "y": 0.0, "w": 8.0, "h": 8.0}, "CCCC"), defs)
+    assert out == "url(#g0)"
+    assert len(defs) == 1 and defs[0].startswith("<pattern")
