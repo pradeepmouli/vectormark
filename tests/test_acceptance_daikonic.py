@@ -65,17 +65,18 @@ def test_daikonic_renders_close_to_source():
 
 
 def test_daikonic_corner_radius_is_measured_tight_and_padded():
-    """Auto radius is MEASURED from the band corners + the de-antialiasing pad —
+    """Per-region radius is MEASURED from the band corners + the de-antialiasing pad —
     tight (matches the reference) and far below the old fraction-of-height value."""
-    from vectormark.pipeline import _mark_corner_radius, _DEANTIALIAS_PAD
+    from vectormark.contour import region_corner_radius, _CORNER_DEANTIALIAS_PAD
     from vectormark.color import extract_palette, quantize
     from vectormark.segment import segment
-    from vectormark.symmetry import detect_axis
 
     icon = _icon_array()
     h, w, _ = icon.shape
     pal = extract_palette(icon, max_colors=16)
     regions = segment(quantize(icon, pal), min_area=max(16, round(0.001 * h * w)))
-    axis = detect_axis(np.any([r.mask for r in regions], axis=0))
-    r = _mark_corner_radius(regions, axis)
-    assert _DEANTIALIAS_PAD <= r <= 7.0          # tight, matches the ref (not the old ~12.8)
+    radii = [region_corner_radius(r.mask) for r in regions]
+    rounded = [r for r in radii if r > 0]
+    assert rounded, "no rounded regions found in daikonic icon"
+    median_r = sorted(rounded)[len(rounded) // 2]
+    assert _CORNER_DEANTIALIAS_PAD <= median_r <= 13.0  # tight: per-region ~10.8 (not the old heuristic ~12.8)

@@ -11,7 +11,7 @@ from PIL import Image
 from scipy import ndimage as ndi
 
 from .color import extract_palette, quantize
-from .contour import region_contours
+from .contour import region_corner_radius
 from .emit import (
     apply_affine_point,
     fill_rule_for,
@@ -36,48 +36,6 @@ from .symmetry import classify_regions, detect_axis, detect_symmetry_rotation
 from .types import Axis, Region
 
 
-# The shared mark-level corner radius is MEASURED from the band geometry (so it
-# tracks whatever mark you feed it) and applied to every segment, instead of each
-# segment picking its own radius from its own height.
-#
-# De-antialiasing collapses the soft AA edge that carried part of the corner's
-# roundness, so the hardened mask under-reads the radius by ~the AA half-width; we
-# add it back as a constant pad so the emitted radius matches the *perceived*
-# source rounding. The fraction-of-height value is only a fallback when no band-
-# like (straight-sided) segment is measurable.
-_CORNER_RADIUS_FRACTION = 0.22
-_DEANTIALIAS_PAD = 2.0
-
-
-def _band_fillet_radius(contour: np.ndarray, axis_x: float) -> list[float] | None:
-    """Measured corner-fillet radii (top, bottom) of a band-like region, or None
-    if its right side isn't a clean straight taper. The fillet inset = how far the
-    flat edge falls short of the sharp corner where the side-line meets it."""
-    pts = np.asarray(contour, dtype=float)
-    y_top, y_bot = pts[:, 1].min(), pts[:, 1].max()
-    height = y_bot - y_top
-    if height < 12:
-        return None
-    margin = min(height * 0.30, 16)
-    sel = (pts[:, 1] > y_top + margin) & (pts[:, 1] < y_bot - margin) & (pts[:, 0] > axis_x)
-    edge = pts[sel]
-    if len(edge) < 6:
-        return None
-    A = np.column_stack([edge[:, 1], np.ones(len(edge))])
-    (m, b), *_ = np.linalg.lstsq(A, edge[:, 0], rcond=None)
-    if np.abs(edge[:, 0] - (m * edge[:, 1] + b)).max() > 2.5:
-        return None                                  # side isn't a straight taper
-    out: list[float] = []
-    for edge_y in (y_top, y_bot):
-        corner_x = m * edge_y + b
-        near = pts[np.abs(pts[:, 1] - edge_y) < 1.5]
-        if len(near):
-            rr = corner_x - near[:, 0].max()
-            if 0 <= rr < 0.25 * height:              # a real corner fillet, not a curved cap
-                out.append(float(rr))
-    return out or None
-
-
 @dataclass
 class Options:
     epsilon: float = 1.5          # primitive/polygon recognition tolerance (px)
@@ -89,28 +47,6 @@ class Options:
     corner_radius: float | None = None  # shared fillet radius; None = auto from geometry
     fidelity_tol: float = 0.06        # selector's render-ΔE gate (slice 4a)
     selection: SelectionPolicy | None = None  # manual candidate selection (slice 4b)
-
-
-def _mark_corner_radius(regions: list[Region], axis: Axis | None) -> float:
-    """One shared fillet radius for the whole mark: the median measured band-corner
-    radius plus the de-antialiasing pad. Falls back to a fraction of the median
-    segment height when no band-like segment is measurable (or no axis)."""
-    if axis is not None:
-        measured: list[float] = []
-        for region in regions:
-            cs = region_contours(region.mask)
-            if cs:
-                m = _band_fillet_radius(cs[0], axis.x)
-                if m:
-                    measured.extend(m)
-        if measured:
-            measured.sort()
-            median_r = measured[len(measured) // 2]
-            return round(median_r + _DEANTIALIAS_PAD, 1)
-    heights = sorted(float(r.mask.any(axis=1).sum()) for r in regions if r.area > 0)
-    if not heights:
-        return 0.0
-    return round(_CORNER_RADIUS_FRACTION * heights[len(heights) // 2], 1)
 
 
 def _segment_image(arr: np.ndarray, opt: Options) -> tuple[int, int, list[Region]]:
@@ -180,7 +116,7 @@ def _build_report(cands: list[Candidate], axes: list[AxisLine]) -> IdealizeRepor
 def build_candidates(
     reconstructed: list, straddlers: list[Region], pairs: list[tuple[Region, Region]],
     loners: list[Region], gradient_fills: list[tuple[Region, dict]],
-    opt: Options, axis: Axis | None, corner_radius: float,
+    opt: Options, axis: Axis | None,
     source_rgb: np.ndarray | None, *, base: int = 0,
 ) -> list[Candidate]:
     """Decide geometry + fill per element and return the candidate list in exact
@@ -213,7 +149,8 @@ def build_candidates(
         # (base = candidates from prior components, so per-component lookups address sN).
         eid = f"s{base + len(cands)}"
         element = opt.selection.for_id(eid) if opt.selection is not None else None
-        shape, strategy = select_geometry(region, opt, fit_axis, corner_radius, source_rgb,
+        cr = opt.corner_radius if opt.corner_radius is not None else region_corner_radius(region.mask)
+        shape, strategy = select_geometry(region, opt, fit_axis, cr, source_rgb,
                                           element=element, eid=eid)
         if shape is None:
             continue
@@ -229,7 +166,8 @@ def build_candidates(
         # Same sN scheme as the region loop (shared base + cands counter; gradients emit last).
         eid = f"s{base + len(cands)}"
         element = opt.selection.for_id(eid) if opt.selection is not None else None
-        shape, _strategy = select_geometry(footprint, opt, None, corner_radius, source_rgb,
+        cr = opt.corner_radius if opt.corner_radius is not None else region_corner_radius(footprint.mask)
+        shape, _strategy = select_geometry(footprint, opt, None, cr, source_rgb,
                                            element=element, eid=eid)
         if shape is None:
             continue
@@ -270,11 +208,9 @@ def _render_body(
         if axis is not None:
             ys = np.nonzero(silhouette)[0]
             frame_axes.append(AxisLine(float(axis.x), float(ys.min()), float(axis.x), float(ys.max())))
-        corner_radius = opt.corner_radius if opt.corner_radius is not None else _mark_corner_radius(comp, axis)
-
         reconstructed, comp = reconstruct_scene(comp, axis, (h, w))
 
-        # Per component: one local axis + fillet radius, its own occlusion/gradient pass.
+        # Per component: one local axis, its own occlusion/gradient pass.
         # (Single-component marks take this loop exactly once -> identical to pre-slice-5.)
         gradient_fills: list[tuple[Region, dict]] = []
         if rgb is not None:
@@ -286,7 +222,7 @@ def _render_body(
             straddlers, pairs, loners = list(comp), [], []
 
         cands += build_candidates(
-            reconstructed, straddlers, pairs, loners, gradient_fills, opt, axis, corner_radius, rgb,
+            reconstructed, straddlers, pairs, loners, gradient_fills, opt, axis, rgb,
             base=len(cands),
         )
 
