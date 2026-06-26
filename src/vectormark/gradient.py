@@ -469,8 +469,9 @@ def _fit_stretch(mask: np.ndarray, rgb_image: np.ndarray) -> dict | None:
     """Downsample the footprint bbox to NxN and let the renderer stretch it back
     (bilinear) to reproduce a smooth 2-D field one gradient can't. Grows N over
     _STRETCH_GRID_STEPS until the upsampled reconstruction's mean per-pixel ΔE over
-    the footprint is <= _STRETCH_TARGET, else returns the largest grid. None if the
-    bbox is degenerate (<2px a side)."""
+    the footprint is <= _STRETCH_TARGET, else returns the lowest-ΔE (most faithful)
+    grid found across _STRETCH_GRID_STEPS. None if the bbox is degenerate (<2px a
+    side)."""
     ys, xs = np.where(mask)
     y0, y1 = int(ys.min()), int(ys.max()) + 1
     x0, x1 = int(xs.min()), int(xs.max()) + 1
