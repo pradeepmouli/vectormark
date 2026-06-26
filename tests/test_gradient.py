@@ -488,3 +488,19 @@ def test_fit_stretch_masks_outside_pixels():
     small = np.asarray(Image.open(io.BytesIO(base64.b64decode(model["png_b64"]))).convert("RGB"))
     # the green hole colour must be absent from the downsampled fill (it was masked out)
     assert float(np.linalg.norm(small.reshape(-1, 3).astype(float) - np.array([0, 255, 0]), axis=1).min()) > 60.0
+
+
+def test_component_fill_uses_searched_radial_for_sphere():
+    # a spherical/glossy field (bright off-centre highlight fading outward): the cheap heuristic
+    # settles for a poor linear; the searched parametric finds the radial. _component_fill must
+    # return the radial, not a linear.
+    from vectormark.gradient import _component_fill
+    h, w = 80, 80
+    yy, xx = np.mgrid[:h, :w]
+    r = np.hypot(xx - 28, yy - 24) / np.hypot(w, h)          # highlight off-centre (upper-left)
+    img = np.empty((h, w, 3))
+    for ch, (a, b) in enumerate(((250, 40), (250, 30), (250, 50))):
+        img[:, :, ch] = a + r * (b - a)
+    img = img.round().astype(np.uint8)
+    model = _component_fill(np.ones((h, w), bool), img)
+    assert model is not None and model["kind"] == "radial"
