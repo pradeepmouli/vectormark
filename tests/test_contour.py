@@ -1,5 +1,5 @@
 import numpy as np
-from vectormark.contour import outer_contour, rdp, corner_indices, region_contours, _polygon_area
+from vectormark.contour import outer_contour, rdp, corner_indices, region_contours, _polygon_area, region_corner_radius
 
 
 def test_region_contours_finds_hole_outer_first():
@@ -39,3 +39,41 @@ def test_edge_touching_rect_contour_is_closed_and_full():
     c = outer_contour(mask)
     assert np.allclose(c[0], c[-1])                 # closed
     assert c[:, 0].min() <= 0.5 and c[:, 1].min() <= 0.5   # reaches the touched edges
+
+
+def _sharp_square(side=60, pad=10):
+    m = np.zeros((side + 2 * pad, side + 2 * pad), bool)
+    m[pad:pad + side, pad:pad + side] = True
+    return m
+
+
+def _rounded_square(side=60, pad=10, r=10):
+    # standard rounded rect: a point is inside iff its distance to the inner box
+    # [x0+r, x1-r] x [y0+r, y1-r] (the clamped point) is <= r. Flat edges + quarter-circle corners.
+    n = side + 2 * pad
+    yy, xx = np.ogrid[:n, :n]
+    x0, x1, y0, y1 = pad, pad + side - 1, pad, pad + side - 1
+    cx = np.clip(xx, x0 + r, x1 - r)
+    cy = np.clip(yy, y0 + r, y1 - r)
+    return np.hypot(xx - cx, yy - cy) <= r
+
+
+def test_corner_radius_sharp_square_is_zero():
+    assert region_corner_radius(_sharp_square()) == 0.0
+
+
+def test_corner_radius_rounded_square_recovers_radius():
+    r = region_corner_radius(_rounded_square(r=12))
+    assert 8.0 <= r <= 18.0          # ~12 plus the de-antialias pad, generous band
+
+
+def test_corner_radius_monotonic_in_rounding():
+    small = region_corner_radius(_rounded_square(r=6))
+    large = region_corner_radius(_rounded_square(r=16))
+    assert small > 0.0 and large > small
+
+
+def test_corner_radius_tiny_or_empty_mask_is_zero():
+    assert region_corner_radius(np.zeros((4, 4), bool)) == 0.0
+    tiny = np.zeros((20, 20), bool); tiny[9:11, 9:11] = True
+    assert region_corner_radius(tiny) == 0.0
