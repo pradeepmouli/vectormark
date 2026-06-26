@@ -373,3 +373,36 @@ def test_fit_stretch_none_for_degenerate_bbox():
     m = np.zeros((40, 40), bool)
     m[10, 5:9] = True                                  # 1px tall footprint
     assert _fit_stretch(m, np.zeros((40, 40, 3), np.uint8)) is None
+
+
+def test_merge_components_merges_small_steps_into_one():
+    from vectormark.gradient import merge_components
+    # 4 adjacent bands stepping blue->magenta (small OKLab steps between neighbours)
+    regions = _hstrip_regions(["#2563eb", "#7b3fc4", "#b13a9e", "#db2777"])
+    groups = merge_components(regions, tol=0.15)
+    assert len(groups) == 1 and len(groups[0]) == 4
+
+
+def test_merge_components_splits_at_large_step():
+    from vectormark.gradient import merge_components
+    # a small-step pair, then a large jump to a distinct hue, then another small-step pair
+    regions = _hstrip_regions(["#2563eb", "#3a6ae0", "#11aa33", "#15b53a"])
+    groups = merge_components(regions, tol=0.15)
+    labels = sorted(sorted(r.label for r in g) for g in groups)
+    assert labels == [[1, 2], [3, 4]]                 # split at the blue->green jump
+
+
+def test_merge_components_singleton_when_isolated_by_large_steps():
+    from vectormark.gradient import merge_components
+    # zig-zag hues: every adjacency is a large step -> no merges -> all singletons
+    regions = _hstrip_regions(["#ff0000", "#00ff00", "#0000ff", "#ffff00"])
+    groups = merge_components(regions, tol=0.15)
+    assert sorted(len(g) for g in groups) == [1, 1, 1, 1]
+
+
+def test_merge_components_transitive_chain():
+    from vectormark.gradient import merge_components
+    # a long chain of small steps merges end-to-end even though the ends are far apart
+    regions = _hstrip_regions(["#2563eb", "#5a4fd0", "#8a44b4", "#b13a9e", "#db2777"])
+    groups = merge_components(regions, tol=0.15)
+    assert len(groups) == 1 and len(groups[0]) == 5

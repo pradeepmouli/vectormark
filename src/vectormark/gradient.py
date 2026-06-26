@@ -31,6 +31,11 @@ _STRETCH_GRID_STEPS = (8, 16, 24, 32, 48)   # NxN downsample sizes for the stret
                                             # back over the footprint. Last entry is the cap.
 _STRETCH_TARGET = 0.05                       # grow the grid until mean per-pixel ΔE <= this.
 
+MERGE_TOL = 0.15   # max OKLab colour step between two spatially-adjacent regions for them
+                   # to merge into one vector component. Below this = one smooth field (gradient
+                   # bands, within-facet shading); above = a real boundary (facet edge, outline).
+                   # Corpus: within-field steps <=0.12, boundary steps >=0.27 -> clean gap.
+
 
 def _hex_to_oklab(hex_colors: list[str]) -> np.ndarray:
     rgb = np.array(
@@ -145,6 +150,39 @@ def _ramp_groups(regions: list[Region]) -> list[list[Region]]:
         if ramp is not None:
             groups.append(ramp)
     return groups
+
+
+def merge_components(regions: list[Region], *, tol: float = MERGE_TOL) -> list[list[Region]]:
+    """Agglomeratively merge spatially-adjacent regions whose OKLab colour step is <= tol
+    into single components (union-find over region_adjacency). Generalizes _ramp_groups from
+    collinear ramps to any locally-smooth field: a region with no small-step neighbour is its
+    own singleton group. Deterministic (groups ordered by their minimum label)."""
+    by_label = {r.label: r for r in regions}
+    adj = region_adjacency(regions)
+    colors = {r.label: _hex_to_oklab([r.color_hex])[0] for r in regions}
+    parent = {r.label: r.label for r in regions}
+
+    def find(x: int) -> int:
+        while parent[x] != x:
+            parent[x] = parent[parent[x]]
+            x = parent[x]
+        return x
+
+    def union(a: int, b: int) -> None:
+        ra, rb = find(a), find(b)
+        if ra != rb:
+            parent[max(ra, rb)] = min(ra, rb)        # attach to lower label (deterministic)
+
+    for r in regions:
+        for n in sorted(adj[r.label]):
+            if n > r.label and n in by_label:
+                if float(np.linalg.norm(colors[r.label] - colors[n])) <= tol:
+                    union(r.label, n)
+
+    groups: dict[int, list[Region]] = {}
+    for r in regions:
+        groups.setdefault(find(r.label), []).append(r)
+    return [g for _, g in sorted(groups.items(), key=lambda kv: min(m.label for m in kv[1]))]
 
 
 def _rgb_to_hex(rgb: np.ndarray) -> str:
