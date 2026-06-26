@@ -420,6 +420,101 @@ Co-Authored-By: Claude Sonnet 4.6 <noreply@anthropic.com>"
 
 ---
 
+---
+
+### Task 5: Thin-band fillability gate (keep faceted logos crisp)
+
+**Files:**
+- Modify: `src/vectormark/gradient.py` (add `_THIN_BAND_TOL`; extract `_group_is_fillable`; use it in `detect_gradients`)
+- Test: `tests/test_gradient.py`
+
+**Context:** Corpus validation (Task 4) found the `>= _MIN_BANDS OR dominant` gate still smears faceted logos whose facets are similar-coloured (Sketch's top facets merge into a 4-band group and fit a radial at ΔE 0.037 — *better* than real gradients — so neither colour, band-count, nor fit-quality rejects it). The only signal that separates a finely-quantized gradient from coarse facets is band thinness: a gradient's bands are thin (firefox avg 0.03 of the mark), facets are chunky (Sketch avg 0.20). Validated across the corpus: this flips only Sketch (radial→flat) and App Store (near-dominant low-contrast → flat, its prior rendering); every real gradient and flat mark is unchanged.
+
+**Interfaces:**
+- Produces: `_THIN_BAND_TOL = 0.10` (constant); `_group_is_fillable(group: list[Region], total_fg: float) -> bool`.
+
+- [ ] **Step 1: Write the failing test**
+
+Add to `tests/test_gradient.py`:
+
+```python
+def _regions_with_areas(areas):
+    from vectormark.types import Region
+    out = []
+    for i, a in enumerate(areas):
+        m = np.zeros((1, 1000), bool); m[0, :a] = True       # a True pixels -> Region.area == a
+        out.append(Region(label=i + 1, mask=m, color_hex="#000000"))
+    return out
+
+
+def test_group_is_fillable_dominant_thin_chunky():
+    from vectormark.gradient import _group_is_fillable
+    # dominant single blob (90% of fg) -> fillable
+    assert _group_is_fillable(_regions_with_areas([900]), 1000.0) is True
+    # 10 thin bands, 80% of fg, each 8% -> avg 0.008 < 0.10 -> finely-quantized -> fillable
+    assert _group_is_fillable(_regions_with_areas([80] * 10), 1000.0) is True
+    # 4 chunky facets, 80% of fg, each 20% -> avg 0.20 >= 0.10 and not dominant -> NOT fillable
+    assert _group_is_fillable(_regions_with_areas([200] * 4), 1000.0) is False
+```
+
+- [ ] **Step 2: Run to verify it fails**
+
+Run: `uv run pytest tests/test_gradient.py -k group_is_fillable -v`
+Expected: FAIL — `_group_is_fillable` not defined.
+
+- [ ] **Step 3: Add `_THIN_BAND_TOL` and `_group_is_fillable`; use it in `detect_gradients`**
+
+Add the constant near the other thresholds:
+
+```python
+_THIN_BAND_TOL = 0.10   # max mean band-area fraction (group_area / total_fg / band count) for a
+                       # >= _MIN_BANDS group to count as a finely-quantized continuous tone rather
+                       # than a few chunky similar-coloured facets. Keeps faceted logos (Sketch)
+                       # crisp instead of smearing them into a gradient that ΔE cannot tell apart.
+```
+
+Add the helper just above `detect_gradients`:
+
+```python
+def _group_is_fillable(group: list[Region], total_fg: float) -> bool:
+    """A merged group is eligible for a gradient/raster fill if it is a dominant blob
+    (covers >= _BLOB_DOMINANCE of the foreground) OR a finely-quantized continuous tone
+    (>= _MIN_BANDS bands, each thin: mean band-area fraction < _THIN_BAND_TOL). The
+    thinness test keeps faceted logos (few chunky similar-coloured facets) crisp instead
+    of smearing them into a gradient that ΔE cannot distinguish from a real one."""
+    af = sum(r.area for r in group) / total_fg
+    return (af >= _BLOB_DOMINANCE
+            or (len(group) >= _MIN_BANDS and af / len(group) < _THIN_BAND_TOL))
+```
+
+In `detect_gradients`, replace the inline `eligible = (...)` expression and its `if not eligible:` with:
+
+```python
+        if not _group_is_fillable(group, total_fg):
+            continue                                 # leave regions in `remaining` as-is
+```
+
+(Keep `total_fg = float(sum(r.area for r in regions)) or 1.0` as the per-call foreground total.)
+
+- [ ] **Step 4: Run the test, then the full suite for parity**
+
+Run: `uv run pytest tests/test_gradient.py -k group_is_fillable -v`
+Expected: PASS.
+
+Run: `uv run pytest -q`
+Expected: PASS — full suite, no regressions (paste the verbatim summary line).
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add src/vectormark/gradient.py tests/test_gradient.py
+git commit -m "feat(gradient): thin-band fillability gate keeps faceted logos crisp
+
+Co-Authored-By: Claude Sonnet 4.6 <noreply@anthropic.com>"
+```
+
+---
+
 ## Final Review
 
 After all tasks: dispatch a whole-branch code review (Opus) covering the full branch (the retained Task 1/2/3/5 primitives from the prior plan + this merge rework + the revert), then use superpowers:finishing-a-development-branch to open the PR. PR body ends with: `🤖 Generated with [Claude Code](https://claude.com/claude-code)`.

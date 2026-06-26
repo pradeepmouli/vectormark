@@ -60,12 +60,25 @@ Colour-step similarity is necessary but not sufficient to fit a field: real logo
 adjacent *distinct* design elements of similar colour (Daikonic's navy band shapes) that
 must stay separate flat components, and individual flat regions carry mild AA variation
 that a per-region fit would over-eagerly turn into a spurious gradient. A group is
-eligible for a gradient/raster fill only if it is **either** a genuine merged field
-(`len(group) >= _MIN_BANDS`, i.e. ≥3 bands — a posterized continuous tone) **or** a
-dominant blob (`sum(region areas in group) >= _BLOB_DOMINANCE * total_foreground_area` —
-the non-posterized smooth-gradient case, e.g. a smooth disc that posterized into one or
-two bands; this restores the old smooth-blob path's union-area dominance, so a disc that
-splits into 2 bands still qualifies while two equal disconnected blobs, each ~0.5, do not). Ineligible groups leave their
+eligible for a gradient/raster fill only if it is **either** a dominant blob
+(`sum(region areas in group) >= _BLOB_DOMINANCE * total_foreground_area` — the
+non-posterized smooth-gradient case, e.g. a smooth disc that posterized into one or two
+bands; restores the old smooth-blob path's union-area dominance, so a disc that splits
+into 2 bands still qualifies while two equal disconnected blobs, each ~0.5, do not)
+**or** a **finely-quantized continuous tone**: `len(group) >= _MIN_BANDS` (≥3 bands)
+AND each band is *thin* — mean band-area fraction `(group_area / total_fg) / len(group)
+< _THIN_BAND_TOL` (0.10).
+
+The thinness test is what keeps faceted logos crisp. Measured: a gradient quantizes into
+many thin bands (firefox bands average 0.03 of the mark, instagram 0.02), while faceted
+art is a few chunky regions (Sketch's similar-coloured top facets average 0.20). Crucially,
+**no colour-step, band-count, or fit-quality test can separate them** — Sketch's facets fit
+a radial at ΔE 0.037, *better* than firefox/instagram's real gradients — because the facets
+happen to be arranged radially. Only geometric granularity (the region structure, not the
+colour or the fit) distinguishes a finely-quantized gradient from coarse facets. Validated
+across the corpus: the thinness gate flips only Sketch (radial→flat, facets preserved) and
+App Store (a near-dominant low-contrast blue → flat, matching its prior rendering); every
+real gradient and flat mark is unchanged. Ineligible groups leave their
 regions in `remaining` as-is (flat). These are the existing `_MIN_BANDS = 3` and
 `_BLOB_DOMINANCE = 0.85` constants — no new thresholds. Validated: under this gate
 Daikonic/two-blob/gdrive stay flat (parity), while Firefox/Instagram split into per-
@@ -134,6 +147,7 @@ the residual (additive), noted as the contingency.
 | name | start | role |
 |------|------|------|
 | `MERGE_TOL` | 0.15 | max OKLab colour step to merge two adjacent regions (the discriminator) |
+| `_THIN_BAND_TOL` | 0.10 | max mean band-area fraction for a ≥3-band group to count as a finely-quantized gradient (vs chunky facets) |
 | `_PARAM_FALLBACK_TOL` | 0.07 | max mean ΔE to prefer an editable parametric gradient over raster |
 | `_STRETCH_TARGET`, `_STRETCH_GRID_STEPS`, `_GATE_DELTA_E`, `_MIN_STOP_SPAN` | (existing) | unchanged |
 
