@@ -428,7 +428,7 @@ def test_group_is_fillable_dominant_thin_chunky():
     from vectormark.gradient import _group_is_fillable
     # dominant single blob (90% of fg) -> fillable
     assert _group_is_fillable(_regions_with_areas([900]), 1000.0) is True
-    # 10 thin bands, 80% of fg, each 8% -> avg 0.008 < 0.10 -> finely-quantized -> fillable
+    # 10 thin bands, 80% of fg, each 8% -> avg 0.08 < 0.10 -> finely-quantized -> fillable
     assert _group_is_fillable(_regions_with_areas([80] * 10), 1000.0) is True
     # 4 chunky facets, 80% of fg, each 20% -> avg 0.20 >= 0.10 and not dominant -> NOT fillable
     assert _group_is_fillable(_regions_with_areas([200] * 4), 1000.0) is False

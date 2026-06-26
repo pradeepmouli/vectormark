@@ -496,9 +496,10 @@ def detect_gradients(
 
     Fill-eligibility gate (restores the two guards the colour-step merge alone drops, so
     adjacent distinct-but-similar flat shapes and mildly-noisy single flats are NOT
-    over-fit): a group qualifies only if it is a genuine merged field (len(group) >=
-    _MIN_BANDS) OR a single dominant blob (its area >= _BLOB_DOMINANCE * total foreground).
-    An eligible component that fits a gradient/raster becomes a (footprint_region, model)
+    over-fit): a group qualifies only if it is a dominant blob (area >= _BLOB_DOMINANCE of
+    the foreground) OR a finely-quantized ramp (>= _MIN_BANDS bands, each averaging <
+    _THIN_BAND_TOL of the total foreground area — chunky similar-coloured facets like Sketch
+    are rejected). An eligible component that fits a gradient/raster becomes a (footprint_region, model)
     fill (gradient footprints grow into model-matching background via _expand_footprint).
     Every other region — ineligible groups, eligible-but-unfittable (near-flat) groups,
     and unmerged singletons — stays in `remaining` as its original region(s)."""
