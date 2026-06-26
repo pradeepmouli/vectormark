@@ -463,32 +463,18 @@ def _union_mask(regions: list[Region], shape: tuple[int, int]) -> np.ndarray:
     return m
 
 
-def _field_spread(mask: np.ndarray, rgb_image: np.ndarray) -> float:
-    """Max OKLab distance of the original pixels under `mask` from their mean colour.
-    A cheap flat-vs-varying gate (~0 for a flat region)."""
-    ys, xs = np.where(mask)
-    if len(xs) == 0:
-        return 0.0
-    okl = srgb_to_oklab(rgb_image[ys, xs].astype(float) / 255.0)
-    return float(np.linalg.norm(okl - okl.mean(axis=0), axis=1).max())
-
-
 def _component_fill(mask: np.ndarray, rgb_image: np.ndarray) -> dict | None:
-    """Pick a fill model for one component's footprint: strict parametric gradient, else a
-    searched parametric gradient (mean ΔE <= _PARAM_FALLBACK_TOL), else a raster stretch-fill.
-    None when the field is too flat to be anything but a solid colour (caller renders flat)."""
-    strict = fit_gradient(mask, rgb_image)
-    if strict is not None:
-        return strict
-    if _field_spread(mask, rgb_image) < _MIN_STOP_SPAN:
-        return None                                  # flat -> solid colour
+    """Pick a fill model for one component's footprint: a SEARCHED parametric gradient
+    (linear or radial — the centre/axis search finds a well-centred radial for a spherical
+    or glossy surface, which the cheap heuristic settles a poor linear on), else a raster
+    stretch-fill. None when the field is too flat to be anything but a solid colour."""
     bp = _best_parametric(mask, rgb_image)
     if bp is None:
-        return None                                  # no parametric fit (near-flat or too few pixels) -> solid colour
+        return None                                  # too flat / no travel -> solid colour
     model, mean_de, _median = bp
     if mean_de <= _PARAM_FALLBACK_TOL:
-        return model                                 # editable gradient
-    return _fit_stretch(mask, rgb_image)             # 2-D field -> raster
+        return model                                 # editable gradient (searched -> radial for a sphere)
+    return _fit_stretch(mask, rgb_image)             # 2-D field a gradient can't capture -> raster
 
 
 def _within_region_variation(group: list[Region], rgb_image: np.ndarray) -> float:
