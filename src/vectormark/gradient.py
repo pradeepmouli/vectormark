@@ -29,6 +29,11 @@ _THIN_BAND_TOL = 0.10   # max mean band-area fraction (group_area / total_fg / b
                         # >= _MIN_BANDS group to count as a finely-quantized continuous tone rather
                         # than a few chunky similar-coloured facets. Keeps faceted logos (Sketch)
                         # crisp instead of smearing them into a gradient that ΔE cannot tell apart.
+_SMOOTH_VAR_TOL = 0.005  # min mean within-region OKLab variation for a DOMINANT group to count
+                         # as a genuine continuous tone (vs distinct flat regions). A smooth
+                         # gradient's bands quantize varying pixels (var > 0); distinct flats are
+                         # internally uniform (var ~ 0). Without this the dominance branch would
+                         # gradient-fit a crisp two-tone logo whose tones merge under MERGE_TOL.
 _STRETCH_GRID_STEPS = (8, 16, 24, 32, 48)   # NxN downsample sizes for the stretch-fill;
                                             # the renderer bilinearly stretches the grid
                                             # back over the footprint. Last entry is the cap.
@@ -478,15 +483,31 @@ def _component_fill(mask: np.ndarray, rgb_image: np.ndarray) -> dict | None:
     return _fit_stretch(mask, rgb_image)             # 2-D field -> raster
 
 
-def _group_is_fillable(group: list[Region], total_fg: float) -> bool:
-    """A merged group is eligible for a gradient/raster fill if it is a dominant blob
-    (covers >= _BLOB_DOMINANCE of the foreground) OR a finely-quantized continuous tone
-    (>= _MIN_BANDS bands, each thin: mean band-area fraction < _THIN_BAND_TOL). The
-    thinness test keeps faceted logos (few chunky similar-coloured facets) crisp instead
-    of smearing them into a gradient that ΔE cannot distinguish from a real one."""
+def _within_region_variation(group: list[Region], rgb_image: np.ndarray) -> float:
+    """Mean OKLab deviation of each region's original pixels from that region's own flat
+    colour, averaged over the group. ~0 for genuinely flat regions; > 0 for the quantization
+    bands of a continuous tone."""
+    devs: list[float] = []
+    for r in group:
+        ys, xs = np.where(r.mask)
+        if len(xs) == 0:
+            continue
+        px = srgb_to_oklab(rgb_image[ys, xs].astype(float) / 255.0)
+        col = _hex_to_oklab([r.color_hex])[0]
+        devs.append(float(np.linalg.norm(px - col, axis=1).mean()))
+    return float(np.mean(devs)) if devs else 0.0
+
+
+def _group_is_fillable(group: list[Region], total_fg: float, rgb_image: np.ndarray) -> bool:
+    """A merged group is eligible for a gradient/raster fill if it is a dominant blob that is a
+    genuine continuous tone (>= _BLOB_DOMINANCE of the foreground AND within-region variation
+    >= _SMOOTH_VAR_TOL, so a dominant two-tone FLAT logo is not gradient-fit) OR a finely-
+    quantized continuous tone (>= _MIN_BANDS bands, each thin: mean band-area fraction <
+    _THIN_BAND_TOL). The thinness test keeps faceted logos crisp; the within-region-variation
+    test keeps crisp two-tone flats from being gradient-fit via the dominance path."""
     af = sum(r.area for r in group) / total_fg
-    return (af >= _BLOB_DOMINANCE
-            or (len(group) >= _MIN_BANDS and af / len(group) < _THIN_BAND_TOL))
+    dominant = af >= _BLOB_DOMINANCE and _within_region_variation(group, rgb_image) >= _SMOOTH_VAR_TOL
+    return dominant or (len(group) >= _MIN_BANDS and af / len(group) < _THIN_BAND_TOL)
 
 
 def detect_gradients(
@@ -509,7 +530,7 @@ def detect_gradients(
     shape = rgb_image.shape[:2]
     total_fg = float(sum(r.area for r in regions)) or 1.0
     for group in merge_components(regions):
-        if not _group_is_fillable(group, total_fg):
+        if not _group_is_fillable(group, total_fg, rgb_image):
             continue                                 # leave regions in `remaining` as-is
         mask = _union_mask(group, shape)
         model = _component_fill(mask, rgb_image)

@@ -426,9 +426,31 @@ def _regions_with_areas(areas):
 
 def test_group_is_fillable_dominant_thin_chunky():
     from vectormark.gradient import _group_is_fillable
-    # dominant single blob (90% of fg) -> fillable
-    assert _group_is_fillable(_regions_with_areas([900]), 1000.0) is True
+    # dominant single blob (90% of fg): needs within-region variation >= _SMOOTH_VAR_TOL.
+    # Build a smoothly-varying ramp over the 900-pixel region so it qualifies as a
+    # genuine continuous tone (not a flat dominant blob like a two-tone logo).
+    img_shape = (1, 1000, 3)
+    img_ramp = np.zeros(img_shape, np.uint8)
+    img_ramp[0, :900, :] = np.linspace(0, 200, 900, dtype=np.uint8)[:, None]
+    assert _group_is_fillable(_regions_with_areas([900]), 1000.0, img_ramp) is True
     # 10 thin bands, 80% of fg, each 8% -> avg 0.08 < 0.10 -> finely-quantized -> fillable
-    assert _group_is_fillable(_regions_with_areas([80] * 10), 1000.0) is True
+    # (thin-bands path does not use within-region variation; any image works)
+    img_flat = np.zeros(img_shape, np.uint8)
+    assert _group_is_fillable(_regions_with_areas([80] * 10), 1000.0, img_flat) is True
     # 4 chunky facets, 80% of fg, each 20% -> avg 0.20 >= 0.10 and not dominant -> NOT fillable
-    assert _group_is_fillable(_regions_with_areas([200] * 4), 1000.0) is False
+    assert _group_is_fillable(_regions_with_areas([200] * 4), 1000.0, img_flat) is False
+
+
+def test_group_is_fillable_rejects_dominant_two_tone_flats():
+    # two adjacent internally-flat regions that together dominate the foreground and whose
+    # colours are within MERGE_TOL must NOT be gradient-fillable (a crisp two-tone logo stays flat).
+    from vectormark.gradient import _group_is_fillable
+    from vectormark.types import Region
+    h, w = 120, 200
+    img = np.zeros((h, w, 3), np.uint8)
+    img[:, :w // 2] = (60, 90, 200)
+    img[:, w // 2:] = (92, 128, 202)                 # OKLab step ~0.11 (< MERGE_TOL, > _MIN_STOP_SPAN)
+    m1 = np.zeros((h, w), bool); m1[:, :w // 2] = True
+    m2 = np.zeros((h, w), bool); m2[:, w // 2:] = True
+    group = [Region(1, m1, "#3c5ac8"), Region(2, m2, "#5c80ca")]
+    assert _group_is_fillable(group, float(m1.sum() + m2.sum()), img) is False
