@@ -62,8 +62,10 @@ must stay separate flat components, and individual flat regions carry mild AA va
 that a per-region fit would over-eagerly turn into a spurious gradient. A group is
 eligible for a gradient/raster fill only if it is **either** a genuine merged field
 (`len(group) >= _MIN_BANDS`, i.e. ≥3 bands — a posterized continuous tone) **or** a
-single dominant blob (`group[0].area >= _BLOB_DOMINANCE * total_foreground_area` — the
-non-posterized smooth-gradient case, e.g. a smooth disc). Ineligible groups leave their
+dominant blob (`sum(region areas in group) >= _BLOB_DOMINANCE * total_foreground_area` —
+the non-posterized smooth-gradient case, e.g. a smooth disc that posterized into one or
+two bands; this restores the old smooth-blob path's union-area dominance, so a disc that
+splits into 2 bands still qualifies while two equal disconnected blobs, each ~0.5, do not). Ineligible groups leave their
 regions in `remaining` as-is (flat). These are the existing `_MIN_BANDS = 3` and
 `_BLOB_DOMINANCE = 0.85` constants — no new thresholds. Validated: under this gate
 Daikonic/two-blob/gdrive stay flat (parity), while Firefox/Instagram split into per-

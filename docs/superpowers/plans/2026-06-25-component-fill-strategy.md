@@ -338,7 +338,7 @@ def detect_gradients(
     total_fg = float(sum(r.area for r in regions)) or 1.0
     for group in merge_components(regions):
         eligible = (len(group) >= _MIN_BANDS
-                    or (len(group) == 1 and group[0].area >= _BLOB_DOMINANCE * total_fg))
+                    or sum(r.area for r in group) >= _BLOB_DOMINANCE * total_fg)
         if not eligible:
             continue                                 # leave regions in `remaining` as-is
         mask = _union_mask(group, shape)
