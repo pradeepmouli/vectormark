@@ -56,29 +56,6 @@ def _hstrip_regions(colors_hex, h=40, band_w=12):
     return regions
 
 
-def test_ramp_groups_groups_a_monotonic_ramp():
-    from vectormark.gradient import _ramp_groups
-    # 4 adjacent bands stepping blue->magenta (a clear OKLab ramp)
-    regions = _hstrip_regions(["#2563eb", "#7b3fc4", "#b13a9e", "#db2777"])
-    groups = _ramp_groups(regions)
-    assert len(groups) == 1 and len(groups[0]) == 4
-
-
-def test_ramp_groups_rejects_flat_and_too_few():
-    from vectormark.gradient import _ramp_groups
-    flat = _hstrip_regions(["#2563eb", "#2563eb", "#2563eb"])   # no variation
-    assert _ramp_groups(flat) == []
-    two = _hstrip_regions(["#2563eb", "#db2777"])               # only 2 -> not a gradient
-    assert _ramp_groups(two) == []
-
-
-def test_ramp_groups_rejects_nonramp_colors():
-    from vectormark.gradient import _ramp_groups
-    # adjacent but colors are not collinear in OKLab (zig-zag hues)
-    regions = _hstrip_regions(["#ff0000", "#00ff00", "#0000ff", "#00ff00"])
-    assert _ramp_groups(regions) == []
-
-
 def _linear_gradient_image(h, w, p0, p1, stops_rgb):
     """Render a ground-truth linear gradient (for fitting against)."""
     yy, xx = np.mgrid[:h, :w]
@@ -167,24 +144,26 @@ def test_detect_gradients_consumes_ramp_returns_remaining():
     from vectormark.gradient import detect_gradients
     from vectormark.types import Region
     h, w = 60, 160
-    # left half: a 4-band blue->magenta linear ramp; right: one flat green block
+    # left half: a 10-band blue->magenta linear ramp (8px each); right: one flat green block.
+    # 10 thin bands keep each band at ~5% of total_fg, below _THIN_BAND_TOL so the group
+    # passes the fillability gate (representative of real gradient quantization).
     img = _linear_gradient_image(h, 80, (0, 30), (79, 30),
                                  [(0.0, (37, 99, 235)), (1.0, (219, 39, 119))])
     full = np.zeros((h, w, 3), np.uint8)
     full[:, :80] = img
     full[:, 80:] = (20, 160, 60)
-    # build the quantized regions the way the pipeline would (4 ramp bands + 1 flat)
+    # build the quantized regions the way the pipeline would (10 ramp bands + 1 flat)
     regions = []
-    for i in range(4):
-        m = np.zeros((h, w), bool); m[:, i * 20:(i + 1) * 20] = True
+    for i in range(10):
+        m = np.zeros((h, w), bool); m[:, i * 8:(i + 1) * 8] = True
         regions.append(Region(label=i + 1, mask=m,
                               color_hex="#%02x%02x%02x" % tuple(np.median(full[m], axis=0).astype(int))))
     gm = np.zeros((h, w), bool); gm[:, 80:] = True
-    regions.append(Region(label=5, mask=gm, color_hex="#149c3c"))
+    regions.append(Region(label=11, mask=gm, color_hex="#149c3c"))
     fills, remaining = detect_gradients(regions, full)
     assert len(fills) == 1                               # the ramp became one gradient fill
     assert fills[0][1]["kind"] == "linear"
-    assert {r.label for r in remaining} == {5}           # the flat green block remains
+    assert {r.label for r in remaining} == {11}          # the flat green block remains
 
 
 def test_expand_footprint_bounds_to_contiguous_region():
@@ -205,16 +184,12 @@ def test_expand_footprint_bounds_to_contiguous_region():
     assert not expanded[:, 60:71].any()            # the black gap itself is never absorbed
 
 
-def test_detect_gradients_dissolves_unfittable_group_back_to_flats():
+def test_detect_gradients_zigzag_bands_stay_flat():
     from vectormark.color import oklab_to_srgb, srgb_to_oklab
-    from vectormark.gradient import _ramp_groups, detect_gradients
+    from vectormark.gradient import detect_gradients
     from vectormark.types import Region
-    # Six flat bands whose colours are collinear AND have distinct projections in OKLab,
-    # so _ramp_groups accepts them (group IS found). But the SPATIAL layout is a
-    # high-frequency zig-zag along the colour line (offsets 0, 1, .2, .8, .4, .6), so no
-    # single linear OR radial model reproduces the solid blocks within _GATE_DELTA_E
-    # (empirically dE_lin~0.117, dE_rad~0.098 >> 0.05) -> fit_gradient returns None and
-    # detect_gradients dissolves the bands back into `remaining` via its `continue`.
+    # Bands whose colours zig-zag along a line in OKLab so every spatially-adjacent pair is
+    # a LARGE colour step -> merge_components never joins them -> all stay flat in `remaining`.
     l0 = srgb_to_oklab(np.array([20, 50, 250])[None] / 255.0)[0]
     l1 = srgb_to_oklab(np.array([250, 20, 90])[None] / 255.0)[0]
 
@@ -222,7 +197,7 @@ def test_detect_gradients_dissolves_unfittable_group_back_to_flats():
         rgb = (np.clip(oklab_to_srgb((l0 + o * (l1 - l0))[None])[0], 0, 1) * 255).round().astype(int)
         return "#%02x%02x%02x" % tuple(rgb)
 
-    spatial = [0.0, 1.0, 0.2, 0.8, 0.4, 0.6]               # zig-zag, not monotone in space
+    spatial = [0.0, 1.0, 0.2, 0.8, 0.4, 0.6]
     h, band_w = 40, 18
     w = band_w * len(spatial)
     img = np.zeros((h, w, 3), np.uint8)
@@ -233,11 +208,9 @@ def test_detect_gradients_dissolves_unfittable_group_back_to_flats():
         m[:, i * band_w:(i + 1) * band_w] = True
         img[m] = (int(hx[1:3], 16), int(hx[3:5], 16), int(hx[5:7], 16))
         regions.append(Region(label=i + 1, mask=m, color_hex=hx))
-
-    assert len(_ramp_groups(regions)) == 1                 # the group IS found
     fills, remaining = detect_gradients(regions, img)
-    assert fills == []                                     # but no model fits -> rejected
-    assert {r.label for r in remaining} == {1, 2, 3, 4, 5, 6}  # all bands fall back to flats
+    assert fills == []
+    assert {r.label for r in remaining} == {1, 2, 3, 4, 5, 6}
 
 
 def test_dominant_blob_fraction():
@@ -319,3 +292,165 @@ def test_fit_gradient_accepts_traveling_gradient():
     img = img.round().astype(np.uint8)
     model = fit_gradient(np.ones((h, w), bool), img)
     assert model is not None and model["kind"] == "linear"          # real travel: still fires
+
+
+def test_best_parametric_searched_beats_heuristic_on_offcenter_radial():
+    # a radial gradient whose centre is in a corner (where the principal-axis-extreme
+    # heuristic lands poorly); the searched fit must find a low-mean-ΔE radial model.
+    from vectormark.gradient import _best_parametric
+    h, w = 80, 80
+    yy, xx = np.mgrid[:h, :w]
+    r = np.hypot(xx - 5, yy - 5) / np.hypot(w, h)        # centre near (5,5) corner
+    img = np.empty((h, w, 3))
+    for ch, (a, b) in enumerate(((230, 30), (120, 60), (40, 210))):
+        img[:, :, ch] = (a + r * (b - a))
+    img = img.round().astype(np.uint8)
+    out = _best_parametric(np.ones((h, w), bool), img)
+    assert out is not None
+    model, mean_de, median_de = out
+    assert model["kind"] in ("radial", "linear")
+    assert mean_de < 0.05 and median_de < 0.05          # a real gradient fits tightly
+
+
+def test_best_parametric_returns_none_for_flat():
+    from vectormark.gradient import _best_parametric
+    img = np.full((40, 40, 3), (50, 100, 150), np.uint8)
+    assert _best_parametric(np.ones((40, 40), bool), img) is None   # span below minimum
+
+
+def _diagonal_2d_field(h, w):
+    """A separable 2-D field (horizontal hue x vertical luminance) that NO single
+    linear/radial gradient fits: hue runs left->right, brightness runs top->bottom."""
+    yy, xx = np.mgrid[:h, :w]
+    tx = xx / (w - 1)
+    ty = yy / (h - 1)
+    img = np.empty((h, w, 3))
+    img[:, :, 0] = 30 + tx * 200                       # R climbs with x
+    img[:, :, 1] = 20 + ty * 200                       # G climbs with y
+    img[:, :, 2] = 200 - tx * 160                      # B falls with x
+    return img.round().astype(np.uint8)
+
+
+def test_fit_stretch_returns_raster_model_under_target():
+    from vectormark.gradient import _fit_stretch, _STRETCH_TARGET
+    img = _diagonal_2d_field(96, 96)
+    model = _fit_stretch(np.ones((96, 96), bool), img)
+    assert model is not None and model["kind"] == "raster"
+    g = model["geometry"]
+    assert (g["x"], g["y"], g["w"], g["h"]) == (0.0, 0.0, 96.0, 96.0)
+    assert isinstance(model["png_b64"], str) and len(model["png_b64"]) > 0
+
+
+def test_fit_stretch_none_for_degenerate_bbox():
+    from vectormark.gradient import _fit_stretch
+    m = np.zeros((40, 40), bool)
+    m[10, 5:9] = True                                  # 1px tall footprint
+    assert _fit_stretch(m, np.zeros((40, 40, 3), np.uint8)) is None
+
+
+def test_merge_components_merges_small_steps_into_one():
+    from vectormark.gradient import merge_components
+    # 4 adjacent bands stepping blue->magenta (small OKLab steps between neighbours)
+    regions = _hstrip_regions(["#2563eb", "#7b3fc4", "#b13a9e", "#db2777"])
+    groups = merge_components(regions, tol=0.15)
+    assert len(groups) == 1 and len(groups[0]) == 4
+
+
+def test_merge_components_splits_at_large_step():
+    from vectormark.gradient import merge_components
+    # a small-step pair, then a large jump to a distinct hue, then another small-step pair
+    regions = _hstrip_regions(["#2563eb", "#3a6ae0", "#11aa33", "#15b53a"])
+    groups = merge_components(regions, tol=0.15)
+    labels = sorted(sorted(r.label for r in g) for g in groups)
+    assert labels == [[1, 2], [3, 4]]                 # split at the blue->green jump
+
+
+def test_merge_components_singleton_when_isolated_by_large_steps():
+    from vectormark.gradient import merge_components
+    # zig-zag hues: every adjacency is a large step -> no merges -> all singletons
+    regions = _hstrip_regions(["#ff0000", "#00ff00", "#0000ff", "#ffff00"])
+    groups = merge_components(regions, tol=0.15)
+    assert sorted(len(g) for g in groups) == [1, 1, 1, 1]
+
+
+def test_merge_components_transitive_chain():
+    from vectormark.gradient import merge_components
+    # a long chain of small steps merges end-to-end even though the ends are far apart
+    regions = _hstrip_regions(["#2563eb", "#5a4fd0", "#8a44b4", "#b13a9e", "#db2777"])
+    groups = merge_components(regions, tol=0.15)
+    assert len(groups) == 1 and len(groups[0]) == 5
+
+
+def _2d_field(h, w):
+    """A smooth field that no single linear/radial gradient fits under the param bound:
+    horizontal hue ramp plus a contrasting corner."""
+    yy, xx = np.mgrid[:h, :w]
+    t = xx / (w - 1)
+    img = np.empty((h, w, 3))
+    for ch, (a, b) in enumerate(((30, 230), (60, 60), (220, 40))):
+        img[:, :, ch] = a + t * (b - a)
+    img[(xx >= w * 0.5) & (yy >= h * 0.5)] = (20, 230, 40)
+    return img.round().astype(np.uint8)
+
+
+def test_component_fill_strict_gradient_for_clean_ramp():
+    from vectormark.gradient import _component_fill
+    h, w = 60, 120
+    img = _linear_gradient_image(h, w, (0, 30), (119, 30),
+                                 [(0.0, (37, 99, 235)), (1.0, (219, 39, 119))])
+    model = _component_fill(np.ones((h, w), bool), img)
+    assert model is not None and model["kind"] in ("linear", "radial")
+
+
+def test_component_fill_none_for_flat():
+    from vectormark.gradient import _component_fill
+    img = np.full((40, 40, 3), (50, 100, 150), np.uint8)
+    assert _component_fill(np.ones((40, 40), bool), img) is None     # flat -> solid colour
+
+
+def test_component_fill_raster_for_2d_field():
+    from vectormark.gradient import _component_fill
+    img = _2d_field(96, 96)
+    model = _component_fill(np.ones((96, 96), bool), img)
+    assert model is not None and model["kind"] == "raster"
+
+
+def _regions_with_areas(areas):
+    from vectormark.types import Region
+    out = []
+    for i, a in enumerate(areas):
+        m = np.zeros((1, 1000), bool); m[0, :a] = True       # a True pixels -> Region.area == a
+        out.append(Region(label=i + 1, mask=m, color_hex="#000000"))
+    return out
+
+
+def test_group_is_fillable_dominant_thin_chunky():
+    from vectormark.gradient import _group_is_fillable
+    # dominant single blob (90% of fg): needs within-region variation >= _SMOOTH_VAR_TOL.
+    # Build a smoothly-varying ramp over the 900-pixel region so it qualifies as a
+    # genuine continuous tone (not a flat dominant blob like a two-tone logo).
+    img_shape = (1, 1000, 3)
+    img_ramp = np.zeros(img_shape, np.uint8)
+    img_ramp[0, :900, :] = np.linspace(0, 200, 900, dtype=np.uint8)[:, None]
+    assert _group_is_fillable(_regions_with_areas([900]), 1000.0, img_ramp) is True
+    # 10 thin bands, 80% of fg, each 8% -> avg 0.08 < 0.10 -> finely-quantized -> fillable
+    # (thin-bands path does not use within-region variation; any image works)
+    img_flat = np.zeros(img_shape, np.uint8)
+    assert _group_is_fillable(_regions_with_areas([80] * 10), 1000.0, img_flat) is True
+    # 4 chunky facets, 80% of fg, each 20% -> avg 0.20 >= 0.10 and not dominant -> NOT fillable
+    assert _group_is_fillable(_regions_with_areas([200] * 4), 1000.0, img_flat) is False
+
+
+def test_group_is_fillable_rejects_dominant_two_tone_flats():
+    # two adjacent internally-flat regions that together dominate the foreground and whose
+    # colours are within MERGE_TOL must NOT be gradient-fillable (a crisp two-tone logo stays flat).
+    from vectormark.gradient import _group_is_fillable
+    from vectormark.types import Region
+    h, w = 120, 200
+    img = np.zeros((h, w, 3), np.uint8)
+    img[:, :w // 2] = (60, 90, 200)
+    img[:, w // 2:] = (92, 128, 202)                 # OKLab step ~0.11 (< MERGE_TOL, > _MIN_STOP_SPAN)
+    m1 = np.zeros((h, w), bool); m1[:, :w // 2] = True
+    m2 = np.zeros((h, w), bool); m2[:, w // 2:] = True
+    group = [Region(1, m1, "#3c5ac8"), Region(2, m2, "#5c80ca")]
+    assert _group_is_fillable(group, float(m1.sum() + m2.sum()), img) is False

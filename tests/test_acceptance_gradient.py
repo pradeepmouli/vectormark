@@ -81,3 +81,35 @@ def test_linear_gradient_flatten_emits_userspace_gradient():
     assert "url(#g0)" in svg
     assert "<g transform=" not in svg          # flatten bakes geometry; no wrapping transform
     assert mean_delta_e(render_svg(svg, w, h), img) <= 0.06
+
+
+def test_pipeline_emits_pattern_for_injected_raster_model(monkeypatch):
+    import numpy as np
+    import vectormark.pipeline as P
+    from vectormark import Options, idealize
+    img = np.full((40, 40, 3), 255, np.uint8)
+    img[5:35, 5:35] = (200, 80, 60)                            # trivial one-region mark
+    raster = {"kind": "raster",
+              "geometry": {"x": 0.0, "y": 0.0, "w": 40.0, "h": 40.0},
+              "png_b64": "iVBORw0KGgo="}                        # any non-empty base64
+    monkeypatch.setattr(P, "detect_gradients",
+                        lambda comp, rgb: ([(comp[0], raster)], []))   # force a raster fill
+    svg = idealize(img, options=Options())
+    assert "<pattern" in svg and "<image" in svg and 'preserveAspectRatio="none"' in svg
+    assert 'href="data:image/png;base64,iVBORw0KGgo="' in svg
+
+
+def test_pipeline_raster_survives_flatten(monkeypatch):
+    import numpy as np
+    import vectormark.pipeline as P
+    from vectormark import Options, idealize
+    img = np.full((40, 40, 3), 255, np.uint8)
+    img[5:35, 5:35] = (200, 80, 60)                            # trivial one-region mark
+    raster = {"kind": "raster",
+              "geometry": {"x": 0.0, "y": 0.0, "w": 40.0, "h": 40.0},
+              "png_b64": "iVBORw0KGgo="}
+    monkeypatch.setattr(P, "detect_gradients",
+                        lambda comp, rgb: ([(comp[0], raster)], []))
+    svg = idealize(img, options=Options(flatten=True))
+    assert "<pattern" in svg and "<image" in svg               # raster survives --flatten
+    assert 'href="data:image/png;base64,iVBORw0KGgo="' in svg

@@ -14,7 +14,7 @@ from PIL import Image
 
 _renderer_warned = False   # warn at most once per process when resvg is unavailable
 
-from .candidate import Candidate, FlatFill, LinearGradientFill, RadialGradientFill
+from .candidate import Candidate, FlatFill, LinearGradientFill, RadialGradientFill, RasterFill
 from .color import mean_delta_e
 from .emit import (
     fill_rule_for, path_svg, render_svg_doc, resolve_fill, shape_to_path_d,
@@ -50,8 +50,10 @@ def parsimony_cost(cand: Candidate) -> float:
         fill = _FILL_FLAT
     elif isinstance(f, LinearGradientFill):
         fill = 4.0 + 2.0 * len(f.stops)
-    else:  # RadialGradientFill
+    elif isinstance(f, RadialGradientFill):
         fill = 3.0 + 2.0 * len(f.stops)
+    else:  # RasterFill: one embedded image, fixed cost
+        fill = 8.0
     return geom + fill
 
 

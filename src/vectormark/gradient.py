@@ -6,7 +6,11 @@ docs/superpowers/specs/2026-06-06-gradient-handling-design.md)."""
 
 from __future__ import annotations
 
+import base64
+import io
+
 import numpy as np
+from PIL import Image
 from scipy import ndimage as ndi
 
 from .color import srgb_to_oklab
@@ -14,7 +18,6 @@ from .occlusion import region_adjacency
 from .types import Region
 
 _MIN_BANDS = 3
-_RAMP_TOL = 0.06          # max OKLab distance of a band colour from the fitted ramp line
 _GATE_DELTA_E = 0.05      # mean OKLab ΔE bar: a fitted model must re-render within this to be accepted
 _MIN_STOP_SPAN = 0.02    # OKLab end-to-end travel a fit must show to count as a gradient;
                          # rejects flat regions whose antialiasing noise fits a near-constant
@@ -22,6 +25,26 @@ _MIN_STOP_SPAN = 0.02    # OKLab end-to-end travel a fit must show to count as a
 _BLOB_DOMINANCE = 0.85   # smooth-gradient path: min fraction of the foreground that must lie
                          # in a single connected component for the mark to be treated as one
                          # gradient blob (rejects multi-glyph wordmarks before any fit).
+_THIN_BAND_TOL = 0.10   # max mean band-area fraction (group_area / total_fg / band count) for a
+                        # >= _MIN_BANDS group to count as a finely-quantized continuous tone rather
+                        # than a few chunky similar-coloured facets. Keeps faceted logos (Sketch)
+                        # crisp instead of smearing them into a gradient that ΔE cannot tell apart.
+_SMOOTH_VAR_TOL = 0.005  # min mean within-region OKLab variation for a DOMINANT group to count
+                         # as a genuine continuous tone (vs distinct flat regions). A smooth
+                         # gradient's bands quantize varying pixels (var > 0); distinct flats are
+                         # internally uniform (var ~ 0). Without this the dominance branch would
+                         # gradient-fit a crisp two-tone logo whose tones merge under MERGE_TOL.
+_STRETCH_GRID_STEPS = (8, 16, 24, 32, 48)   # NxN downsample sizes for the stretch-fill;
+                                            # the renderer bilinearly stretches the grid
+                                            # back over the footprint. Last entry is the cap.
+_STRETCH_TARGET = 0.05                       # grow the grid until mean per-pixel ΔE <= this.
+_PARAM_FALLBACK_TOL = 0.07   # max mean per-pixel ΔE for a merged component to prefer an
+                             # editable parametric gradient over a raster stretch-fill.
+
+MERGE_TOL = 0.15   # max OKLab colour step between two spatially-adjacent regions for them
+                   # to merge into one vector component. Below this = one smooth field (gradient
+                   # bands, within-facet shading); above = a real boundary (facet edge, outline).
+                   # Corpus: within-field steps <=0.12, boundary steps >=0.27 -> clean gap.
 
 
 def _hex_to_oklab(hex_colors: list[str]) -> np.ndarray:
@@ -42,101 +65,38 @@ def _principal_axis(vectors: np.ndarray, *, eps: float) -> np.ndarray | None:
     return vt[0]
 
 
-def _ramp_fit(colors_oklab: np.ndarray) -> tuple[np.ndarray | None, float, np.ndarray | None]:
-    """Fit a line to OKLab colours via the principal axis. Returns
-    (unit_axis, max_residual, projections), or (None, inf, None) if degenerate/flat."""
-    axis = _principal_axis(colors_oklab, eps=1e-6)
-    if axis is None:
-        return None, np.inf, None
-    centred = colors_oklab - colors_oklab.mean(axis=0)
-    projs = centred @ axis
-    resid = float(np.linalg.norm(centred - np.outer(projs, axis), axis=1).max())
-    return axis, resid, projs
-
-
-def _is_ramp(colors_oklab: np.ndarray) -> bool:
-    """True if >=3 colours and they lie on a single line in OKLab within _RAMP_TOL."""
-    if len(colors_oklab) < _MIN_BANDS:
-        return False
-    _, resid, _ = _ramp_fit(colors_oklab)
-    return resid <= _RAMP_TOL
-
-
-def _is_strict_ramp(members: list[Region]) -> bool:
-    """True if the members form a ramp AND all band colours project to distinct positions
-    along the principal axis (monotone, no repeated colours)."""
-    oklab = _hex_to_oklab([m.color_hex for m in members])
-    axis, resid, projs = _ramp_fit(oklab)
-    if axis is None or resid > _RAMP_TOL:
-        return False
-    # round(8) is a float-noise-tolerant *exact*-duplicate guard (catches palindromes like
-    # green-blue-green). Near-duplicates that slip through are caught downstream by the
-    # fit_gradient consistency gate: a folded colour sequence won't re-render monotonically.
-    return len(np.unique(projs.round(8))) == len(members)
-
-
-def _trim_to_ramp(members: list[Region], adj: dict) -> list[Region] | None:
-    """Given a connected set of regions, trim boundary nodes that break the ramp property
-    until either the remainder forms a strict ramp (return it) or fewer than _MIN_BANDS remain.
-    Only degree<=1 (leaf) nodes are trimmable; a non-leaf intruder — e.g. a flat region
-    bordering multiple ramp bands — causes the whole component to be rejected (the
-    fit_gradient ΔE gate is the downstream backstop)."""
-    current = list(members)
-    while len(current) >= _MIN_BANDS:
-        if _is_strict_ramp(current):
-            return current
-        # Find leaf nodes (degree ≤ 1 within the current subset)
-        cur_labels = {m.label for m in current}
-        leaves = [m for m in current
-                  if len(adj[m.label] & cur_labels) <= 1]
-        if not leaves:
-            break                                           # no leaf to trim -> give up
-        # Remove the worst-fitting leaf: try each, keep the trial whose remaining set
-        # has the LOWEST ramp residual (so dropping the outlier leaf wins).
-        best_trim = None
-        best_score = np.inf
-        for leaf in leaves:
-            trial = [m for m in current if m.label != leaf.label]
-            if len(trial) < _MIN_BANDS:
-                continue
-            _, score, _ = _ramp_fit(_hex_to_oklab([m.color_hex for m in trial]))
-            if score < best_score:                          # strict `<` keeps the first
-                best_score, best_trim = score, trial        # minimal-score leaf; deterministic
-                                                            # given stable input `regions` order
-        if best_trim is None:
-            break
-        current = best_trim
-    return None
-
-
-def _ramp_groups(regions: list[Region]) -> list[list[Region]]:
-    """Connected groups of >=3 adjacent regions whose flat colours form an OKLab ramp.
-    If a connected component's full colour set doesn't form a ramp, boundary nodes are
-    trimmed iteratively until a ramp is found or the component is too small."""
+def merge_components(regions: list[Region], *, tol: float = MERGE_TOL) -> list[list[Region]]:
+    """Agglomeratively merge spatially-adjacent regions whose OKLab colour step is <= tol
+    into single components (union-find over region_adjacency). Merges adjacent regions whose
+    colours form a locally-smooth field (straight ramps and curved multi-hue arcs alike) into
+    one component: a region with no small-step neighbour is its own singleton group.
+    Deterministic (groups ordered by their minimum label)."""
     by_label = {r.label: r for r in regions}
     adj = region_adjacency(regions)
-    seen: set[int] = set()
-    groups: list[list[Region]] = []
+    colors = {r.label: _hex_to_oklab([r.color_hex])[0] for r in regions}
+    parent = {r.label: r.label for r in regions}
+
+    def find(x: int) -> int:
+        while parent[x] != x:
+            parent[x] = parent[parent[x]]
+            x = parent[x]
+        return x
+
+    def union(a: int, b: int) -> None:
+        ra, rb = find(a), find(b)
+        if ra != rb:
+            parent[max(ra, rb)] = min(ra, rb)        # attach to lower label (deterministic)
+
     for r in regions:
-        if r.label in seen:
-            continue
-        # grow the connected component
-        comp: list[int] = []
-        stack = [r.label]
-        while stack:
-            lab = stack.pop()
-            if lab in seen:
-                continue
-            seen.add(lab)
-            comp.append(lab)
-            stack.extend(sorted(adj[lab] - seen))
-        members = [by_label[l] for l in comp]
-        if len(members) < _MIN_BANDS:
-            continue
-        ramp = _trim_to_ramp(members, adj)
-        if ramp is not None:
-            groups.append(ramp)
-    return groups
+        for n in sorted(adj[r.label]):
+            if n > r.label and n in by_label:
+                if float(np.linalg.norm(colors[r.label] - colors[n])) <= tol:
+                    union(r.label, n)
+
+    groups: dict[int, list[Region]] = {}
+    for r in regions:
+        groups.setdefault(find(r.label), []).append(r)
+    return [g for _, g in sorted(groups.items(), key=lambda kv: min(m.label for m in kv[1]))]
 
 
 def _rgb_to_hex(rgb: np.ndarray) -> str:
@@ -207,6 +167,36 @@ def _radial_spread(pts: np.ndarray, oklab: np.ndarray, c: np.ndarray, nbins: int
     return total / count if count else np.inf
 
 
+def _radial_model_from_center(c: np.ndarray, pts: np.ndarray, rgb: np.ndarray) -> dict | None:
+    """Build a radial gradient model centred at `c` (xy) over `pts`/`rgb`."""
+    r = np.hypot(pts[:, 0] - c[0], pts[:, 1] - c[1])
+    rmax = float(r.max())
+    if rmax < 1e-6:
+        return None
+    stops = _reduce_stops(_fit_stops(r / rmax, rgb), max_delta_e=_GATE_DELTA_E)
+    return {"kind": "radial",
+            "geometry": {"cx": float(c[0]), "cy": float(c[1]), "r": rmax},
+            "stops": stops}
+
+
+def _linear_model_from_axis(u: np.ndarray, pts: np.ndarray, rgb: np.ndarray) -> dict | None:
+    """Build a linear gradient model along unit axis `u` over `pts`/`rgb`."""
+    proj = pts @ u
+    t0, t1 = float(proj.min()), float(proj.max())
+    if t1 - t0 < 1e-6:
+        return None
+    tn = (proj - t0) / (t1 - t0)
+    mean = pts.mean(axis=0)
+    mt = float(mean @ u)
+    p1 = mean + (t0 - mt) * u
+    p2 = mean + (t1 - mt) * u
+    stops = _reduce_stops(_fit_stops(tn, rgb), max_delta_e=_GATE_DELTA_E)
+    return {"kind": "linear",
+            "geometry": {"x1": float(p1[0]), "y1": float(p1[1]),
+                         "x2": float(p2[0]), "y2": float(p2[1])},
+            "stops": stops}
+
+
 def _fit_radial(pts: np.ndarray, oklab: np.ndarray, rgb: np.ndarray) -> dict | None:
     """Fit a radial gradient: estimate the centre as the centroid of the extreme along
     the principal colour axis (try both ends; keep the more concentric), then fit stops
@@ -228,15 +218,7 @@ def _fit_radial(pts: np.ndarray, oklab: np.ndarray, rgb: np.ndarray) -> dict | N
     if best_c is None:
         return None
     c = best_c
-    r = np.hypot(pts[:, 0] - c[0], pts[:, 1] - c[1])
-    rmax = float(r.max())
-    if rmax < 1e-6:
-        return None
-    tn = r / rmax
-    stops = _reduce_stops(_fit_stops(tn, rgb), max_delta_e=_GATE_DELTA_E)
-    return {"kind": "radial",
-            "geometry": {"cx": float(c[0]), "cy": float(c[1]), "r": rmax},
-            "stops": stops}
+    return _radial_model_from_center(c, pts, rgb)
 
 
 def _fit_linear(pts: np.ndarray, oklab: np.ndarray, rgb: np.ndarray) -> dict | None:
@@ -249,20 +231,91 @@ def _fit_linear(pts: np.ndarray, oklab: np.ndarray, rgb: np.ndarray) -> dict | N
         return None
     _, _, vt = np.linalg.svd(G, full_matrices=False)
     u = vt[0]                                           # unit axis direction
-    proj = pts @ u
-    t0, t1 = float(proj.min()), float(proj.max())
-    if t1 - t0 < 1e-6:
+    return _linear_model_from_axis(u, pts, rgb)
+
+
+def _model_mean_de_on_points(model: dict, pts: np.ndarray, rgb: np.ndarray) -> float:
+    """Mean OKLab ΔE of a model's rendered colour vs `rgb` at `pts` (footprint pixels)."""
+    rendered = _interp_stops_rgb(_model_t(model, pts), model["stops"])
+    return float(np.linalg.norm(srgb_to_oklab(rendered / 255.0) - srgb_to_oklab(rgb / 255.0),
+                                axis=1).mean())
+
+
+def _search_centers(centers, pts: np.ndarray, rgb: np.ndarray):
+    """Lowest-mean-ΔE radial model over candidate centres. Returns (de, model, cx, cy) or None."""
+    best = None
+    for cx, cy in centers:
+        model = _radial_model_from_center(np.array([cx, cy]), pts, rgb)
+        if model is None:
+            continue
+        de = _model_mean_de_on_points(model, pts, rgb)
+        if best is None or de < best[0]:
+            best = (de, model, cx, cy)
+    return best
+
+
+def _fit_radial_searched(pts: np.ndarray, oklab: np.ndarray, rgb: np.ndarray) -> dict | None:
+    """Radial fit via a deterministic centre search (coarse grid over the bbox extended
+    +/-50%, then a finer local grid around the best). Beats the principal-axis-extreme
+    heuristic for corner-anchored / clipped fields. `oklab` is unused (kept for a uniform
+    fit signature)."""
+    xs, ys = pts[:, 0], pts[:, 1]
+    x0, x1 = float(xs.min()), float(xs.max())
+    y0, y1 = float(ys.min()), float(ys.max())
+    gx = np.linspace(x0 - (x1 - x0) * 0.5, x1 + (x1 - x0) * 0.5, 13)
+    gy = np.linspace(y0 - (y1 - y0) * 0.5, y1 + (y1 - y0) * 0.5, 13)
+    coarse = _search_centers([(cx, cy) for cx in gx for cy in gy], pts, rgb)
+    if coarse is None:
         return None
-    tn = (proj - t0) / (t1 - t0)
-    mean = pts.mean(axis=0)
-    mt = float(mean @ u)
-    p1 = mean + (t0 - mt) * u
-    p2 = mean + (t1 - mt) * u
-    stops = _reduce_stops(_fit_stops(tn, rgb), max_delta_e=_GATE_DELTA_E)
-    return {"kind": "linear",
-            "geometry": {"x1": float(p1[0]), "y1": float(p1[1]),
-                         "x2": float(p2[0]), "y2": float(p2[1])},
-            "stops": stops}
+    _, _, bcx, bcy = coarse
+    sx, sy = gx[1] - gx[0], gy[1] - gy[0]               # one coarse step
+    rx = np.linspace(bcx - sx, bcx + sx, 7)
+    ry = np.linspace(bcy - sy, bcy + sy, 7)
+    fine = _search_centers([(cx, cy) for cx in rx for cy in ry], pts, rgb)
+    return (fine or coarse)[1]
+
+
+def _fit_linear_searched(pts: np.ndarray, oklab: np.ndarray, rgb: np.ndarray) -> dict | None:
+    """Linear fit via an axis-angle search (5° coarse steps, then a finer local sweep).
+    `oklab` is unused (kept for a uniform fit signature)."""
+    def at(ang):
+        m = _linear_model_from_axis(np.array([np.cos(ang), np.sin(ang)]), pts, rgb)
+        return None if m is None else (_model_mean_de_on_points(m, pts, rgb), m, ang)
+    best = None
+    for ang in np.linspace(0.0, np.pi, 36, endpoint=False):
+        r = at(ang)
+        if r is not None and (best is None or r[0] < best[0]):
+            best = r
+    if best is None:
+        return None
+    step = np.pi / 36
+    for ang in np.linspace(best[2] - step, best[2] + step, 7):
+        r = at(ang)
+        if r is not None and r[0] < best[0]:
+            best = r
+    return best[1]
+
+
+def _best_parametric(mask: np.ndarray, rgb_image: np.ndarray) -> tuple[dict, float, float] | None:
+    """Best searched parametric (linear or radial) model for the footprint, with its
+    mean and median per-pixel ΔE. No acceptance cut (the ladder applies the gates).
+    None if neither model travels at least _MIN_STOP_SPAN."""
+    ys, xs = np.where(mask)
+    if len(xs) < 3 * _MIN_BANDS:
+        return None
+    pts = np.column_stack([xs, ys]).astype(float)
+    rgb = rgb_image[ys, xs].astype(float)
+    oklab = srgb_to_oklab(rgb / 255.0)
+    best = None
+    for fit in (_fit_linear_searched, _fit_radial_searched):
+        model = fit(pts, oklab, rgb)
+        if model is None or _stop_span(model["stops"]) < _MIN_STOP_SPAN:
+            continue
+        pde = _per_pixel_delta_e(model, ys, xs, rgb_image)
+        mean_de, median_de = float(pde.mean()), float(np.median(pde))
+        if best is None or mean_de < best[1]:
+            best = (model, mean_de, median_de)
+    return best
 
 
 def _interp_stops_rgb(t: np.ndarray, stops: list[tuple[float, str]]) -> np.ndarray:
@@ -357,6 +410,43 @@ def _dominant_blob_fraction(mask: np.ndarray) -> float:
     return float(sizes.max()) / total
 
 
+def _png_b64(small: np.ndarray) -> str:
+    """Bare base64 PNG (no data-URI prefix) of an HxWx3 uint8 array."""
+    buf = io.BytesIO()
+    Image.fromarray(small.astype(np.uint8)).save(buf, format="PNG")
+    return base64.b64encode(buf.getvalue()).decode("ascii")
+
+
+def _fit_stretch(mask: np.ndarray, rgb_image: np.ndarray) -> dict | None:
+    """Downsample the footprint bbox to NxN and let the renderer stretch it back
+    (bilinear) to reproduce a smooth 2-D field one gradient can't. Grows N over
+    _STRETCH_GRID_STEPS until the upsampled reconstruction's mean per-pixel ΔE over
+    the footprint is <= _STRETCH_TARGET, else returns the lowest-ΔE (most faithful)
+    grid found across _STRETCH_GRID_STEPS. None if the bbox is degenerate (<2px a
+    side)."""
+    ys, xs = np.where(mask)
+    y0, y1 = int(ys.min()), int(ys.max()) + 1
+    x0, x1 = int(xs.min()), int(xs.max()) + 1
+    bw, bh = x1 - x0, y1 - y0
+    if bw < 2 or bh < 2:
+        return None
+    crop = rgb_image[y0:y1, x0:x1]
+    ry, rx = ys - y0, xs - x0
+    truth = srgb_to_oklab(rgb_image[ys, xs].astype(float) / 255.0)
+    geometry = {"x": float(x0), "y": float(y0), "w": float(bw), "h": float(bh)}
+    best = None
+    for n in _STRETCH_GRID_STEPS:
+        small = np.asarray(Image.fromarray(crop).resize((n, n), Image.BILINEAR))
+        up = np.asarray(Image.fromarray(small).resize((bw, bh), Image.BILINEAR)).astype(float)
+        recon = up[ry, rx]
+        de = float(np.linalg.norm(srgb_to_oklab(recon / 255.0) - truth, axis=1).mean())
+        if best is None or de < best[0]:
+            best = (de, small)
+        if de <= _STRETCH_TARGET:
+            break
+    return {"kind": "raster", "geometry": geometry, "png_b64": _png_b64(best[1])}
+
+
 def _union_mask(regions: list[Region], shape: tuple[int, int]) -> np.ndarray:
     """Boolean OR of the masks of `regions`, as an all-False array of `shape` if empty."""
     m = np.zeros(shape, bool)
@@ -365,38 +455,91 @@ def _union_mask(regions: list[Region], shape: tuple[int, int]) -> np.ndarray:
     return m
 
 
+def _field_spread(mask: np.ndarray, rgb_image: np.ndarray) -> float:
+    """Max OKLab distance of the original pixels under `mask` from their mean colour.
+    A cheap flat-vs-varying gate (~0 for a flat region)."""
+    ys, xs = np.where(mask)
+    if len(xs) == 0:
+        return 0.0
+    okl = srgb_to_oklab(rgb_image[ys, xs].astype(float) / 255.0)
+    return float(np.linalg.norm(okl - okl.mean(axis=0), axis=1).max())
+
+
+def _component_fill(mask: np.ndarray, rgb_image: np.ndarray) -> dict | None:
+    """Pick a fill model for one component's footprint: strict parametric gradient, else a
+    searched parametric gradient (mean ΔE <= _PARAM_FALLBACK_TOL), else a raster stretch-fill.
+    None when the field is too flat to be anything but a solid colour (caller renders flat)."""
+    strict = fit_gradient(mask, rgb_image)
+    if strict is not None:
+        return strict
+    if _field_spread(mask, rgb_image) < _MIN_STOP_SPAN:
+        return None                                  # flat -> solid colour
+    bp = _best_parametric(mask, rgb_image)
+    if bp is None:
+        return None                                  # no parametric fit (near-flat or too few pixels) -> solid colour
+    model, mean_de, _median = bp
+    if mean_de <= _PARAM_FALLBACK_TOL:
+        return model                                 # editable gradient
+    return _fit_stretch(mask, rgb_image)             # 2-D field -> raster
+
+
+def _within_region_variation(group: list[Region], rgb_image: np.ndarray) -> float:
+    """Mean OKLab deviation of each region's original pixels from that region's own flat
+    colour, averaged over the group. ~0 for genuinely flat regions; > 0 for the quantization
+    bands of a continuous tone."""
+    devs: list[float] = []
+    for r in group:
+        ys, xs = np.where(r.mask)
+        if len(xs) == 0:
+            continue
+        px = srgb_to_oklab(rgb_image[ys, xs].astype(float) / 255.0)
+        col = _hex_to_oklab([r.color_hex])[0]
+        devs.append(float(np.linalg.norm(px - col, axis=1).mean()))
+    return float(np.mean(devs)) if devs else 0.0
+
+
+def _group_is_fillable(group: list[Region], total_fg: float, rgb_image: np.ndarray) -> bool:
+    """A merged group is eligible for a gradient/raster fill if it is a dominant blob that is a
+    genuine continuous tone (>= _BLOB_DOMINANCE of the foreground AND within-region variation
+    >= _SMOOTH_VAR_TOL, so a dominant two-tone FLAT logo is not gradient-fit) OR a finely-
+    quantized continuous tone (>= _MIN_BANDS bands, each thin: mean band-area fraction <
+    _THIN_BAND_TOL). The thinness test keeps faceted logos crisp; the within-region-variation
+    test keeps crisp two-tone flats from being gradient-fit via the dominance path."""
+    af = sum(r.area for r in group) / total_fg
+    dominant = af >= _BLOB_DOMINANCE and _within_region_variation(group, rgb_image) >= _SMOOTH_VAR_TOL
+    return dominant or (len(group) >= _MIN_BANDS and af / len(group) < _THIN_BAND_TOL)
+
+
 def detect_gradients(
     regions: list[Region], rgb_image: np.ndarray
 ) -> tuple[list[tuple[Region, dict]], list[Region]]:
-    """Group ramp bands, fit+gate a gradient per footprint, and return
-    (accepted [(footprint_region, model)], remaining flat regions)."""
+    """Merge spatially-adjacent regions into smooth-field components (colour-step merge),
+    then choose a fill per *eligible* component. Returns (fills, remaining).
+
+    Fill-eligibility gate (restores the two guards the colour-step merge alone drops, so
+    adjacent distinct-but-similar flat shapes and mildly-noisy single flats are NOT
+    over-fit): a group qualifies only if it is a dominant blob (area >= _BLOB_DOMINANCE of
+    the foreground) OR a finely-quantized ramp (>= _MIN_BANDS bands, each averaging <
+    _THIN_BAND_TOL of the total foreground area — chunky similar-coloured facets like Sketch
+    are rejected). An eligible component that fits a gradient/raster becomes a (footprint_region, model)
+    fill (gradient footprints grow into model-matching background via _expand_footprint).
+    Every other region — ineligible groups, eligible-but-unfittable (near-flat) groups,
+    and unmerged singletons — stays in `remaining` as its original region(s)."""
     fills: list[tuple[Region, dict]] = []
     consumed: set[int] = set()
-    for group in _ramp_groups(regions):
-        mask = _union_mask(group, rgb_image.shape[:2])
-        model = fit_gradient(mask, rgb_image)
+    shape = rgb_image.shape[:2]
+    total_fg = float(sum(r.area for r in regions)) or 1.0
+    for group in merge_components(regions):
+        if not _group_is_fillable(group, total_fg, rgb_image):
+            continue                                 # leave regions in `remaining` as-is
+        mask = _union_mask(group, shape)
+        model = _component_fill(mask, rgb_image)
         if model is None:
-            continue                                   # dissolve back into flat bands
-        mask = _expand_footprint(model, mask, rgb_image)
+            continue                                 # not a field -> regions stay flat
+        if model["kind"] in ("linear", "radial"):
+            mask = _expand_footprint(model, mask, rgb_image)
         rep = max(group, key=lambda r: r.area)
-        footprint = Region(label=rep.label, mask=mask, color_hex=rep.color_hex)
-        fills.append((footprint, model))
+        fills.append((Region(label=rep.label, mask=mask, color_hex=rep.color_hex), model))
         consumed.update(m.label for m in group)
-    # smooth-gradient path: band-grouping only fires on posterized ramps (≥3 adjacent bands).
-    # A smooth ramp collapses to ~1 region at palette extraction, so test the leftover mark as
-    # a single gradient blob fit to the ORIGINAL pixels (see the design spec). Guard with a
-    # dominant-connected-blob check so multi-glyph wordmarks can't be fit as one gradient.
-    # NB: the smooth footprint mask and a band footprint mask are not guaranteed disjoint
-    # (an _expand_footprint-grown band mask can overlap leftover pixels). z-order painting
-    # makes that benign, so a future change must not assume the footprints are disjoint.
-    leftover = [r for r in regions if r.label not in consumed]
-    if leftover:
-        sil = _union_mask(leftover, rgb_image.shape[:2])
-        if _dominant_blob_fraction(sil) >= _BLOB_DOMINANCE:
-            model = fit_gradient(sil, rgb_image)
-            if model is not None:
-                rep = max(leftover, key=lambda r: r.area)
-                fills.append((Region(label=rep.label, mask=sil, color_hex=rep.color_hex), model))
-                consumed.update(r.label for r in leftover)
     remaining = [r for r in regions if r.label not in consumed]
     return fills, remaining

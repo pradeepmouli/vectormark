@@ -29,7 +29,17 @@ class RadialGradientFill:
     stops: list
 
 
-Fill = FlatFill | LinearGradientFill | RadialGradientFill
+@dataclass
+class RasterFill:
+    """A bilinear-stretched raster fill: a small NxN PNG stretched across
+    `geometry` = {x, y, w, h} (the footprint bbox) and clipped by the path it
+    fills. For smooth 2-D colour fields no parametric gradient expresses.
+    `png_b64` is a bare base64 PNG (no data-URI prefix)."""
+    geometry: dict
+    png_b64: str
+
+
+Fill = FlatFill | LinearGradientFill | RadialGradientFill | RasterFill
 
 
 @dataclass

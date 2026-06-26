@@ -5,7 +5,7 @@ from __future__ import annotations
 import math
 import re
 
-from .candidate import FlatFill, LinearGradientFill, RadialGradientFill
+from .candidate import FlatFill, LinearGradientFill, RadialGradientFill, RasterFill
 from .fit import Shape, _fmt
 from .types import Axis
 
@@ -178,6 +178,24 @@ def radial_gradient_def(elem_id: str, cx: float, cy: float, r: float,
             f'{_gradient_stops(stops)}</radialGradient>')
 
 
+def pattern_image_def(elem_id: str, x: float, y: float, w: float, h: float,
+                      png_b64: str, transform: tuple | None = None) -> str:
+    """A <pattern> paint server holding one stretched <image> spanning the bbox
+    (preserveAspectRatio='none' => bilinear stretch). userSpaceOnUse + absolute
+    coords so it survives --flatten; `transform` (an SVG affine a,b,c,d,e,f) is
+    emitted as patternTransform to map the pattern frame to a baked frame."""
+    pt = ""
+    if transform is not None:
+        a, b, c, d, e, f = transform
+        pt = (f' patternTransform="matrix({_fmt(a)} {_fmt(b)} {_fmt(c)} '
+              f'{_fmt(d)} {_fmt(e)} {_fmt(f)})"')
+    return (f'<pattern id="{elem_id}" patternUnits="userSpaceOnUse"{pt} '
+            f'x="{_fmt(x)}" y="{_fmt(y)}" width="{_fmt(w)}" height="{_fmt(h)}">'
+            f'<image href="data:image/png;base64,{png_b64}" '
+            f'x="{_fmt(x)}" y="{_fmt(y)}" width="{_fmt(w)}" height="{_fmt(h)}" '
+            f'preserveAspectRatio="none"/></pattern>')
+
+
 def fill_rule_for(geometry: Shape) -> str | None:
     """SVG fill-rule for a geometry: an explicit params['fill_rule'] if present, else
     'evenodd' for an annulus (its two same-winding circles only read as a ring under
@@ -185,16 +203,20 @@ def fill_rule_for(geometry: Shape) -> str | None:
     return geometry.params.get("fill_rule", "evenodd" if geometry.kind == "annulus" else None)
 
 
-def resolve_fill(fill, defs: list[str], *, geometry: dict | None = None) -> str:
-    """Resolve a Fill to an SVG fill attribute. FlatFill -> its hex. Gradient fill ->
-    register a <def> (id g{len(defs)}, minted BEFORE the append) and return url(#id).
-    `geometry` overrides the gradient's coords (used when the caller baked them to
-    another frame); None uses fill.geometry."""
+def resolve_fill(fill, defs: list[str], *, geometry: dict | None = None,
+                 transform: tuple | None = None) -> str:
+    """Resolve a Fill to an SVG fill attribute. FlatFill -> its hex. Gradient/raster
+    fill -> register a <def> (id g{len(defs)}, minted BEFORE the append) and return
+    url(#id). `geometry` overrides the gradient/raster coords (used when the caller
+    baked them); `transform` is the raster patternTransform (gradients ignore it)."""
     if isinstance(fill, FlatFill):
         return fill.hex
-    g = geometry if geometry is not None else fill.geometry
     gid = f"g{len(defs)}"
-    if isinstance(fill, LinearGradientFill):
+    g = geometry if geometry is not None else fill.geometry
+    if isinstance(fill, RasterFill):
+        defs.append(pattern_image_def(gid, g["x"], g["y"], g["w"], g["h"],
+                                      fill.png_b64, transform))
+    elif isinstance(fill, LinearGradientFill):
         defs.append(linear_gradient_def(gid, g["x1"], g["y1"], g["x2"], g["y2"], fill.stops))
     else:
         defs.append(radial_gradient_def(gid, g["cx"], g["cy"], g["r"], fill.stops))
