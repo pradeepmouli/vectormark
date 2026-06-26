@@ -264,7 +264,7 @@ Co-Authored-By: Claude Sonnet 4.6 <noreply@anthropic.com>"
 
 **Interfaces:**
 - Consumes: `merge_components` (Task 1), `_component_fill` (Task 2), `_union_mask`, `_expand_footprint`, `Region`.
-- Produces: `detect_gradients(regions, rgb_image) -> tuple[list[tuple[Region, dict]], list[Region]]` — unchanged signature. Merged-field components become `(footprint_region, model)` fills; a merged-but-flat group returns as ONE merged `Region` in `remaining`; unmerged singletons stay in `remaining` as their own regions.
+- Produces: `detect_gradients(regions, rgb_image) -> tuple[list[tuple[Region, dict]], list[Region]]` — unchanged signature. An *eligible* component (≥`_MIN_BANDS` merged, or a dominant single blob) that fits becomes a `(footprint_region, model)` fill; every other region — ineligible groups, eligible-but-unfittable groups, unmerged singletons — stays in `remaining` as its original region(s). Reuses existing `_MIN_BANDS` / `_BLOB_DOMINANCE` constants.
 
 - [ ] **Step 1: Update the existing tests to the new behavior (write them first, expect failure)**
 
@@ -322,33 +322,39 @@ def detect_gradients(
     regions: list[Region], rgb_image: np.ndarray
 ) -> tuple[list[tuple[Region, dict]], list[Region]]:
     """Merge spatially-adjacent regions into smooth-field components (colour-step merge),
-    then choose a fill per component. Returns (fills, remaining):
-    - a component that fits a gradient/raster -> (footprint_region, model) in `fills`
-      (gradient footprints grow into model-matching background via _expand_footprint);
-    - a MERGED group with no fill (near-flat) -> one merged Region in `remaining`;
-    - an unmerged singleton with no fill -> its own region stays in `remaining`.
-    """
+    then choose a fill per *eligible* component. Returns (fills, remaining).
+
+    Fill-eligibility gate (restores the two guards the colour-step merge alone drops, so
+    adjacent distinct-but-similar flat shapes and mildly-noisy single flats are NOT
+    over-fit): a group qualifies only if it is a genuine merged field (len(group) >=
+    _MIN_BANDS) OR a single dominant blob (its area >= _BLOB_DOMINANCE * total foreground).
+    An eligible component that fits a gradient/raster becomes a (footprint_region, model)
+    fill (gradient footprints grow into model-matching background via _expand_footprint).
+    Every other region — ineligible groups, eligible-but-unfittable (near-flat) groups,
+    and unmerged singletons — stays in `remaining` as its original region(s)."""
     fills: list[tuple[Region, dict]] = []
     consumed: set[int] = set()
-    merged_flat: list[Region] = []
     shape = rgb_image.shape[:2]
+    total_fg = float(sum(r.area for r in regions)) or 1.0
     for group in merge_components(regions):
+        eligible = (len(group) >= _MIN_BANDS
+                    or (len(group) == 1 and group[0].area >= _BLOB_DOMINANCE * total_fg))
+        if not eligible:
+            continue                                 # leave regions in `remaining` as-is
         mask = _union_mask(group, shape)
         model = _component_fill(mask, rgb_image)
         if model is None:
-            if len(group) > 1:                       # merged-but-flat -> one merged region
-                rep = max(group, key=lambda r: r.area)
-                merged_flat.append(Region(label=rep.label, mask=mask, color_hex=rep.color_hex))
-                consumed.update(m.label for m in group)
-            continue                                 # singleton stays in `remaining` as-is
+            continue                                 # not a field -> regions stay flat
         if model["kind"] in ("linear", "radial"):
             mask = _expand_footprint(model, mask, rgb_image)
         rep = max(group, key=lambda r: r.area)
         fills.append((Region(label=rep.label, mask=mask, color_hex=rep.color_hex), model))
         consumed.update(m.label for m in group)
-    remaining = [r for r in regions if r.label not in consumed] + merged_flat
+    remaining = [r for r in regions if r.label not in consumed]
     return fills, remaining
 ```
+
+`_MIN_BANDS` and `_BLOB_DOMINANCE` are existing module constants (no new thresholds). `Region.area` is the existing region-area attribute.
 
 - [ ] **Step 4: Remove the now-dead ramp-grouping helpers**
 
@@ -391,7 +397,7 @@ For each source logo (apple_music, appstore, asana, burger_king, dropbox, firefo
 
 - [ ] **Step 2: Assert the anchor outcomes**
 
-Confirm: firefox and instagram now emit a gradient/raster field component AND keep their sharp features as separate crisp vector elements (element count is small, not the old 29/37 shards, and the white outline / sharp structure is NOT blurred); gdrive stays crisp facets (each facet its own component — flat or a small gradient — with sharp edges, NO blur); icloud/telegram still emit their parametric gradient; every flat mark (apple_music, dropbox, mastercard, microsoft, photoshop, pinterest, sketch, slack, vimeo, visa, appstore, asana, burger_king) gains NO spurious fill.
+Confirm: firefox and instagram emit per-component **parametric gradient** fields (validated: firefox → linear + radial, instagram → radial + linear — NOT raster, so no blur) AND keep their sharp features (the white camera outline) as separate crisp vector elements; element count is small, not the old 29/37 shards; gdrive stays crisp facets (each facet its own component, flat or a small gradient, sharp edges, NO blur); icloud/telegram still emit their gradient; every flat mark (apple_music, dropbox, mastercard, microsoft, photoshop, pinterest, sketch, slack, vimeo, visa, appstore, asana, burger_king) gains NO spurious fill. (Raster remains the safety net in `_component_fill` for fields that don't fit a parametric gradient; it is fine if no corpus mark currently triggers it.)
 
 - [ ] **Step 3: Visual spot-check**
 

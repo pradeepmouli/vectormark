@@ -55,7 +55,23 @@ What this yields per mark:
 
 ### 2. Per-component fill strategy
 
-Each merged component picks its fill independently, reusing the primitives already
+**Fill-eligibility gate (restores the two guards the colour-step merge alone drops).**
+Colour-step similarity is necessary but not sufficient to fit a field: real logos have
+adjacent *distinct* design elements of similar colour (Daikonic's navy band shapes) that
+must stay separate flat components, and individual flat regions carry mild AA variation
+that a per-region fit would over-eagerly turn into a spurious gradient. A group is
+eligible for a gradient/raster fill only if it is **either** a genuine merged field
+(`len(group) >= _MIN_BANDS`, i.e. ≥3 bands — a posterized continuous tone) **or** a
+single dominant blob (`group[0].area >= _BLOB_DOMINANCE * total_foreground_area` — the
+non-posterized smooth-gradient case, e.g. a smooth disc). Ineligible groups leave their
+regions in `remaining` as-is (flat). These are the existing `_MIN_BANDS = 3` and
+`_BLOB_DOMINANCE = 0.85` constants — no new thresholds. Validated: under this gate
+Daikonic/two-blob/gdrive stay flat (parity), while Firefox/Instagram split into per-
+component fields that each fit a true parametric gradient under `_PARAM_FALLBACK_TOL`
+(editable, crisp — raster is not even needed for them; it remains the safety net for
+genuinely unfittable fields).
+
+Each eligible component picks its fill independently, reusing the primitives already
 built and reviewed (`fit_gradient`, `_best_parametric`, `_fit_stretch`, `RasterFill`):
 
 1. **single unmerged region** → `flat` (its region colour) — the existing path.
@@ -64,10 +80,14 @@ built and reviewed (`fit_gradient`, `_best_parametric`, `_fit_stretch`, `RasterF
    b. else searched `_best_parametric`, mean ΔE ≤ `_PARAM_FALLBACK_TOL` → **gradient**.
    c. else, if the field travels at least `_MIN_STOP_SPAN` → **raster** (`_fit_stretch`,
       its own tight bbox).
-   d. else (degenerate, near-flat) → **flat**: return the group as a *single merged
-      `Region`* (union mask, representative colour) in `remaining`, so the existing
-      flat/symmetry path renders it as one component. A degenerate merged group is
-      never un-merged back into its constituent regions.
+   d. else (degenerate, near-flat) → **flat**: the group is not consumed; its regions
+      stay in `remaining` as their original regions (they share a colour, so the flat
+      path renders them identically — no structural change, preserving parity).
+
+Regions leave `remaining` only when consumed into a gradient/raster fill; everything
+else (ineligible groups, degenerate-flat groups, unmerged singletons) stays as its
+original regions for the flat/symmetry path. This keeps the rework structurally
+minimal and is why the Daikonic symmetry/structure tests pass unchanged.
 
 No `_SMOOTH_BAND_MIN` / `_SMOOTH_MEDIAN_TOL` / `_BLOB_DOMINANCE` guards: the merge
 already decided "this is one smooth field," so the fill step only chooses the
