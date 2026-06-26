@@ -79,4 +79,4 @@ def test_daikonic_corner_radius_is_measured_tight_and_padded():
     rounded = [r for r in radii if r > 0]
     assert rounded, "no rounded regions found in daikonic icon"
     median_r = sorted(rounded)[len(rounded) // 2]
-    assert _CORNER_DEANTIALIAS_PAD <= median_r <= 13.0  # tight: per-region ~10.8 (not the old heuristic ~12.8)
+    assert _CORNER_DEANTIALIAS_PAD <= median_r <= 12.0  # tight: per-region ~10.8 (not the old heuristic ~12.8)
