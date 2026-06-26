@@ -1,7 +1,8 @@
 """Smooth-gradient reconstruction end-to-end through idealize. A smooth (non-posterized)
 gradient mark becomes one shape + one <linearGradient>/<radialGradient>; flats and multi-blob
-marks stay flat. Each positive test first asserts band-grouping finds nothing, so the gradient
-is attributable to the smooth-silhouette path, not the band-grouping path."""
+marks stay flat. Each positive test asserts that the end-to-end SVG contains exactly one
+<linearGradient>/<radialGradient> and that the render ΔE is within tolerance, via the
+colour-step merge + per-component fill."""
 
 import numpy as np
 
@@ -33,8 +34,7 @@ def _smooth_radial_disc(h, w, c, r, c0, c1, bg=(255, 255, 255)):
 
 def test_smooth_linear_rect_via_smooth_path():
     h, w = 160, 240
-    # Low-contrast so the 16-colour palette collapses to ≤2 bands (no band-grouping).
-    # Original (90,150,230)→(60,110,205) posterised into 3 bands and triggered _ramp_groups.
+    # Low-contrast so the gradient merges into one component and fits a single linear gradient.
     img = _smooth_linear_rect(h, w, 40, 200, (85, 145, 225), (70, 125, 210))
     svg = idealize(img, options=Options())
     assert svg.count("<linearGradient") == 1            # ...so the smooth path produced it
@@ -43,8 +43,7 @@ def test_smooth_linear_rect_via_smooth_path():
 
 def test_smooth_radial_disc_via_smooth_path():
     h, w = 200, 200
-    # Low-contrast so the palette collapses to ≤2 bands (no band-grouping).
-    # Original (120,190,245)→(70,120,210) posterised into 4 bands and triggered _ramp_groups.
+    # Low-contrast so the gradient merges into one component and fits a single radial gradient.
     img = _smooth_radial_disc(h, w, (100, 100), 85, (115, 185, 240), (85, 140, 215))
     svg = idealize(img, options=Options())
     assert svg.count("<radialGradient") == 1

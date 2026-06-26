@@ -79,6 +79,7 @@ def test_pattern_image_def_emits_stretched_image():
     assert 'width="100" height="80"' in s
     assert 'href="data:image/png;base64,AAAA"' in s
     assert 'preserveAspectRatio="none"' in s
+    assert 'x="10" y="20"' in s
     assert "patternTransform" not in s            # no transform given
 
 
@@ -95,3 +96,13 @@ def test_resolve_fill_registers_pattern_for_rasterfill():
     out = resolve_fill(RasterFill({"x": 0.0, "y": 0.0, "w": 8.0, "h": 8.0}, "CCCC"), defs)
     assert out == "url(#g0)"
     assert len(defs) == 1 and defs[0].startswith("<pattern")
+
+
+def test_resolve_fill_rasterfill_geometry_override():
+    from vectormark.candidate import RasterFill
+    from vectormark.emit import resolve_fill
+    defs = []
+    out = resolve_fill(RasterFill({"x": 0.0, "y": 0.0, "w": 8.0, "h": 8.0}, "CCCC"),
+                       defs, geometry={"x": 5.0, "y": 5.0, "w": 16.0, "h": 16.0})
+    assert out == "url(#g0)"
+    assert 'width="16" height="16"' in defs[0] and 'x="5" y="5"' in defs[0]

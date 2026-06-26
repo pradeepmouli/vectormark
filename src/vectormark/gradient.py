@@ -62,9 +62,10 @@ def _principal_axis(vectors: np.ndarray, *, eps: float) -> np.ndarray | None:
 
 def merge_components(regions: list[Region], *, tol: float = MERGE_TOL) -> list[list[Region]]:
     """Agglomeratively merge spatially-adjacent regions whose OKLab colour step is <= tol
-    into single components (union-find over region_adjacency). Generalizes _ramp_groups from
-    collinear ramps to any locally-smooth field: a region with no small-step neighbour is its
-    own singleton group. Deterministic (groups ordered by their minimum label)."""
+    into single components (union-find over region_adjacency). Merges adjacent regions whose
+    colours form a locally-smooth field (straight ramps and curved multi-hue arcs alike) into
+    one component: a region with no small-step neighbour is its own singleton group.
+    Deterministic (groups ordered by their minimum label)."""
     by_label = {r.label: r for r in regions}
     adj = region_adjacency(regions)
     colors = {r.label: _hex_to_oklab([r.color_hex])[0] for r in regions}
@@ -470,7 +471,7 @@ def _component_fill(mask: np.ndarray, rgb_image: np.ndarray) -> dict | None:
         return None                                  # flat -> solid colour
     bp = _best_parametric(mask, rgb_image)
     if bp is None:
-        return None                                  # near-flat (span guard) -> solid colour
+        return None                                  # no parametric fit (near-flat or too few pixels) -> solid colour
     model, mean_de, _median = bp
     if mean_de <= _PARAM_FALLBACK_TOL:
         return model                                 # editable gradient

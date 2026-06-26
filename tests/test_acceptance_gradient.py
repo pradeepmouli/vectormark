@@ -112,3 +112,4 @@ def test_pipeline_raster_survives_flatten(monkeypatch):
                         lambda comp, rgb: ([(comp[0], raster)], []))
     svg = idealize(img, options=Options(flatten=True))
     assert "<pattern" in svg and "<image" in svg               # raster survives --flatten
+    assert 'href="data:image/png;base64,iVBORw0KGgo="' in svg
