@@ -25,6 +25,10 @@ _MIN_STOP_SPAN = 0.02    # OKLab end-to-end travel a fit must show to count as a
 _BLOB_DOMINANCE = 0.85   # smooth-gradient path: min fraction of the foreground that must lie
                          # in a single connected component for the mark to be treated as one
                          # gradient blob (rejects multi-glyph wordmarks before any fit).
+_THIN_BAND_TOL = 0.10   # max mean band-area fraction (group_area / total_fg / band count) for a
+                        # >= _MIN_BANDS group to count as a finely-quantized continuous tone rather
+                        # than a few chunky similar-coloured facets. Keeps faceted logos (Sketch)
+                        # crisp instead of smearing them into a gradient that ΔE cannot tell apart.
 _STRETCH_GRID_STEPS = (8, 16, 24, 32, 48)   # NxN downsample sizes for the stretch-fill;
                                             # the renderer bilinearly stretches the grid
                                             # back over the footprint. Last entry is the cap.
@@ -473,6 +477,17 @@ def _component_fill(mask: np.ndarray, rgb_image: np.ndarray) -> dict | None:
     return _fit_stretch(mask, rgb_image)             # 2-D field -> raster
 
 
+def _group_is_fillable(group: list[Region], total_fg: float) -> bool:
+    """A merged group is eligible for a gradient/raster fill if it is a dominant blob
+    (covers >= _BLOB_DOMINANCE of the foreground) OR a finely-quantized continuous tone
+    (>= _MIN_BANDS bands, each thin: mean band-area fraction < _THIN_BAND_TOL). The
+    thinness test keeps faceted logos (few chunky similar-coloured facets) crisp instead
+    of smearing them into a gradient that ΔE cannot distinguish from a real one."""
+    af = sum(r.area for r in group) / total_fg
+    return (af >= _BLOB_DOMINANCE
+            or (len(group) >= _MIN_BANDS and af / len(group) < _THIN_BAND_TOL))
+
+
 def detect_gradients(
     regions: list[Region], rgb_image: np.ndarray
 ) -> tuple[list[tuple[Region, dict]], list[Region]]:
@@ -492,9 +507,7 @@ def detect_gradients(
     shape = rgb_image.shape[:2]
     total_fg = float(sum(r.area for r in regions)) or 1.0
     for group in merge_components(regions):
-        eligible = (len(group) >= _MIN_BANDS
-                    or sum(r.area for r in group) >= _BLOB_DOMINANCE * total_fg)
-        if not eligible:
+        if not _group_is_fillable(group, total_fg):
             continue                                 # leave regions in `remaining` as-is
         mask = _union_mask(group, shape)
         model = _component_fill(mask, rgb_image)

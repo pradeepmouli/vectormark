@@ -144,24 +144,26 @@ def test_detect_gradients_consumes_ramp_returns_remaining():
     from vectormark.gradient import detect_gradients
     from vectormark.types import Region
     h, w = 60, 160
-    # left half: a 4-band blue->magenta linear ramp; right: one flat green block
+    # left half: a 10-band blue->magenta linear ramp (8px each); right: one flat green block.
+    # 10 thin bands keep each band at ~5% of total_fg, below _THIN_BAND_TOL so the group
+    # passes the fillability gate (representative of real gradient quantization).
     img = _linear_gradient_image(h, 80, (0, 30), (79, 30),
                                  [(0.0, (37, 99, 235)), (1.0, (219, 39, 119))])
     full = np.zeros((h, w, 3), np.uint8)
     full[:, :80] = img
     full[:, 80:] = (20, 160, 60)
-    # build the quantized regions the way the pipeline would (4 ramp bands + 1 flat)
+    # build the quantized regions the way the pipeline would (10 ramp bands + 1 flat)
     regions = []
-    for i in range(4):
-        m = np.zeros((h, w), bool); m[:, i * 20:(i + 1) * 20] = True
+    for i in range(10):
+        m = np.zeros((h, w), bool); m[:, i * 8:(i + 1) * 8] = True
         regions.append(Region(label=i + 1, mask=m,
                               color_hex="#%02x%02x%02x" % tuple(np.median(full[m], axis=0).astype(int))))
     gm = np.zeros((h, w), bool); gm[:, 80:] = True
-    regions.append(Region(label=5, mask=gm, color_hex="#149c3c"))
+    regions.append(Region(label=11, mask=gm, color_hex="#149c3c"))
     fills, remaining = detect_gradients(regions, full)
     assert len(fills) == 1                               # the ramp became one gradient fill
     assert fills[0][1]["kind"] == "linear"
-    assert {r.label for r in remaining} == {5}           # the flat green block remains
+    assert {r.label for r in remaining} == {11}          # the flat green block remains
 
 
 def test_expand_footprint_bounds_to_contiguous_region():
@@ -411,3 +413,22 @@ def test_component_fill_raster_for_2d_field():
     img = _2d_field(96, 96)
     model = _component_fill(np.ones((96, 96), bool), img)
     assert model is not None and model["kind"] == "raster"
+
+
+def _regions_with_areas(areas):
+    from vectormark.types import Region
+    out = []
+    for i, a in enumerate(areas):
+        m = np.zeros((1, 1000), bool); m[0, :a] = True       # a True pixels -> Region.area == a
+        out.append(Region(label=i + 1, mask=m, color_hex="#000000"))
+    return out
+
+
+def test_group_is_fillable_dominant_thin_chunky():
+    from vectormark.gradient import _group_is_fillable
+    # dominant single blob (90% of fg) -> fillable
+    assert _group_is_fillable(_regions_with_areas([900]), 1000.0) is True
+    # 10 thin bands, 80% of fg, each 8% -> avg 0.008 < 0.10 -> finely-quantized -> fillable
+    assert _group_is_fillable(_regions_with_areas([80] * 10), 1000.0) is True
+    # 4 chunky facets, 80% of fg, each 20% -> avg 0.20 >= 0.10 and not dominant -> NOT fillable
+    assert _group_is_fillable(_regions_with_areas([200] * 4), 1000.0) is False
