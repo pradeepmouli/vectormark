@@ -207,6 +207,36 @@ def _radial_spread(pts: np.ndarray, oklab: np.ndarray, c: np.ndarray, nbins: int
     return total / count if count else np.inf
 
 
+def _radial_model_from_center(c: np.ndarray, pts: np.ndarray, rgb: np.ndarray) -> dict | None:
+    """Build a radial gradient model centred at `c` (xy) over `pts`/`rgb`."""
+    r = np.hypot(pts[:, 0] - c[0], pts[:, 1] - c[1])
+    rmax = float(r.max())
+    if rmax < 1e-6:
+        return None
+    stops = _reduce_stops(_fit_stops(r / rmax, rgb), max_delta_e=_GATE_DELTA_E)
+    return {"kind": "radial",
+            "geometry": {"cx": float(c[0]), "cy": float(c[1]), "r": rmax},
+            "stops": stops}
+
+
+def _linear_model_from_axis(u: np.ndarray, pts: np.ndarray, rgb: np.ndarray) -> dict | None:
+    """Build a linear gradient model along unit axis `u` over `pts`/`rgb`."""
+    proj = pts @ u
+    t0, t1 = float(proj.min()), float(proj.max())
+    if t1 - t0 < 1e-6:
+        return None
+    tn = (proj - t0) / (t1 - t0)
+    mean = pts.mean(axis=0)
+    mt = float(mean @ u)
+    p1 = mean + (t0 - mt) * u
+    p2 = mean + (t1 - mt) * u
+    stops = _reduce_stops(_fit_stops(tn, rgb), max_delta_e=_GATE_DELTA_E)
+    return {"kind": "linear",
+            "geometry": {"x1": float(p1[0]), "y1": float(p1[1]),
+                         "x2": float(p2[0]), "y2": float(p2[1])},
+            "stops": stops}
+
+
 def _fit_radial(pts: np.ndarray, oklab: np.ndarray, rgb: np.ndarray) -> dict | None:
     """Fit a radial gradient: estimate the centre as the centroid of the extreme along
     the principal colour axis (try both ends; keep the more concentric), then fit stops
@@ -228,15 +258,7 @@ def _fit_radial(pts: np.ndarray, oklab: np.ndarray, rgb: np.ndarray) -> dict | N
     if best_c is None:
         return None
     c = best_c
-    r = np.hypot(pts[:, 0] - c[0], pts[:, 1] - c[1])
-    rmax = float(r.max())
-    if rmax < 1e-6:
-        return None
-    tn = r / rmax
-    stops = _reduce_stops(_fit_stops(tn, rgb), max_delta_e=_GATE_DELTA_E)
-    return {"kind": "radial",
-            "geometry": {"cx": float(c[0]), "cy": float(c[1]), "r": rmax},
-            "stops": stops}
+    return _radial_model_from_center(c, pts, rgb)
 
 
 def _fit_linear(pts: np.ndarray, oklab: np.ndarray, rgb: np.ndarray) -> dict | None:
@@ -249,20 +271,91 @@ def _fit_linear(pts: np.ndarray, oklab: np.ndarray, rgb: np.ndarray) -> dict | N
         return None
     _, _, vt = np.linalg.svd(G, full_matrices=False)
     u = vt[0]                                           # unit axis direction
-    proj = pts @ u
-    t0, t1 = float(proj.min()), float(proj.max())
-    if t1 - t0 < 1e-6:
+    return _linear_model_from_axis(u, pts, rgb)
+
+
+def _model_mean_de_on_points(model: dict, pts: np.ndarray, rgb: np.ndarray) -> float:
+    """Mean OKLab ΔE of a model's rendered colour vs `rgb` at `pts` (footprint pixels)."""
+    rendered = _interp_stops_rgb(_model_t(model, pts), model["stops"])
+    return float(np.linalg.norm(srgb_to_oklab(rendered / 255.0) - srgb_to_oklab(rgb / 255.0),
+                                axis=1).mean())
+
+
+def _search_centers(centers, pts: np.ndarray, rgb: np.ndarray):
+    """Lowest-mean-ΔE radial model over candidate centres. Returns (de, model, cx, cy) or None."""
+    best = None
+    for cx, cy in centers:
+        model = _radial_model_from_center(np.array([cx, cy]), pts, rgb)
+        if model is None:
+            continue
+        de = _model_mean_de_on_points(model, pts, rgb)
+        if best is None or de < best[0]:
+            best = (de, model, cx, cy)
+    return best
+
+
+def _fit_radial_searched(pts: np.ndarray, oklab: np.ndarray, rgb: np.ndarray) -> dict | None:
+    """Radial fit via a deterministic centre search (coarse grid over the bbox extended
+    +/-50%, then a finer local grid around the best). Beats the principal-axis-extreme
+    heuristic for corner-anchored / clipped fields. `oklab` is unused (kept for a uniform
+    fit signature)."""
+    xs, ys = pts[:, 0], pts[:, 1]
+    x0, x1 = float(xs.min()), float(xs.max())
+    y0, y1 = float(ys.min()), float(ys.max())
+    gx = np.linspace(x0 - (x1 - x0) * 0.5, x1 + (x1 - x0) * 0.5, 13)
+    gy = np.linspace(y0 - (y1 - y0) * 0.5, y1 + (y1 - y0) * 0.5, 13)
+    coarse = _search_centers([(cx, cy) for cx in gx for cy in gy], pts, rgb)
+    if coarse is None:
         return None
-    tn = (proj - t0) / (t1 - t0)
-    mean = pts.mean(axis=0)
-    mt = float(mean @ u)
-    p1 = mean + (t0 - mt) * u
-    p2 = mean + (t1 - mt) * u
-    stops = _reduce_stops(_fit_stops(tn, rgb), max_delta_e=_GATE_DELTA_E)
-    return {"kind": "linear",
-            "geometry": {"x1": float(p1[0]), "y1": float(p1[1]),
-                         "x2": float(p2[0]), "y2": float(p2[1])},
-            "stops": stops}
+    _, _, bcx, bcy = coarse
+    sx, sy = gx[1] - gx[0], gy[1] - gy[0]               # one coarse step
+    rx = np.linspace(bcx - sx, bcx + sx, 7)
+    ry = np.linspace(bcy - sy, bcy + sy, 7)
+    fine = _search_centers([(cx, cy) for cx in rx for cy in ry], pts, rgb)
+    return (fine or coarse)[1]
+
+
+def _fit_linear_searched(pts: np.ndarray, oklab: np.ndarray, rgb: np.ndarray) -> dict | None:
+    """Linear fit via an axis-angle search (5° coarse steps, then a finer local sweep).
+    `oklab` is unused (kept for a uniform fit signature)."""
+    def at(ang):
+        m = _linear_model_from_axis(np.array([np.cos(ang), np.sin(ang)]), pts, rgb)
+        return None if m is None else (_model_mean_de_on_points(m, pts, rgb), m, ang)
+    best = None
+    for ang in np.linspace(0.0, np.pi, 36, endpoint=False):
+        r = at(ang)
+        if r is not None and (best is None or r[0] < best[0]):
+            best = r
+    if best is None:
+        return None
+    step = np.pi / 36
+    for ang in np.linspace(best[2] - step, best[2] + step, 7):
+        r = at(ang)
+        if r is not None and r[0] < best[0]:
+            best = r
+    return best[1]
+
+
+def _best_parametric(mask: np.ndarray, rgb_image: np.ndarray) -> tuple[dict, float, float] | None:
+    """Best searched parametric (linear or radial) model for the footprint, with its
+    mean and median per-pixel ΔE. No acceptance cut (the ladder applies the gates).
+    None if neither model travels at least _MIN_STOP_SPAN."""
+    ys, xs = np.where(mask)
+    if len(xs) < 3 * _MIN_BANDS:
+        return None
+    pts = np.column_stack([xs, ys]).astype(float)
+    rgb = rgb_image[ys, xs].astype(float)
+    oklab = srgb_to_oklab(rgb / 255.0)
+    best = None
+    for fit in (_fit_linear_searched, _fit_radial_searched):
+        model = fit(pts, oklab, rgb)
+        if model is None or _stop_span(model["stops"]) < _MIN_STOP_SPAN:
+            continue
+        pde = _per_pixel_delta_e(model, ys, xs, rgb_image)
+        mean_de, median_de = float(pde.mean()), float(np.median(pde))
+        if best is None or mean_de < best[1]:
+            best = (model, mean_de, median_de)
+    return best
 
 
 def _interp_stops_rgb(t: np.ndarray, stops: list[tuple[float, str]]) -> np.ndarray:

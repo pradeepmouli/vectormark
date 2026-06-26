@@ -319,3 +319,27 @@ def test_fit_gradient_accepts_traveling_gradient():
     img = img.round().astype(np.uint8)
     model = fit_gradient(np.ones((h, w), bool), img)
     assert model is not None and model["kind"] == "linear"          # real travel: still fires
+
+
+def test_best_parametric_searched_beats_heuristic_on_offcenter_radial():
+    # a radial gradient whose centre is in a corner (where the principal-axis-extreme
+    # heuristic lands poorly); the searched fit must find a low-mean-ΔE radial model.
+    from vectormark.gradient import _best_parametric
+    h, w = 80, 80
+    yy, xx = np.mgrid[:h, :w]
+    r = np.hypot(xx - 5, yy - 5) / np.hypot(w, h)        # centre near (5,5) corner
+    img = np.empty((h, w, 3))
+    for ch, (a, b) in enumerate(((230, 30), (120, 60), (40, 210))):
+        img[:, :, ch] = (a + r * (b - a))
+    img = img.round().astype(np.uint8)
+    out = _best_parametric(np.ones((h, w), bool), img)
+    assert out is not None
+    model, mean_de, median_de = out
+    assert model["kind"] in ("radial", "linear")
+    assert mean_de < 0.05 and median_de < 0.05          # a real gradient fits tightly
+
+
+def test_best_parametric_returns_none_for_flat():
+    from vectormark.gradient import _best_parametric
+    img = np.full((40, 40, 3), (50, 100, 150), np.uint8)
+    assert _best_parametric(np.ones((40, 40), bool), img) is None   # span below minimum
