@@ -24,7 +24,7 @@ from .emit import (
     shape_to_svg,
     transform_path_d,
 )
-from .candidate import Candidate, Fill, FlatFill, LinearGradientFill, RadialGradientFill
+from .candidate import Candidate, Fill, FlatFill, LinearGradientFill, RadialGradientFill, RasterFill
 from .components import decompose_components
 from .fit import Shape, _fmt
 from .gradient import detect_gradients
@@ -234,10 +234,14 @@ def build_candidates(
         if shape is None:
             continue
         g = model["geometry"]
-        fill: Fill = (
-            LinearGradientFill(g, model["stops"]) if model["kind"] == "linear"
-            else RadialGradientFill(g, model["stops"])
-        )
+        kind = model["kind"]
+        fill: Fill
+        if kind == "linear":
+            fill = LinearGradientFill(g, model["stops"])
+        elif kind == "radial":
+            fill = RadialGradientFill(g, model["stops"])
+        else:  # raster
+            fill = RasterFill(g, model["png_b64"])
         cands.append(Candidate(shape, fill, "gradient"))
 
     return cands
@@ -290,6 +294,10 @@ def _render_body(
         return path_svg(transform_path_d(d, bake) if bake is not None else d, fill, rule)
 
     def _fill_attr(fill: Fill) -> str:
+        if isinstance(fill, RasterFill):
+            # userSpaceOnUse pattern: map to the baked frame via patternTransform
+            # (bake is set only in flatten mode; None otherwise -> absolute coords).
+            return resolve_fill(fill, defs, transform=bake)
         baked = None
         if not isinstance(fill, FlatFill) and bake is not None:
             kind = "linear" if isinstance(fill, LinearGradientFill) else "radial"
