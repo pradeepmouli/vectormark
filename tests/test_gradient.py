@@ -406,3 +406,37 @@ def test_merge_components_transitive_chain():
     regions = _hstrip_regions(["#2563eb", "#5a4fd0", "#8a44b4", "#b13a9e", "#db2777"])
     groups = merge_components(regions, tol=0.15)
     assert len(groups) == 1 and len(groups[0]) == 5
+
+
+def _2d_field(h, w):
+    """A smooth field that no single linear/radial gradient fits under the param bound:
+    horizontal hue ramp plus a contrasting corner."""
+    yy, xx = np.mgrid[:h, :w]
+    t = xx / (w - 1)
+    img = np.empty((h, w, 3))
+    for ch, (a, b) in enumerate(((30, 230), (60, 60), (220, 40))):
+        img[:, :, ch] = a + t * (b - a)
+    img[(xx >= w * 0.5) & (yy >= h * 0.5)] = (20, 230, 40)
+    return img.round().astype(np.uint8)
+
+
+def test_component_fill_strict_gradient_for_clean_ramp():
+    from vectormark.gradient import _component_fill
+    h, w = 60, 120
+    img = _linear_gradient_image(h, w, (0, 30), (119, 30),
+                                 [(0.0, (37, 99, 235)), (1.0, (219, 39, 119))])
+    model = _component_fill(np.ones((h, w), bool), img)
+    assert model is not None and model["kind"] in ("linear", "radial")
+
+
+def test_component_fill_none_for_flat():
+    from vectormark.gradient import _component_fill
+    img = np.full((40, 40, 3), (50, 100, 150), np.uint8)
+    assert _component_fill(np.ones((40, 40), bool), img) is None     # flat -> solid colour
+
+
+def test_component_fill_raster_for_2d_field():
+    from vectormark.gradient import _component_fill
+    img = _2d_field(96, 96)
+    model = _component_fill(np.ones((96, 96), bool), img)
+    assert model is not None and model["kind"] == "raster"

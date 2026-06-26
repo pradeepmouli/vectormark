@@ -30,6 +30,8 @@ _STRETCH_GRID_STEPS = (8, 16, 24, 32, 48)   # NxN downsample sizes for the stret
                                             # the renderer bilinearly stretches the grid
                                             # back over the footprint. Last entry is the cap.
 _STRETCH_TARGET = 0.05                       # grow the grid until mean per-pixel ΔE <= this.
+_PARAM_FALLBACK_TOL = 0.07   # max mean per-pixel ΔE for a merged component to prefer an
+                             # editable parametric gradient over a raster stretch-fill.
 
 MERGE_TOL = 0.15   # max OKLab colour step between two spatially-adjacent regions for them
                    # to merge into one vector component. Below this = one smooth field (gradient
@@ -539,6 +541,34 @@ def _union_mask(regions: list[Region], shape: tuple[int, int]) -> np.ndarray:
     for r in regions:
         m |= r.mask
     return m
+
+
+def _field_spread(mask: np.ndarray, rgb_image: np.ndarray) -> float:
+    """Max OKLab distance of the original pixels under `mask` from their mean colour.
+    A cheap flat-vs-varying gate (~0 for a flat region)."""
+    ys, xs = np.where(mask)
+    if len(xs) == 0:
+        return 0.0
+    okl = srgb_to_oklab(rgb_image[ys, xs].astype(float) / 255.0)
+    return float(np.linalg.norm(okl - okl.mean(axis=0), axis=1).max())
+
+
+def _component_fill(mask: np.ndarray, rgb_image: np.ndarray) -> dict | None:
+    """Pick a fill model for one component's footprint: strict parametric gradient, else a
+    searched parametric gradient (mean ΔE <= _PARAM_FALLBACK_TOL), else a raster stretch-fill.
+    None when the field is too flat to be anything but a solid colour (caller renders flat)."""
+    strict = fit_gradient(mask, rgb_image)
+    if strict is not None:
+        return strict
+    if _field_spread(mask, rgb_image) < _MIN_STOP_SPAN:
+        return None                                  # flat -> solid colour
+    bp = _best_parametric(mask, rgb_image)
+    if bp is None:
+        return None                                  # near-flat (span guard) -> solid colour
+    model, mean_de, _median = bp
+    if mean_de <= _PARAM_FALLBACK_TOL:
+        return model                                 # editable gradient
+    return _fit_stretch(mask, rgb_image)             # 2-D field -> raster
 
 
 def detect_gradients(
