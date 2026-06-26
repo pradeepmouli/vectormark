@@ -1,7 +1,7 @@
 # vectormark
 
 > Deterministic logo idealizer — turn a *rendered* (raster) logo into a clean,
-> editable, exactly-symmetric SVG.
+> editable, symmetry and shape-preserving SVG.
 
 Where conventional tracers (`vtracer`, `potrace`, `autotrace`) chase pixel edges
 and emit anonymous `<path>` soup, **vectormark recognizes structure**: it
