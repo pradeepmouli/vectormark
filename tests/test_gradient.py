@@ -56,29 +56,6 @@ def _hstrip_regions(colors_hex, h=40, band_w=12):
     return regions
 
 
-def test_ramp_groups_groups_a_monotonic_ramp():
-    from vectormark.gradient import _ramp_groups
-    # 4 adjacent bands stepping blue->magenta (a clear OKLab ramp)
-    regions = _hstrip_regions(["#2563eb", "#7b3fc4", "#b13a9e", "#db2777"])
-    groups = _ramp_groups(regions)
-    assert len(groups) == 1 and len(groups[0]) == 4
-
-
-def test_ramp_groups_rejects_flat_and_too_few():
-    from vectormark.gradient import _ramp_groups
-    flat = _hstrip_regions(["#2563eb", "#2563eb", "#2563eb"])   # no variation
-    assert _ramp_groups(flat) == []
-    two = _hstrip_regions(["#2563eb", "#db2777"])               # only 2 -> not a gradient
-    assert _ramp_groups(two) == []
-
-
-def test_ramp_groups_rejects_nonramp_colors():
-    from vectormark.gradient import _ramp_groups
-    # adjacent but colors are not collinear in OKLab (zig-zag hues)
-    regions = _hstrip_regions(["#ff0000", "#00ff00", "#0000ff", "#00ff00"])
-    assert _ramp_groups(regions) == []
-
-
 def _linear_gradient_image(h, w, p0, p1, stops_rgb):
     """Render a ground-truth linear gradient (for fitting against)."""
     yy, xx = np.mgrid[:h, :w]
@@ -205,16 +182,12 @@ def test_expand_footprint_bounds_to_contiguous_region():
     assert not expanded[:, 60:71].any()            # the black gap itself is never absorbed
 
 
-def test_detect_gradients_dissolves_unfittable_group_back_to_flats():
+def test_detect_gradients_zigzag_bands_stay_flat():
     from vectormark.color import oklab_to_srgb, srgb_to_oklab
-    from vectormark.gradient import _ramp_groups, detect_gradients
+    from vectormark.gradient import detect_gradients
     from vectormark.types import Region
-    # Six flat bands whose colours are collinear AND have distinct projections in OKLab,
-    # so _ramp_groups accepts them (group IS found). But the SPATIAL layout is a
-    # high-frequency zig-zag along the colour line (offsets 0, 1, .2, .8, .4, .6), so no
-    # single linear OR radial model reproduces the solid blocks within _GATE_DELTA_E
-    # (empirically dE_lin~0.117, dE_rad~0.098 >> 0.05) -> fit_gradient returns None and
-    # detect_gradients dissolves the bands back into `remaining` via its `continue`.
+    # Bands whose colours zig-zag along a line in OKLab so every spatially-adjacent pair is
+    # a LARGE colour step -> merge_components never joins them -> all stay flat in `remaining`.
     l0 = srgb_to_oklab(np.array([20, 50, 250])[None] / 255.0)[0]
     l1 = srgb_to_oklab(np.array([250, 20, 90])[None] / 255.0)[0]
 
@@ -222,7 +195,7 @@ def test_detect_gradients_dissolves_unfittable_group_back_to_flats():
         rgb = (np.clip(oklab_to_srgb((l0 + o * (l1 - l0))[None])[0], 0, 1) * 255).round().astype(int)
         return "#%02x%02x%02x" % tuple(rgb)
 
-    spatial = [0.0, 1.0, 0.2, 0.8, 0.4, 0.6]               # zig-zag, not monotone in space
+    spatial = [0.0, 1.0, 0.2, 0.8, 0.4, 0.6]
     h, band_w = 40, 18
     w = band_w * len(spatial)
     img = np.zeros((h, w, 3), np.uint8)
@@ -233,11 +206,9 @@ def test_detect_gradients_dissolves_unfittable_group_back_to_flats():
         m[:, i * band_w:(i + 1) * band_w] = True
         img[m] = (int(hx[1:3], 16), int(hx[3:5], 16), int(hx[5:7], 16))
         regions.append(Region(label=i + 1, mask=m, color_hex=hx))
-
-    assert len(_ramp_groups(regions)) == 1                 # the group IS found
     fills, remaining = detect_gradients(regions, img)
-    assert fills == []                                     # but no model fits -> rejected
-    assert {r.label for r in remaining} == {1, 2, 3, 4, 5, 6}  # all bands fall back to flats
+    assert fills == []
+    assert {r.label for r in remaining} == {1, 2, 3, 4, 5, 6}
 
 
 def test_dominant_blob_fraction():

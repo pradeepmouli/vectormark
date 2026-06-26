@@ -18,7 +18,6 @@ from .occlusion import region_adjacency
 from .types import Region
 
 _MIN_BANDS = 3
-_RAMP_TOL = 0.06          # max OKLab distance of a band colour from the fitted ramp line
 _GATE_DELTA_E = 0.05      # mean OKLab ΔE bar: a fitted model must re-render within this to be accepted
 _MIN_STOP_SPAN = 0.02    # OKLab end-to-end travel a fit must show to count as a gradient;
                          # rejects flat regions whose antialiasing noise fits a near-constant
@@ -55,103 +54,6 @@ def _principal_axis(vectors: np.ndarray, *, eps: float) -> np.ndarray | None:
         return None
     _, _, vt = np.linalg.svd(centred, full_matrices=False)
     return vt[0]
-
-
-def _ramp_fit(colors_oklab: np.ndarray) -> tuple[np.ndarray | None, float, np.ndarray | None]:
-    """Fit a line to OKLab colours via the principal axis. Returns
-    (unit_axis, max_residual, projections), or (None, inf, None) if degenerate/flat."""
-    axis = _principal_axis(colors_oklab, eps=1e-6)
-    if axis is None:
-        return None, np.inf, None
-    centred = colors_oklab - colors_oklab.mean(axis=0)
-    projs = centred @ axis
-    resid = float(np.linalg.norm(centred - np.outer(projs, axis), axis=1).max())
-    return axis, resid, projs
-
-
-def _is_ramp(colors_oklab: np.ndarray) -> bool:
-    """True if >=3 colours and they lie on a single line in OKLab within _RAMP_TOL."""
-    if len(colors_oklab) < _MIN_BANDS:
-        return False
-    _, resid, _ = _ramp_fit(colors_oklab)
-    return resid <= _RAMP_TOL
-
-
-def _is_strict_ramp(members: list[Region]) -> bool:
-    """True if the members form a ramp AND all band colours project to distinct positions
-    along the principal axis (monotone, no repeated colours)."""
-    oklab = _hex_to_oklab([m.color_hex for m in members])
-    axis, resid, projs = _ramp_fit(oklab)
-    if axis is None or resid > _RAMP_TOL:
-        return False
-    # round(8) is a float-noise-tolerant *exact*-duplicate guard (catches palindromes like
-    # green-blue-green). Near-duplicates that slip through are caught downstream by the
-    # fit_gradient consistency gate: a folded colour sequence won't re-render monotonically.
-    return len(np.unique(projs.round(8))) == len(members)
-
-
-def _trim_to_ramp(members: list[Region], adj: dict) -> list[Region] | None:
-    """Given a connected set of regions, trim boundary nodes that break the ramp property
-    until either the remainder forms a strict ramp (return it) or fewer than _MIN_BANDS remain.
-    Only degree<=1 (leaf) nodes are trimmable; a non-leaf intruder — e.g. a flat region
-    bordering multiple ramp bands — causes the whole component to be rejected (the
-    fit_gradient ΔE gate is the downstream backstop)."""
-    current = list(members)
-    while len(current) >= _MIN_BANDS:
-        if _is_strict_ramp(current):
-            return current
-        # Find leaf nodes (degree ≤ 1 within the current subset)
-        cur_labels = {m.label for m in current}
-        leaves = [m for m in current
-                  if len(adj[m.label] & cur_labels) <= 1]
-        if not leaves:
-            break                                           # no leaf to trim -> give up
-        # Remove the worst-fitting leaf: try each, keep the trial whose remaining set
-        # has the LOWEST ramp residual (so dropping the outlier leaf wins).
-        best_trim = None
-        best_score = np.inf
-        for leaf in leaves:
-            trial = [m for m in current if m.label != leaf.label]
-            if len(trial) < _MIN_BANDS:
-                continue
-            _, score, _ = _ramp_fit(_hex_to_oklab([m.color_hex for m in trial]))
-            if score < best_score:                          # strict `<` keeps the first
-                best_score, best_trim = score, trial        # minimal-score leaf; deterministic
-                                                            # given stable input `regions` order
-        if best_trim is None:
-            break
-        current = best_trim
-    return None
-
-
-def _ramp_groups(regions: list[Region]) -> list[list[Region]]:
-    """Connected groups of >=3 adjacent regions whose flat colours form an OKLab ramp.
-    If a connected component's full colour set doesn't form a ramp, boundary nodes are
-    trimmed iteratively until a ramp is found or the component is too small."""
-    by_label = {r.label: r for r in regions}
-    adj = region_adjacency(regions)
-    seen: set[int] = set()
-    groups: list[list[Region]] = []
-    for r in regions:
-        if r.label in seen:
-            continue
-        # grow the connected component
-        comp: list[int] = []
-        stack = [r.label]
-        while stack:
-            lab = stack.pop()
-            if lab in seen:
-                continue
-            seen.add(lab)
-            comp.append(lab)
-            stack.extend(sorted(adj[lab] - seen))
-        members = [by_label[l] for l in comp]
-        if len(members) < _MIN_BANDS:
-            continue
-        ramp = _trim_to_ramp(members, adj)
-        if ramp is not None:
-            groups.append(ramp)
-    return groups
 
 
 def merge_components(regions: list[Region], *, tol: float = MERGE_TOL) -> list[list[Region]]:
@@ -574,35 +476,34 @@ def _component_fill(mask: np.ndarray, rgb_image: np.ndarray) -> dict | None:
 def detect_gradients(
     regions: list[Region], rgb_image: np.ndarray
 ) -> tuple[list[tuple[Region, dict]], list[Region]]:
-    """Group ramp bands, fit+gate a gradient per footprint, and return
-    (accepted [(footprint_region, model)], remaining flat regions)."""
+    """Merge spatially-adjacent regions into smooth-field components (colour-step merge),
+    then choose a fill per *eligible* component. Returns (fills, remaining).
+
+    Fill-eligibility gate (restores the two guards the colour-step merge alone drops, so
+    adjacent distinct-but-similar flat shapes and mildly-noisy single flats are NOT
+    over-fit): a group qualifies only if it is a genuine merged field (len(group) >=
+    _MIN_BANDS) OR a single dominant blob (its area >= _BLOB_DOMINANCE * total foreground).
+    An eligible component that fits a gradient/raster becomes a (footprint_region, model)
+    fill (gradient footprints grow into model-matching background via _expand_footprint).
+    Every other region — ineligible groups, eligible-but-unfittable (near-flat) groups,
+    and unmerged singletons — stays in `remaining` as its original region(s)."""
     fills: list[tuple[Region, dict]] = []
     consumed: set[int] = set()
-    for group in _ramp_groups(regions):
-        mask = _union_mask(group, rgb_image.shape[:2])
-        model = fit_gradient(mask, rgb_image)
+    shape = rgb_image.shape[:2]
+    total_fg = float(sum(r.area for r in regions)) or 1.0
+    for group in merge_components(regions):
+        eligible = (len(group) >= _MIN_BANDS
+                    or sum(r.area for r in group) >= _BLOB_DOMINANCE * total_fg)
+        if not eligible:
+            continue                                 # leave regions in `remaining` as-is
+        mask = _union_mask(group, shape)
+        model = _component_fill(mask, rgb_image)
         if model is None:
-            continue                                   # dissolve back into flat bands
-        mask = _expand_footprint(model, mask, rgb_image)
+            continue                                 # not a field -> regions stay flat
+        if model["kind"] in ("linear", "radial"):
+            mask = _expand_footprint(model, mask, rgb_image)
         rep = max(group, key=lambda r: r.area)
-        footprint = Region(label=rep.label, mask=mask, color_hex=rep.color_hex)
-        fills.append((footprint, model))
+        fills.append((Region(label=rep.label, mask=mask, color_hex=rep.color_hex), model))
         consumed.update(m.label for m in group)
-    # smooth-gradient path: band-grouping only fires on posterized ramps (≥3 adjacent bands).
-    # A smooth ramp collapses to ~1 region at palette extraction, so test the leftover mark as
-    # a single gradient blob fit to the ORIGINAL pixels (see the design spec). Guard with a
-    # dominant-connected-blob check so multi-glyph wordmarks can't be fit as one gradient.
-    # NB: the smooth footprint mask and a band footprint mask are not guaranteed disjoint
-    # (an _expand_footprint-grown band mask can overlap leftover pixels). z-order painting
-    # makes that benign, so a future change must not assume the footprints are disjoint.
-    leftover = [r for r in regions if r.label not in consumed]
-    if leftover:
-        sil = _union_mask(leftover, rgb_image.shape[:2])
-        if _dominant_blob_fraction(sil) >= _BLOB_DOMINANCE:
-            model = fit_gradient(sil, rgb_image)
-            if model is not None:
-                rep = max(leftover, key=lambda r: r.area)
-                fills.append((Region(label=rep.label, mask=sil, color_hex=rep.color_hex), model))
-                consumed.update(r.label for r in leftover)
     remaining = [r for r in regions if r.label not in consumed]
     return fills, remaining

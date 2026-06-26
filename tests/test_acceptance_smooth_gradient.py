@@ -7,8 +7,6 @@ import numpy as np
 
 from vectormark import Options, idealize
 from vectormark.color import mean_delta_e
-from vectormark.gradient import _ramp_groups
-from vectormark.pipeline import _segment_image
 from tests._render import render_svg
 
 
@@ -38,8 +36,6 @@ def test_smooth_linear_rect_via_smooth_path():
     # Low-contrast so the 16-colour palette collapses to ≤2 bands (no band-grouping).
     # Original (90,150,230)→(60,110,205) posterised into 3 bands and triggered _ramp_groups.
     img = _smooth_linear_rect(h, w, 40, 200, (85, 145, 225), (70, 125, 210))
-    sw, sh, regions = _segment_image(img, Options())
-    assert _ramp_groups(regions) == []                  # band-grouping does NOT fire
     svg = idealize(img, options=Options())
     assert svg.count("<linearGradient") == 1            # ...so the smooth path produced it
     assert mean_delta_e(render_svg(svg, w, h), img) <= 0.06
@@ -50,8 +46,6 @@ def test_smooth_radial_disc_via_smooth_path():
     # Low-contrast so the palette collapses to ≤2 bands (no band-grouping).
     # Original (120,190,245)→(70,120,210) posterised into 4 bands and triggered _ramp_groups.
     img = _smooth_radial_disc(h, w, (100, 100), 85, (115, 185, 240), (85, 140, 215))
-    sw, sh, regions = _segment_image(img, Options())
-    assert _ramp_groups(regions) == []                  # band-grouping does NOT fire
     svg = idealize(img, options=Options())
     assert svg.count("<radialGradient") == 1
     assert mean_delta_e(render_svg(svg, w, h), img) <= 0.07
