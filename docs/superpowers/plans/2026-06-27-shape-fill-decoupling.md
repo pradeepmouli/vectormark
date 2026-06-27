@@ -628,7 +628,7 @@ PY
 
 Expected: gradient logos show ≥1 gradient and FEWER total paths than the banded baseline; flats show 0 gradients.
 
-- [ ] **Step 3: Calibrate `seam_de`/`dir_cos` only if needed**
+- [ ] **Step 3: Calibrate `edge_de` only if needed**
 
 If a gradient logo under-merges (residual bands) or a distinct surface over-merges, adjust `edge_de` (the soft-seam threshold, start 0.06) in `surface_merge.py`, and the `max_gradient_de` acceptance in `fit_fill` (start `_GATE_DELTA_E`) only if needed, re-running Step 2 and the Task 2/3 unit tests after each change. Document the final values and the logo that drove them in the commit message. Do NOT change `_GATE_DELTA_E` or `_MIN_STOP_SPAN` (shared with other code) without a separate justification.
 
