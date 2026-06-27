@@ -4,11 +4,13 @@ from __future__ import annotations
 
 import base64
 import io
+import json
 import os
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
 from mcp.server.fastmcp import FastMCP
+from mcp.types import CallToolResult, ImageContent, TextContent
 from PIL import Image
 
 from .mcp_image import (
@@ -274,15 +276,21 @@ mcp = FastMCP(
         "openai/toolInvocation/invoked": "Idealized logo.",
     },
 )
-def idealize_logo(image: dict, options: dict | None = None) -> list:
-    """File-first logo idealization. Returns the structured result plus a preview image."""
-    from mcp.server.fastmcp.utilities.types import Image as MCPImage
-
+def idealize_logo(image: dict, options: dict | None = None) -> CallToolResult:
+    """File-first logo idealization. Returns structured content plus a best-effort image block."""
     result, preview = idealize_logo_image(image, options, local_trust=_LOCAL_TRUST)
-    contents: list = [result]
+    content: list[TextContent | ImageContent] = [
+        TextContent(type="text", text=json.dumps(result))
+    ]
     if preview is not None:
-        contents.append(MCPImage(data=preview, format="png"))
-    return contents
+        content.append(
+            ImageContent(
+                type="image",
+                data=base64.b64encode(preview).decode(),
+                mimeType="image/png",
+            )
+        )
+    return CallToolResult(content=content, structuredContent=result, isError=False)
 
 
 @mcp.tool(

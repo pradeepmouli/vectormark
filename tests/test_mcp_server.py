@@ -177,3 +177,53 @@ def test_idealize_logo_image_path_blocked_without_local_trust(tmp_path):
         assert e.error_code == "IMAGE_UNRESOLVABLE"
     else:
         raise AssertionError("path must be rejected without local trust")
+
+
+# ---------------------------------------------------------------------------
+# Task 3: idealize_logo MCP tool returns CallToolResult with structuredContent
+# ---------------------------------------------------------------------------
+
+def test_idealize_logo_tool_returns_structured_content():
+    """idealize_logo must return a CallToolResult with structuredContent populated.
+
+    FastMCP passes CallToolResult through verbatim, so both structuredContent and
+    the image block survive — unlike a raw list which sets structuredContent=None.
+    """
+    import asyncio
+    import json
+    from mcp.types import CallToolResult, ImageContent, TextContent
+    from vectormark.mcp_server import mcp
+
+    async def call():
+        return await mcp.call_tool(
+            "idealize_logo",
+            {
+                "image": {"data_uri": f"data:image/png;base64,{_png_b64_solid()}"},
+                "options": {"colors": 4},
+            },
+        )
+
+    res = asyncio.run(call())
+
+    assert isinstance(res, CallToolResult), (
+        f"Expected CallToolResult, got {type(res).__name__}; "
+        "structuredContent will be None when a list is returned"
+    )
+    assert res.isError is False
+
+    # structuredContent must be populated — the widget binds to this
+    sc = res.structuredContent
+    assert sc is not None, "structuredContent must not be None"
+    assert "<svg" in sc["svg"], "structuredContent.svg must contain SVG markup"
+    assert sc["diagnostics"], "structuredContent.diagnostics must be present"
+
+    # TextContent block must carry the same JSON for non-structured clients
+    text_blocks = [b for b in res.content if isinstance(b, TextContent)]
+    assert text_blocks, "a TextContent JSON block must be present in res.content"
+    parsed = json.loads(text_blocks[0].text)
+    assert parsed["svg"] == sc["svg"], "TextContent JSON must match structuredContent"
+
+    # Image block is best-effort; if preview was generated it must be ImageContent
+    if sc.get("preview_available"):
+        image_blocks = [b for b in res.content if isinstance(b, ImageContent)]
+        assert image_blocks, "preview_available=True but no ImageContent block in res.content"
