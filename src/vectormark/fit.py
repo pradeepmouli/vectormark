@@ -73,7 +73,7 @@ def recognize_primitive(contour: np.ndarray, *, epsilon: float) -> Shape | None:
     return None
 
 
-def recognize_polygon(contour: np.ndarray, *, epsilon: float, max_vertices: int = 8) -> Shape | None:
+def recognize_polygon(contour: np.ndarray, *, epsilon: float, max_vertices: int = MAX_POLY_VERTICES) -> Shape | None:
     """Emit a <polygon> when the contour simplifies to few straight edges."""
     pts = np.asarray(contour, dtype=float)
     if len(pts) < 3:

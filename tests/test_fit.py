@@ -125,3 +125,14 @@ def test_vertex_cap_rejects_too_many_corners():
     # _square() produces 3 corner-runs; a cap of 2 must reject it via the vertex gate
     # (segment count is tiny, so this exercises the vertex cap in isolation)
     assert fit_path(_square(), epsilon=1.5, max_error=1.0, max_vertices=2) is None
+
+
+def test_polygon_default_bound_is_the_constant():
+    # a clean hexagon (6 verts) is within the bound -> recognized
+    t = np.linspace(0, 2 * np.pi, 7)[:-1]
+    hexa = np.column_stack([50 + 40 * np.cos(t), 50 + 40 * np.sin(t)])
+    ring = np.vstack([hexa, hexa[0]])
+    shp = recognize_polygon(ring, epsilon=1.5)
+    assert shp is not None and 3 <= len(shp.params["points"]) <= MAX_POLY_VERTICES
+    # forcing a 2-vertex bound rejects it
+    assert recognize_polygon(ring, epsilon=1.5, max_vertices=2) is None
