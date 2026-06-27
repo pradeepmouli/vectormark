@@ -297,3 +297,29 @@ def test_idealize_logo_tool_surfaces_error_code_on_unsupported_image_type():
         assert "UNSUPPORTED_IMAGE_TYPE" in error_text, (
             f"error_code token not found in ToolError message: {error_text!r}"
         )
+
+
+def test_idealize_logo_input_schema_exposes_typed_fields():
+    """The idealize_logo input schema must describe image/options fields (not be an
+    opaque object) so ChatGPT can fill the file-param reference and the model can see
+    the available options."""
+    import asyncio
+    from vectormark.mcp_server import mcp
+
+    async def get_schema():
+        tools = {t.name: t for t in await mcp.list_tools()}
+        return tools["idealize_logo"].inputSchema
+
+    schema = asyncio.run(get_schema())
+    defs = schema.get("$defs", {})
+
+    image = schema["properties"]["image"]
+    if "$ref" in image:
+        image = defs[image["$ref"].split("/")[-1]]
+    image_props = set((image.get("properties") or {}).keys())
+    # The ChatGPT file-param fields MUST be present so fileParams can populate them.
+    assert {"download_url", "file_id"} <= image_props
+    assert {"path", "url", "data_uri", "base64"} <= image_props
+
+    options_props = set((defs.get("IdealizeOptions", {}).get("properties") or {}).keys())
+    assert {"colors", "flatten", "no_symmetry", "epsilon", "max_error"} <= options_props

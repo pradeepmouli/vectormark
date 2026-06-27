@@ -13,6 +13,7 @@ from mcp.server.fastmcp import FastMCP
 from mcp.server.fastmcp.exceptions import ToolError
 from mcp.types import CallToolResult, ImageContent, TextContent
 from PIL import Image
+from pydantic import BaseModel, Field
 
 from .mcp_image import (
     DEFAULT_COLORS,
@@ -263,6 +264,45 @@ mcp = FastMCP(
 )
 
 
+class ImageRef(BaseModel):
+    """A reference to the source image. Provide exactly one source. ChatGPT/host file
+    params fill `download_url` (+ `file_id`); callers may instead pass a `path`, https
+    `url`, `data_uri`, or bare `base64`."""
+
+    download_url: str | None = Field(
+        None, description="Temporary URL to GET the file bytes (ChatGPT/host file param)."
+    )
+    file_id: str | None = Field(None, description="Host file identifier accompanying download_url.")
+    mime_type: str | None = Field(None, description="Optional declared MIME type of the file.")
+    file_name: str | None = Field(None, description="Optional original file name.")
+    path: str | None = Field(
+        None, description="Local filesystem path. Resolved only on the stdio/local-trust server; rejected over HTTP."
+    )
+    url: str | None = Field(None, description="Explicit https URL to fetch (SSRF-guarded).")
+    data_uri: str | None = Field(None, description="A data:image/...;base64,... URI.")
+    base64: str | None = Field(None, description="Bare base64-encoded image bytes (PNG/JPEG/WebP).")
+
+
+class PreprocessOpts(BaseModel):
+    """Server-side preprocessing applied before idealization."""
+
+    crop_to_content: bool = Field(True, description="Trim transparent/near-white margins to the content bounding box.")
+    max_size_px: int = Field(DEFAULT_MAX_SIZE_PX, description="Downscale (never upscale) so the longer side is at most this many px.")
+    preserve_transparency: bool = Field(True, description="Keep alpha through cropping; composite on white at the end.")
+    quantize: bool = Field(False, description="Pre-quantize the raster (usually harmful; vectormark extracts its own palette).")
+
+
+class IdealizeOptions(BaseModel):
+    """Idealization parameters. All optional with sensible defaults."""
+
+    colors: int = Field(DEFAULT_COLORS, description="Max palette colors. A CEILING, not a target — flats stay flat; raise it to let gradients keep their bands.")
+    flatten: bool = Field(False, description="Emit plain paths instead of native SVG primitives and <use> mirror.")
+    no_symmetry: bool = Field(False, description="Disable symmetry detection.")
+    epsilon: float = Field(1.5, description="Primitive/polygon recognition tolerance in pixels.")
+    max_error: float = Field(1.0, description="Bézier fit tolerance in pixels.")
+    preprocess: PreprocessOpts = Field(default_factory=PreprocessOpts, description="Server-side preprocessing options.")
+
+
 @mcp.tool(
     title="Idealize logo",
     description=(
@@ -278,10 +318,12 @@ mcp = FastMCP(
         "openai/toolInvocation/invoked": "Idealized logo.",
     },
 )
-def idealize_logo(image: dict, options: dict | None = None) -> CallToolResult:
+def idealize_logo(image: ImageRef, options: IdealizeOptions | None = None) -> CallToolResult:
     """File-first logo idealization. Returns structured content plus a best-effort image block."""
+    image_dict = image.model_dump(exclude_none=True)
+    options_dict = options.model_dump() if options is not None else None
     try:
-        result, preview = idealize_logo_image(image, options, local_trust=_LOCAL_TRUST)
+        result, preview = idealize_logo_image(image_dict, options_dict, local_trust=_LOCAL_TRUST)
     except ImageError as err:
         raise ToolError(f"[{err.error_code}] {err.message}") from err
     content: list[TextContent | ImageContent] = [
