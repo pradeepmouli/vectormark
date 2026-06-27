@@ -40,7 +40,9 @@ def test_idealize_logo_file_reports_missing_input(tmp_path):
 
 
 def test_stdio_server_exposes_idealize_logo_tool():
-    async def list_tools_and_resources() -> tuple[dict[str, dict], list[str], str, dict]:
+    import json
+
+    async def list_tools_and_resources():
         params = StdioServerParameters(command="uv", args=["run", "vectormark-mcp"])
         async with stdio_client(params) as (read, write):
             async with ClientSession(read, write) as session:
@@ -48,11 +50,12 @@ def test_stdio_server_exposes_idealize_logo_tool():
                 tools = await session.list_tools()
                 resources = await session.list_resources()
                 widget = await session.read_resource(WIDGET_URI)
+                # file-first tool: pass image as a reference dict
                 tool_result = await session.call_tool(
                     "idealize_logo",
                     {
-                        "image_path": "tests/fixtures/daikonic/source.png",
-                        "colors": 4,
+                        "image": {"path": "tests/fixtures/daikonic/source.png"},
+                        "options": {"colors": 4},
                     },
                 )
                 tool_meta = {
@@ -61,19 +64,23 @@ def test_stdio_server_exposes_idealize_logo_tool():
                 }
                 resource_uris = [str(resource.uri) for resource in resources.resources]
                 widget_text = widget.contents[0].text
-                return tool_meta, resource_uris, widget_text, tool_result.structuredContent
+                # list return: dict→TextContent JSON, preview→ImageContent
+                result_data = json.loads(tool_result.content[0].text)
+                return tool_meta, resource_uris, widget_text, result_data
 
-    tool_meta, resource_uris, widget_text, structured = asyncio.run(list_tools_and_resources())
+    tool_meta, resource_uris, widget_text, result = asyncio.run(list_tools_and_resources())
 
     assert "idealize_logo" in tool_meta
-    assert tool_meta["idealize_logo"]["meta"]["ui"]["resourceUri"] == WIDGET_URI
+    meta = tool_meta["idealize_logo"]["meta"]
+    assert meta["ui"]["resourceUri"] == WIDGET_URI
+    assert meta["openai/fileParams"] == ["image"]
     assert "idealize_logo_data" in tool_meta
     assert "render_idealized_logo" in tool_meta
     assert WIDGET_URI in resource_uris
     assert "Logo idealizer" in widget_text
     assert "vectormark" in widget_text
-    assert structured["svg"].startswith("<svg ")
-    assert structured["image_path"].endswith("tests/fixtures/daikonic/source.png")
+    assert result["svg"].startswith("<svg ")
+    assert result["diagnostics"]["input"]["source_kind"] == "local_path"
 
 
 def _png_b64(width=60, height=60):
@@ -129,3 +136,44 @@ def test_data_tool_ignores_output_path_in_http_mode(tmp_path, monkeypatch):
     assert result["svg"].startswith("<svg ")
     assert result["output_path"] is None       # write suppressed
     assert not out.exists()                     # nothing written to disk
+
+
+# ---------------------------------------------------------------------------
+# Task 3: idealize_logo_image helper tests
+# ---------------------------------------------------------------------------
+
+import base64, io
+import numpy as np
+from PIL import Image as _Img
+
+
+def _png_b64_solid(size=(48, 48), color=(30, 100, 220)):
+    buf = io.BytesIO(); _Img.new("RGB", size, color).save(buf, format="PNG")
+    return base64.b64encode(buf.getvalue()).decode()
+
+
+def test_idealize_logo_image_from_data_uri():
+    from vectormark.mcp_server import idealize_logo_image
+    result, preview = idealize_logo_image(
+        {"data_uri": f"data:image/png;base64,{_png_b64_solid()}"}, {"colors": 8}, local_trust=False)
+    assert result["svg"].startswith("<svg ") and result["svg_bytes"] == len(result["svg"].encode())
+    d = result["diagnostics"]
+    assert d["input"]["source_kind"] == "data_uri" and d["input"]["mime_type"] == "image/png"
+    assert d["vectormark"]["colors"] == 8 and "element_count" in d["output"]
+    assert result["preview_available"] in (True, False)        # best-effort
+    assert preview is None or isinstance(preview, (bytes, bytearray))
+
+
+def test_idealize_logo_image_path_blocked_without_local_trust(tmp_path):
+    from vectormark.mcp_server import idealize_logo_image
+    from vectormark.mcp_image import ImageError
+    p = tmp_path / "m.png"; _Img.new("RGB", (16, 16), "white").save(p)
+    # local_trust=True works; False rejects
+    r, _ = idealize_logo_image({"path": str(p)}, None, local_trust=True)
+    assert r["svg"].startswith("<svg ")
+    try:
+        idealize_logo_image({"path": str(p)}, None, local_trust=False)
+    except ImageError as e:
+        assert e.error_code == "IMAGE_UNRESOLVABLE"
+    else:
+        raise AssertionError("path must be rejected without local trust")

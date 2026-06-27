@@ -11,6 +11,14 @@ from pathlib import Path
 from mcp.server.fastmcp import FastMCP
 from PIL import Image
 
+from .mcp_image import (
+    DEFAULT_COLORS,
+    DEFAULT_MAX_SIZE_PX,
+    ImageError,
+    preprocess_image,
+    resolve_image,
+    svg_output_facts,
+)
 from .pipeline import Options, _flatten_on_white, idealize
 
 # Transport is chosen at startup. stdio = local, full-trust (your own machine, your
@@ -158,6 +166,90 @@ def idealize_logo_bytes(
     )
 
 
+def _render_preview_png(svg: str, width: int, height: int, warnings: list[str]) -> bytes | None:
+    """Best-effort: render the SVG to PNG via resvg-py; None (+ a warning) if unavailable."""
+    try:
+        import resvg_py
+        return bytes(resvg_py.svg_to_bytes(svg_string=svg, width=width, height=height))
+    except Exception as exc:
+        warnings.append(f"preview unavailable: {exc}")
+        return None
+
+
+def idealize_logo_image(
+    image: dict, options: dict | None, *, local_trust: bool
+) -> tuple[dict, bytes | None]:
+    """Resolve -> preprocess -> idealize a referenced image. Returns (structured_result,
+    preview_png_bytes|None). Raises ImageError with a structured code on input failure."""
+    options = options or {}
+    pre = options.get("preprocess") or {}
+    resolved = resolve_image(image, local_trust=local_trust)
+
+    arr, meta = preprocess_image(
+        resolved.bytes,
+        crop_to_content=pre.get("crop_to_content", True),
+        max_size_px=pre.get("max_size_px", DEFAULT_MAX_SIZE_PX),
+        preserve_transparency=pre.get("preserve_transparency", True),
+        quantize=pre.get("quantize", False),
+    )
+
+    opts = Options(
+        epsilon=options.get("epsilon", 1.5),
+        max_error=options.get("max_error", 1.0),
+        max_colors=options.get("colors", DEFAULT_COLORS),
+        flatten=options.get("flatten", False),
+        no_symmetry=options.get("no_symmetry", False),
+    )
+    try:
+        svg = idealize(arr, options=opts)
+    except Exception as exc:
+        raise ImageError(
+            "VECTORMARK_FAILED", f"vectormark failed to process the image: {exc}"
+        ) from exc
+
+    with Image.open(io.BytesIO(resolved.bytes)) as src:
+        ow, oh = src.size
+    warnings: list[str] = []
+    preview = _render_preview_png(svg, meta.width, meta.height, warnings)
+
+    diagnostics = {
+        "input": {
+            "source_kind": resolved.source_kind,
+            "mime_type": resolved.mime_type,
+            "bytes": len(resolved.bytes),
+            "sha256": resolved.sha256,
+            "original_width": ow,
+            "original_height": oh,
+        },
+        "processed": {
+            "width": meta.width,
+            "height": meta.height,
+            "cropped": meta.cropped,
+            "resized": meta.resized,
+            "transparent": meta.transparent,
+            "quantized": meta.quantized,
+        },
+        "vectormark": {
+            "colors": opts.max_colors,
+            "flatten": opts.flatten,
+            "no_symmetry": opts.no_symmetry,
+            "epsilon": opts.epsilon,
+            "max_error": opts.max_error,
+        },
+        "output": {"svg_bytes": len(svg.encode()), **svg_output_facts(svg)},
+        "warnings": warnings,
+    }
+    result = {
+        "svg": svg,
+        "width": meta.width,
+        "height": meta.height,
+        "svg_bytes": len(svg.encode()),
+        "preview_available": preview is not None,
+        "diagnostics": diagnostics,
+    }
+    return result, preview
+
+
 mcp = FastMCP(
     "vectormark",
     instructions=(
@@ -167,42 +259,30 @@ mcp = FastMCP(
 )
 
 
-def idealize_logo(
-    image_path: str,
-    output_path: str | None = None,
-    epsilon: float = 1.5,
-    max_error: float = 1.0,
-    colors: int = 16,
-    flatten: bool = False,
-    no_symmetry: bool = False,
-) -> dict[str, object]:
-    """Convert a local raster logo file into structured SVG."""
+@mcp.tool(
+    title="Idealize logo",
+    description=(
+        "Idealize a raster logo into clean editable SVG. Pass the image by reference: a "
+        "ChatGPT/host file (download_url+file_id), a local path, an https url, a data: URI, "
+        "or base64. The server resolves and preprocesses it; no client-side base64 needed."
+    ),
+    meta={
+        "openai/fileParams": ["image"],
+        "ui": {"resourceUri": WIDGET_URI},
+        "openai/outputTemplate": WIDGET_URI,
+        "openai/toolInvocation/invoking": "Idealizing logo...",
+        "openai/toolInvocation/invoked": "Idealized logo.",
+    },
+)
+def idealize_logo(image: dict, options: dict | None = None) -> list:
+    """File-first logo idealization. Returns the structured result plus a preview image."""
+    from mcp.server.fastmcp.utilities.types import Image as MCPImage
 
-    return idealize_logo_file(
-        image_path,
-        output_path=output_path,
-        epsilon=epsilon,
-        max_error=max_error,
-        colors=colors,
-        flatten=flatten,
-        no_symmetry=no_symmetry,
-    ).to_dict()
-
-
-# Filesystem-reading tool: registered only under the local stdio transport. Over an
-# HTTP transport the server may be network-reachable, so arbitrary-path file reads are
-# withheld; remote callers use idealize_logo_data (base64) instead.
-if _LOCAL_TRUST:
-    idealize_logo = mcp.tool(
-        title="Idealize logo",
-        description="Convert a local raster logo file into structured SVG with an interactive preview.",
-        meta={
-            "ui": {"resourceUri": WIDGET_URI},
-            "openai/outputTemplate": WIDGET_URI,
-            "openai/toolInvocation/invoking": "Idealizing logo...",
-            "openai/toolInvocation/invoked": "Idealized logo.",
-        },
-    )(idealize_logo)
+    result, preview = idealize_logo_image(image, options, local_trust=_LOCAL_TRUST)
+    contents: list = [result]
+    if preview is not None:
+        contents.append(MCPImage(data=preview, format="png"))
+    return contents
 
 
 @mcp.tool(
