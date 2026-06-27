@@ -26,9 +26,10 @@ from .emit import (
 )
 from .candidate import Candidate, Fill, FlatFill, LinearGradientFill, RadialGradientFill, RasterFill
 from .components import decompose_components
+from .fill_fit import fit_fill
 from .fit import Shape, _fmt
-from .gradient import detect_gradients
 from .occlusion import ScenePrimitive, reconstruct_scene
+from .surface_merge import merge_surfaces
 from .segment import segment
 from .selection import SelectionPolicy
 from .selector import select_geometry
@@ -106,23 +107,24 @@ def _build_report(cands: list[Candidate], axes: list[AxisLine]) -> IdealizeRepor
     strategies: dict[str, int] = {}
     gradients = 0
     for c in cands:
-        if c.source == "gradient":
+        if isinstance(c.fill, (LinearGradientFill, RadialGradientFill)):
             gradients += 1
-        if c.strategy is not None:                 # None for occlusion / lens / gradient
+        if c.strategy is not None:                 # None for occlusion / lens
             strategies[c.strategy] = strategies.get(c.strategy, 0) + 1
     return IdealizeReport(types.MappingProxyType(dict(strategies)), gradients, len(cands), tuple(axes))
 
 
 def build_candidates(
     reconstructed: list, straddlers: list[Region], pairs: list[tuple[Region, Region]],
-    loners: list[Region], gradient_fills: list[tuple[Region, dict]],
+    loners: list[Region], fills: dict[int, Fill],
     opt: Options, axis: Axis | None,
     source_rgb: np.ndarray | None, *, base: int = 0,
 ) -> list[Candidate]:
     """Decide geometry + fill per element and return the candidate list in exact
-    paint order: occlusion (by z) -> regions (by area desc) -> gradients (detect
-    order). Elements whose geometry fit returns None are dropped (matching the
-    old per-loop `continue`, so the emit-time id sequence is unchanged)."""
+    paint order: occlusion (by z) -> regions (by area desc). Elements whose geometry
+    fit returns None are dropped (matching the old per-loop `continue`, so the
+    emit-time id sequence is unchanged). A region absent from `fills` falls back to
+    FlatFill(region.color_hex)."""
     cands: list[Candidate] = []
 
     for elem in sorted(
@@ -154,33 +156,9 @@ def build_candidates(
                                           element=element, eid=eid)
         if shape is None:
             continue
-        cands.append(Candidate(shape, FlatFill(region.color_hex), "region",
+        fill = fills.get(region.label, FlatFill(region.color_hex))
+        cands.append(Candidate(shape, fill, "region",
                                mirror=axis if is_pair else None, strategy=strategy))
-
-    # Gradient footprints paint after all flats/occlusion. _expand_footprint can
-    # grow a footprint over former-background pixels, so strict spatial
-    # disjointness no longer holds; non-matching elements survive as even-odd
-    # holes / separate flats, keeping paint order safe. True behind-a-flat
-    # layering of a gradient footprint is out of scope.
-    for footprint, model in gradient_fills:
-        # Same sN scheme as the region loop (shared base + cands counter; gradients emit last).
-        eid = f"s{base + len(cands)}"
-        element = opt.selection.for_id(eid) if opt.selection is not None else None
-        cr = opt.corner_radius if opt.corner_radius is not None else region_corner_radius(footprint.mask)
-        shape, _strategy = select_geometry(footprint, opt, None, cr, source_rgb,
-                                           element=element, eid=eid)
-        if shape is None:
-            continue
-        g = model["geometry"]
-        kind = model["kind"]
-        fill: Fill
-        if kind == "linear":
-            fill = LinearGradientFill(g, model["stops"])
-        elif kind == "radial":
-            fill = RadialGradientFill(g, model["stops"])
-        else:  # raster
-            fill = RasterFill(g, model["png_b64"])
-        cands.append(Candidate(shape, fill, "gradient"))
 
     return cands
 
@@ -210,11 +188,22 @@ def _render_body(
             frame_axes.append(AxisLine(float(axis.x), float(ys.min()), float(axis.x), float(ys.max())))
         reconstructed, comp = reconstruct_scene(comp, axis, (h, w))
 
-        # Per component: one local axis, its own occlusion/gradient pass.
-        # (Single-component marks take this loop exactly once -> identical to pre-slice-5.)
-        gradient_fills: list[tuple[Region, dict]] = []
+        # Seam-merge adjacent regions into surfaces, then fit fill per merged surface.
+        # This 2-pass drives only path A (seam_is_soft): flat fills are passed into
+        # merge_surfaces so none of the surfaces entering the merge loop carry gradient
+        # fills, and gradients_continuous (path B) therefore returns False for every pair.
+        # Path B is intentionally preserved in merge_surfaces and is covered by its own
+        # unit tests, but is NOT exercised end-to-end from here because intermediate
+        # gradient-type mismatches (radial vs linear on partial merges) made per-region
+        # path-B merges unreliable.
+        # TODO(follow-up): revisit B-primary once per-region gradient-kind is stable.
         if rgb is not None:
-            gradient_fills, comp = detect_gradients(comp, rgb)
+            flat_filled = [(r, FlatFill(r.color_hex)) for r in comp]
+            merged = merge_surfaces(flat_filled, rgb)
+            comp = [r for r, _ in merged]
+            fills = {r.label: fit_fill(r.mask, rgb, flat_hex=r.color_hex) for r, _ in merged}
+        else:
+            fills = {}
 
         if axis is not None:
             straddlers, pairs, loners = classify_regions(comp, axis)
@@ -222,7 +211,7 @@ def _render_body(
             straddlers, pairs, loners = list(comp), [], []
 
         cands += build_candidates(
-            reconstructed, straddlers, pairs, loners, gradient_fills, opt, axis, rgb,
+            reconstructed, straddlers, pairs, loners, fills, opt, axis, rgb,
             base=len(cands),
         )
 

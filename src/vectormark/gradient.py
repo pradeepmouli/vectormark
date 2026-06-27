@@ -14,8 +14,6 @@ from PIL import Image
 from scipy import ndimage as ndi
 
 from .color import srgb_to_oklab
-from .occlusion import region_adjacency
-from .types import Region
 
 _MIN_BANDS = 3
 _GATE_DELTA_E = 0.05      # mean OKLab ΔE bar: a fitted model must re-render within this to be accepted
@@ -25,26 +23,10 @@ _MIN_STOP_SPAN = 0.02    # OKLab end-to-end travel a fit must show to count as a
 _BLOB_DOMINANCE = 0.85   # smooth-gradient path: min fraction of the foreground that must lie
                          # in a single connected component for the mark to be treated as one
                          # gradient blob (rejects multi-glyph wordmarks before any fit).
-_THIN_BAND_TOL = 0.10   # max mean band-area fraction (group_area / total_fg / band count) for a
-                        # >= _MIN_BANDS group to count as a finely-quantized continuous tone rather
-                        # than a few chunky similar-coloured facets. Keeps faceted logos (Sketch)
-                        # crisp instead of smearing them into a gradient that ΔE cannot tell apart.
-_SMOOTH_VAR_TOL = 0.005  # min mean within-region OKLab variation for a DOMINANT group to count
-                         # as a genuine continuous tone (vs distinct flat regions). A smooth
-                         # gradient's bands quantize varying pixels (var > 0); distinct flats are
-                         # internally uniform (var ~ 0). Without this the dominance branch would
-                         # gradient-fit a crisp two-tone logo whose tones merge under MERGE_TOL.
 _STRETCH_GRID_STEPS = (8, 16, 24, 32, 48)   # NxN downsample sizes for the stretch-fill;
                                             # the renderer bilinearly stretches the grid
                                             # back over the footprint. Last entry is the cap.
 _STRETCH_TARGET = 0.05                       # grow the grid until mean per-pixel ΔE <= this.
-_PARAM_FALLBACK_TOL = 0.07   # max mean per-pixel ΔE for a merged component to prefer an
-                             # editable parametric gradient over a raster stretch-fill.
-
-MERGE_TOL = 0.15   # max OKLab colour step between two spatially-adjacent regions for them
-                   # to merge into one vector component. Below this = one smooth field (gradient
-                   # bands, within-facet shading); above = a real boundary (facet edge, outline).
-                   # Corpus: within-field steps <=0.12, boundary steps >=0.27 -> clean gap.
 
 
 def _hex_to_oklab(hex_colors: list[str]) -> np.ndarray:
@@ -63,40 +45,6 @@ def _principal_axis(vectors: np.ndarray, *, eps: float) -> np.ndarray | None:
         return None
     _, _, vt = np.linalg.svd(centred, full_matrices=False)
     return vt[0]
-
-
-def merge_components(regions: list[Region], *, tol: float = MERGE_TOL) -> list[list[Region]]:
-    """Agglomeratively merge spatially-adjacent regions whose OKLab colour step is <= tol
-    into single components (union-find over region_adjacency). Merges adjacent regions whose
-    colours form a locally-smooth field (straight ramps and curved multi-hue arcs alike) into
-    one component: a region with no small-step neighbour is its own singleton group.
-    Deterministic (groups ordered by their minimum label)."""
-    by_label = {r.label: r for r in regions}
-    adj = region_adjacency(regions)
-    colors = {r.label: _hex_to_oklab([r.color_hex])[0] for r in regions}
-    parent = {r.label: r.label for r in regions}
-
-    def find(x: int) -> int:
-        while parent[x] != x:
-            parent[x] = parent[parent[x]]
-            x = parent[x]
-        return x
-
-    def union(a: int, b: int) -> None:
-        ra, rb = find(a), find(b)
-        if ra != rb:
-            parent[max(ra, rb)] = min(ra, rb)        # attach to lower label (deterministic)
-
-    for r in regions:
-        for n in sorted(adj[r.label]):
-            if n > r.label and n in by_label:
-                if float(np.linalg.norm(colors[r.label] - colors[n])) <= tol:
-                    union(r.label, n)
-
-    groups: dict[int, list[Region]] = {}
-    for r in regions:
-        groups.setdefault(find(r.label), []).append(r)
-    return [g for _, g in sorted(groups.items(), key=lambda kv: min(m.label for m in kv[1]))]
 
 
 def _rgb_to_hex(rgb: np.ndarray) -> str:
@@ -372,33 +320,6 @@ def fit_gradient(mask: np.ndarray, rgb_image: np.ndarray) -> dict | None:
     return best[1] if best is not None else None
 
 
-def _expand_footprint(model: dict, mask: np.ndarray, rgb_image: np.ndarray) -> np.ndarray:
-    """Grow `mask` to include pixels outside it whose model-predicted colour matches
-    the actual pixel within _GATE_DELTA_E. This recovers pixels that were classified
-    as 'background' by the segmenter but are genuinely part of the gradient (the
-    most-common border colour is sometimes the end of a full-canvas gradient rather
-    than a neutral plate).
-
-    Absorption is bounded to the connected component(s) of matching pixels that touch
-    the original band mask, so a disconnected same-colour patch elsewhere is never
-    swallowed. (A degenerate full-canvas gradient whose endpoint stop ≈ the page
-    colour can still bridge across the page — but the render stays correct because
-    only model-matching pixels are absorbed.)"""
-    outside = ~mask
-    if not outside.any():
-        return mask
-    oy, ox = np.where(outside)
-    per_pixel_de = _per_pixel_delta_e(model, oy, ox, rgb_image)
-    good = per_pixel_de <= _GATE_DELTA_E
-    if not good.any():
-        return mask
-    match = mask.copy()
-    match[oy[good], ox[good]] = True
-    labels, _ = ndi.label(match)                 # 4-connectivity by default
-    keep = set(labels[mask].tolist()) - {0}      # components overlapping the band mask
-    return np.isin(labels, list(keep))
-
-
 def _dominant_blob_fraction(mask: np.ndarray) -> float:
     """Fraction of the foreground occupied by its largest connected component
     (4-connectivity). 1.0 = one solid blob; ~0 = many disconnected pieces; 0.0 if empty."""
@@ -455,85 +376,3 @@ def _fit_stretch(mask: np.ndarray, rgb_image: np.ndarray) -> dict | None:
     return {"kind": "raster", "geometry": geometry, "png_b64": _png_b64(best[1])}
 
 
-def _union_mask(regions: list[Region], shape: tuple[int, int]) -> np.ndarray:
-    """Boolean OR of the masks of `regions`, as an all-False array of `shape` if empty."""
-    m = np.zeros(shape, bool)
-    for r in regions:
-        m |= r.mask
-    return m
-
-
-def _component_fill(mask: np.ndarray, rgb_image: np.ndarray) -> dict | None:
-    """Pick a fill model for one component's footprint: a SEARCHED parametric gradient
-    (linear or radial — the centre/axis search finds a well-centred radial for a spherical
-    or glossy surface, which the cheap heuristic settles a poor linear on), else a raster
-    stretch-fill. None when the field is too flat to be anything but a solid colour."""
-    bp = _best_parametric(mask, rgb_image)
-    if bp is None:
-        return None                                  # too flat / no travel -> solid colour
-    model, mean_de, _median = bp
-    if mean_de <= _PARAM_FALLBACK_TOL:
-        return model                                 # editable gradient (searched -> radial for a sphere)
-    return _fit_stretch(mask, rgb_image)             # 2-D field a gradient can't capture -> raster
-
-
-def _within_region_variation(group: list[Region], rgb_image: np.ndarray) -> float:
-    """Mean OKLab deviation of each region's original pixels from that region's own flat
-    colour, averaged over the group. ~0 for genuinely flat regions; > 0 for the quantization
-    bands of a continuous tone."""
-    devs: list[float] = []
-    for r in group:
-        ys, xs = np.where(r.mask)
-        if len(xs) == 0:
-            continue
-        px = srgb_to_oklab(rgb_image[ys, xs].astype(float) / 255.0)
-        col = _hex_to_oklab([r.color_hex])[0]
-        devs.append(float(np.linalg.norm(px - col, axis=1).mean()))
-    return float(np.mean(devs)) if devs else 0.0
-
-
-def _group_is_fillable(group: list[Region], total_fg: float, rgb_image: np.ndarray) -> bool:
-    """A merged group is eligible for a gradient/raster fill if it is a dominant blob that is a
-    genuine continuous tone (>= _BLOB_DOMINANCE of the foreground AND within-region variation
-    >= _SMOOTH_VAR_TOL, so a dominant two-tone FLAT logo is not gradient-fit) OR a finely-
-    quantized continuous tone (>= _MIN_BANDS bands, each thin: mean band-area fraction <
-    _THIN_BAND_TOL). The thinness test keeps faceted logos crisp; the within-region-variation
-    test keeps crisp two-tone flats from being gradient-fit via the dominance path."""
-    af = sum(r.area for r in group) / total_fg
-    dominant = af >= _BLOB_DOMINANCE and _within_region_variation(group, rgb_image) >= _SMOOTH_VAR_TOL
-    return dominant or (len(group) >= _MIN_BANDS and af / len(group) < _THIN_BAND_TOL)
-
-
-def detect_gradients(
-    regions: list[Region], rgb_image: np.ndarray
-) -> tuple[list[tuple[Region, dict]], list[Region]]:
-    """Merge spatially-adjacent regions into smooth-field components (colour-step merge),
-    then choose a fill per *eligible* component. Returns (fills, remaining).
-
-    Fill-eligibility gate (restores the two guards the colour-step merge alone drops, so
-    adjacent distinct-but-similar flat shapes and mildly-noisy single flats are NOT
-    over-fit): a group qualifies only if it is a dominant blob (area >= _BLOB_DOMINANCE of
-    the foreground) OR a finely-quantized ramp (>= _MIN_BANDS bands, each averaging <
-    _THIN_BAND_TOL of the total foreground area — chunky similar-coloured facets like Sketch
-    are rejected). An eligible component that fits a gradient/raster becomes a (footprint_region, model)
-    fill (gradient footprints grow into model-matching background via _expand_footprint).
-    Every other region — ineligible groups, eligible-but-unfittable (near-flat) groups,
-    and unmerged singletons — stays in `remaining` as its original region(s)."""
-    fills: list[tuple[Region, dict]] = []
-    consumed: set[int] = set()
-    shape = rgb_image.shape[:2]
-    total_fg = float(sum(r.area for r in regions)) or 1.0
-    for group in merge_components(regions):
-        if not _group_is_fillable(group, total_fg, rgb_image):
-            continue                                 # leave regions in `remaining` as-is
-        mask = _union_mask(group, shape)
-        model = _component_fill(mask, rgb_image)
-        if model is None:
-            continue                                 # not a field -> regions stay flat
-        if model["kind"] in ("linear", "radial"):
-            mask = _expand_footprint(model, mask, rgb_image)
-        rep = max(group, key=lambda r: r.area)
-        fills.append((Region(label=rep.label, mask=mask, color_hex=rep.color_hex), model))
-        consumed.update(m.label for m in group)
-    remaining = [r for r in regions if r.label not in consumed]
-    return fills, remaining
