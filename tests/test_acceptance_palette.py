@@ -32,7 +32,10 @@ def _settir_synth():
 def _fills(svg):
     def rgb(h):
         return tuple(int(h[i:i + 2], 16) for i in (1, 3, 5))
-    return [rgb(f) for f in re.findall(r'fill="(#[0-9A-Fa-f]{6})"', svg)]
+    # include both flat fills and gradient stop colors so gradient-filled elements are visible
+    hexes = re.findall(r'fill="(#[0-9A-Fa-f]{6})"', svg)
+    hexes += re.findall(r'stop-color="(#[0-9A-Fa-f]{6})"', svg)
+    return [rgb(f) for f in hexes]
 
 
 def test_settir_style_mark_keeps_blue_through_idealize():

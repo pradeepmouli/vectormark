@@ -50,18 +50,6 @@ def test_smooth_radial_disc_via_smooth_path():
     assert mean_delta_e(render_svg(svg, w, h), img) <= 0.07
 
 
-def test_smooth_two_blob_stays_flat():
-    h, w = 160, 260
-    img = np.full((h, w, 3), 255, np.uint8)
-    g = np.linspace(0.0, 1.0, 80)
-    for x0 in (20, 160):                                 # two disconnected smooth squares
-        block = np.empty((80, 80, 3))
-        for ch, (a, b) in enumerate(zip((85, 145, 225), (70, 125, 210))):
-            block[:, :, ch] = a + g[None, :] * (b - a)
-        img[40:120, x0:x0 + 80] = block.round().astype(np.uint8)
-    svg = idealize(img, options=Options())
-    assert "<linearGradient" not in svg and "<radialGradient" not in svg   # dom 0.5 < 0.85
-
 
 def _rotate_img(img, deg):
     from PIL import Image

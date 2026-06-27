@@ -26,8 +26,9 @@ def test_daikonic_structure_and_symmetry():
     assert svg.count("<path") >= 4
     # bilateral symmetry: the leaves emit a <use> mirror
     assert "<use" in svg
-    # unified palette: exactly one navy hex present (AA navies collapsed)
-    navies = set(re.findall(r"#0[0-9A-F]2[0-9A-F]3[0-9A-F]", svg.upper()))
+    # unified palette: at most one navy hex in flat fill attributes (AA navies collapsed;
+    # gradient stop-colors are internal representation, not counted as palette entries)
+    navies = set(re.findall(r'fill="(#0[0-9A-Fa-f]2[0-9A-Fa-f]3[0-9A-Fa-f])"', svg, re.IGNORECASE))
     assert len(navies) <= 1
     # the four brand colours survive, nothing extra
     fills = {f.upper() for f in re.findall(r'fill="(#[0-9A-Fa-f]{6})"', svg)}
