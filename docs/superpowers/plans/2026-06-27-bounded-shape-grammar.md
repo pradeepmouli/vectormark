@@ -11,7 +11,7 @@
 ## Global Constraints
 
 - Python ≥ 3.12, pure-Python. DRY/YAGNI/TDD. Run tests with `uv run pytest`; use `rg` not `grep`.
-- Bounds (named constants, starting values — CALIBRATED against the corpus in Task 5, not assumed): `MAX_PATH_SEGMENTS = 12`, `MAX_POLY_VERTICES = 10`, `HOLE_AREA_FRACTION = 0.01` (inner contour kept only if its area ≥ this × outer-contour area).
+- Bounds (named constants, starting values — CALIBRATED against the corpus in Task 6, not assumed): `MAX_PATH_SEGMENTS = 12`, `MAX_POLY_VERTICES = 10`, `HOLE_AREA_FRACTION = 0.01` (inner contour kept only if its area ≥ this × outer-contour area), plus `ROBUST_RESIDUAL_TOL = 1.0` (Task 5).
 - A bounded fitter returns `None` (no candidate) when it cannot satisfy the bound — it must NEVER return an over-bound shape.
 - The candidate set must never be empty for a real region: a guaranteed-bounded "no-fit" fallback (strategy label `NOFIT`) is emitted only when nothing else qualifies, so `select_geometry` always returns a shape.
 - DO NOT touch fills (FlatFill/gradient/raster), the merge, or `fit_fill` — geometry only. Decomposition, performance, and raster are OUT OF SCOPE (separate follow-ups).
@@ -437,7 +437,114 @@ Co-Authored-By: Claude Sonnet 4.6 <noreply@anthropic.com>"
 
 ---
 
-### Task 5: Corpus calibration + V-bird acceptance
+### Task 5: Robust noise-tolerant recognition acceptance
+
+**Files:**
+- Modify: `src/vectormark/fit.py` (`recognize_primitive`, `recognize_polygon`, residual helpers)
+- Modify: `src/vectormark/refine.py` (`rounded_trapezoid_fit`, `half_ellipse_cap_fit` acceptance gates)
+- Test: `tests/test_fit.py`
+
+**Interfaces:**
+- Produces: `ROBUST_RESIDUAL_TOL = 1.0` (a multiplier on `epsilon`/`max_error` for the robust acceptance); `_robust_residual(model, pts) -> float` (RMS of `|model.residuals(pts)|`) and `_robust_point_to_polyline(pts, poly) -> float` (RMS of per-point distances) in `fit.py`. Recognizers accept on the ROBUST (RMS) residual ≤ tolerance, not the MAX — so a noisy boundary minority no longer vetoes a genuine shape (a noisy disc → `circle`, not NOFIT).
+
+**Context:** Every recognizer currently gates on the MAX residual (`_max_residual` at fit.py:26 = `abs(residuals).max()`; `_max_point_to_polyline` at fit.py:88; refine.py's `.max() > max_error*1.6` at refine.py:218). The least-squares fits already use the bulk; only acceptance is brittle. On a noisy/eroded disc the MAX residual is ~2-3px (> epsilon=1.5) but the RMS is ~1.4px — so switching acceptance to RMS recovers the circle. The MAX-residual helpers stay for any caller that needs them, but the recognition GATES switch to robust.
+
+- [ ] **Step 1: Write the failing tests**
+
+Add to `tests/test_fit.py`:
+
+```python
+import numpy as np
+from vectormark.fit import recognize_primitive, recognize_polygon
+from vectormark.contour import outer_contour
+
+
+def _disc_mask(r=20, noise=False, seed=0):
+    H = W = 80
+    yy, xx = np.ogrid[:H, :W]
+    m = ((yy - 40) ** 2 + (xx - 40) ** 2) <= r ** 2
+    if noise:  # erode a noisy 2px antialiased ring, like a quantized dot
+        rng = np.random.default_rng(seed)
+        ring = (((yy - 40) ** 2 + (xx - 40) ** 2) <= r ** 2) & ~(((yy - 40) ** 2 + (xx - 40) ** 2) <= (r - 2) ** 2)
+        m = m & ~(ring & (rng.random((H, W)) < 0.5))
+    return m
+
+
+def test_noisy_disc_recovers_as_circle():
+    # the eroded/quantized dot must recognize as a circle (fit to the bulk), not be rejected
+    c = outer_contour(_disc_mask(noise=True))
+    shp = recognize_primitive(c, epsilon=1.5)
+    assert shp is not None and shp.kind == "circle"
+
+
+def test_clean_disc_still_circle():
+    shp = recognize_primitive(outer_contour(_disc_mask()), epsilon=1.5)
+    assert shp is not None and shp.kind == "circle"
+
+
+def test_square_is_not_accepted_as_circle():
+    # robustness must NOT over-accept: a square's points are far from any circle
+    H = W = 80
+    m = np.zeros((H, W), bool); m[20:60, 20:60] = True
+    shp = recognize_primitive(outer_contour(m), epsilon=1.5)
+    assert shp is None or shp.kind in ("rect", "ellipse")  # never 'circle'
+```
+
+- [ ] **Step 2: Run to verify they fail**
+
+Run: `uv run pytest tests/test_fit.py -k "noisy_disc or clean_disc_still or not_accepted_as_circle" -v`
+Expected: FAIL — `test_noisy_disc_recovers_as_circle` fails (MAX residual rejects the noisy disc → `None`).
+
+- [ ] **Step 3: Implement robust acceptance**
+
+In `src/vectormark/fit.py`, add near `_max_residual` (keep `_max_residual` — it may be used elsewhere):
+
+```python
+ROBUST_RESIDUAL_TOL = 1.0   # acceptance multiplier on epsilon for the robust (RMS) residual.
+
+
+def _robust_residual(model, pts: np.ndarray) -> float:
+    """RMS of |perpendicular residuals| — tolerant of a noisy boundary minority,
+    unlike the MAX. The least-squares model already fits the bulk; this just accepts
+    on the bulk error instead of the worst outlier."""
+    r = np.asarray(model.residuals(pts), float)
+    return float(np.sqrt(np.mean(r * r)))
+
+
+def _robust_point_to_polyline(pts: np.ndarray, poly: np.ndarray) -> float:
+    """RMS of each point's distance to the nearest polyline segment (robust counterpart
+    of `_max_point_to_polyline`)."""
+    segs = np.stack([poly[:-1], poly[1:]], axis=1)
+    d = np.array([min(_point_seg_dist(p, s[0], s[1]) for s in segs) for p in pts])
+    return float(np.sqrt(np.mean(d * d)))
+```
+
+In `recognize_primitive`, change the circle and ellipse acceptance from `_max_residual(...) <= epsilon` to `_robust_residual(...) <= epsilon * ROBUST_RESIDUAL_TOL` (both the circle gate at fit.py:41 and the ellipse gate at fit.py:51).
+
+In `recognize_polygon`, change the gate `if _max_point_to_polyline(pts, np.vstack([simp, simp[0]])) > epsilon: return None` to use `_robust_point_to_polyline(...) > epsilon * ROBUST_RESIDUAL_TOL`.
+
+In `src/vectormark/refine.py`, change the straight-side acceptance `if np.abs(edge[:, 0] - (m * edge[:, 1] + b)).max() > max_error * 1.6: return None` (refine.py:218) to an RMS test: `if np.sqrt(np.mean((edge[:, 0] - (m * edge[:, 1] + b)) ** 2)) > max_error * 1.6: return None`. Apply the same MAX→RMS change to any other `.max() > ...` residual gate in `rounded_trapezoid_fit`/`half_ellipse_cap_fit` that rejects a side/cap on a single outlier (read the file; convert the residual-acceptance `.max()` calls, NOT genuine geometric `.max()`/`.min()` of coordinates).
+
+- [ ] **Step 4: Run to verify they pass**
+
+Run: `uv run pytest tests/test_fit.py -k "noisy_disc or clean_disc_still or not_accepted_as_circle" -v`
+Expected: PASS.
+
+Run: `uv run pytest -q`
+Expected: existing recognizer tests may shift (more shapes now recognized as primitives/polygons where they previously fell through). Re-derive each changed expectation from the new (correct) recognition; do NOT weaken. List every changed test in the report/commit. The pre-existing MCP-stdio test is not yours.
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add src/vectormark/fit.py src/vectormark/refine.py tests/test_fit.py
+git commit -m "feat(fit): robust (RMS) recognition acceptance — fit to evidence, not the noisy boundary
+
+Co-Authored-By: Claude Sonnet 4.6 <noreply@anthropic.com>"
+```
+
+---
+
+### Task 6: Corpus calibration + V-bird acceptance
 
 **Files:**
 - Modify: calibration constants in `src/vectormark/fit.py` / `src/vectormark/contour.py` only if the corpus shows it

@@ -66,6 +66,14 @@ Also out of scope: **performance** (the slow occlusion `binary_erosion` and the 
 - **Corpus regression:** the bound must NOT degrade currently-good outputs — genuinely-curvy-but-simple logos must still fit within the bound (calibrate `MAX_PATH_SEGMENTS` so they survive); flats unchanged. Compare before/after element + segment counts and render-ΔE; flag any mark that newly hits the no-fit path (a decomposition candidate).
 - **Unit:** `fit_path` returns `None` past the segment bound when error can't be met; `recognize_polygon` respects the vertex cap; a sub-threshold inner contour is dropped; a circle is recovered from an eroded-ring synthetic dot.
 
+## Addendum — Robust noise-tolerant recognition (2026-06-27, after seeing the output)
+
+Rendering the V-bird through the bounded grammar fixed the fraying and specks (the bound's job) but **over-simplified**: dots came out as angular NOFIT polygons (not circles) and the wings' rounded corners were lost. Diagnosis: for a noisy/eroded region, the circle, polygon, AND rounded-shape fitters all **reject** it — every recognizer gates on the **MAX residual** (`_max_residual` = `abs(residuals).max()`; `_max_point_to_polyline`; the refine fits' `.max() > max_error*1.6`), so a few px of antialiased boundary jitter veto a genuinely-circular dot or rounded wing → the region falls to the `NOFIT` loose polygon. The least-squares fits (skimage `CircleModel`/`EllipseModel`) already fit the *bulk* correctly; only the **acceptance test** is brittle. This is "fit to evidence" (a stated goal) not actually delivered.
+
+**Fix (this branch):** change recognizer acceptance from the MAX residual to a **robust statistic** (RMS or a high-but-not-max percentile / median of `|residuals|`) so a noisy boundary minority can no longer veto a genuine shape. Apply consistently to `recognize_primitive` (circle, ellipse), `recognize_polygon` (a robust `point-to-polyline`), and the refine fits (`rounded_trapezoid_fit`, `half_ellipse_cap_fit`). With render-ΔE selection, a noisy disc then recognizes as a `circle` and a noisy wing as a rounded trapezoid (its better corner fidelity beats the angular polygon), instead of NOFIT. The robust statistic + threshold are calibrated against the corpus.
+
+**Planned follow-up (separate spec, OUT OF SCOPE here):** **contour smoothing** — denoise the boundary itself (the silhouette-cleanup we deferred) so the emitted *edge* is smooth, not just the recognized *shape*. Robust recognition recovers the right shape; smoothing would further clean any residual edge roughness on free paths. Deferred until robust fitting is in and we see what edge roughness remains.
+
 ## Risks
 
 - **Bound too low** → over-rejects a legitimately curvy simple logo → it hits the no-fit interim (loose fit) or degrades. Mitigation: calibrate `MAX_PATH_SEGMENTS`/`MAX_POLY_VERTICES` against the corpus; the bound must be generous enough to keep good outputs while disqualifying fraying (dozens of segments).
