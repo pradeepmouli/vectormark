@@ -14,6 +14,10 @@ from .gradient import _GATE_DELTA_E, _best_parametric
 # region is effectively flat, skip the expensive parametric search entirely.
 # Real gradients produce mean centroid-spread ≈ 0.010+ (genuine spans ≥ 0.039
 # end-to-end per _MIN_STOP_SPAN; flat-with-AA spans ≈ 0). 0.005 is well below.
+# TEMPORARY perf guard (avoids a flat-logo regression vs the pre-decoupling pipeline).
+# This is a heuristic shortcut around the exact algorithm; RETIRE it once the parametric
+# search / occlusion hot paths are made fast natively (algorithmic + numba/Rust follow-up),
+# so correctness never depends on a threshold. See the perf follow-up.
 _FLAT_OKLAB_SPREAD_THRESHOLD = 0.005
 
 
