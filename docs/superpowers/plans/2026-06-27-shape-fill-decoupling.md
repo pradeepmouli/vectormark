@@ -140,17 +140,21 @@ Co-Authored-By: Claude Sonnet 4.6 <noreply@anthropic.com>"
 
 ---
 
-### Task 2: `seam_is_soft` — source edge test across a shared border
+### Task 2: seam tests — gradient continuity (B) + source-edge softness (A)
 
 **Files:**
 - Create: `src/vectormark/surface_merge.py`
 - Test: `tests/test_surface_merge.py`
 
+The merge (Task 3) is a hybrid: **B is primary** — when both regions fit gradients, merge if one's color at the seam matches the other's within a ΔE (lead-meets-tail). **A is the fallback** — when a narrow region devolved to a flat fill (too little span to fit a gradient), merge on source-seam softness instead. This task builds both predicates.
+
 **Interfaces:**
-- Consumes: `color.srgb_to_oklab`.
+- Consumes: `color.srgb_to_oklab`; `gradient._model_t`, `gradient._interp_stops_rgb`; `candidate.Fill/LinearGradientFill/RadialGradientFill`; `scipy.ndimage`.
 - Produces:
-  - `seam_pairs(mask_a, mask_b, rgb) -> tuple[np.ndarray, np.ndarray]` — for every 4-adjacent pixel pair straddling the A|B boundary (an `A` pixel touching a `B` pixel), the two `(N,3)` uint8 color arrays `(colors_a, colors_b)`. Empty `(0,3)` arrays if the masks are not 4-adjacent.
-  - `seam_is_soft(mask_a, mask_b, rgb, *, edge_de=0.06) -> bool` — True iff the masks are adjacent AND the source colors transition smoothly across the shared border: the MEDIAN OKLab ΔE of the straddling pixel pairs is below `edge_de`. A within-surface band seam is soft (a single ramp step); a real object edge — including a same-color feature's border — spikes above `edge_de`.
+  - `seam_pairs(mask_a, mask_b, rgb) -> tuple[np.ndarray, np.ndarray]` — for every 4-adjacent pixel pair straddling the A|B boundary, the two `(N,3)` uint8 color arrays `(colors_a, colors_b)`. Empty `(0,3)` arrays if not 4-adjacent.
+  - `seam_band(mask_a, mask_b, *, width=2) -> tuple[np.ndarray, np.ndarray]` — `(ys, xs)` of `mask_a` pixels within `width` px of `mask_b` (the A-side of the seam).
+  - `seam_is_soft(mask_a, mask_b, rgb, *, edge_de=0.06) -> bool` **(A)** — True iff adjacent AND the median straddling-pair OKLab ΔE is below `edge_de`. A within-surface band seam is soft; a real object edge — even a same-color feature's border — spikes above `edge_de`.
+  - `gradients_continuous(fill_a, mask_a, fill_b, mask_b, *, seam_de=0.045) -> bool` **(B)** — True iff BOTH fills are gradients, the masks are adjacent, and each fill's model rendered at the shared seam agrees with the other's (mean OKLab ΔE < `seam_de`). Returns False if either fill is flat (that pair takes the A path).
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -158,7 +162,8 @@ Create `tests/test_surface_merge.py`:
 
 ```python
 import numpy as np
-from vectormark.surface_merge import seam_is_soft
+from vectormark.surface_merge import seam_is_soft, gradients_continuous
+from vectormark.fill_fit import fit_fill
 
 
 def _ramp(h, w, c0, c1):
@@ -208,11 +213,31 @@ def test_non_adjacent_masks_are_not_soft():
     rgb, a, _b = _full_ramp_split()
     far = np.zeros_like(a); far[:5, 70:75] = True         # disjoint from a (a is left half)
     assert not seam_is_soft(a, far, rgb)
+
+
+# ── B: gradient-continuity path (both regions wide enough to fit a gradient) ──
+
+def test_two_gradient_halves_are_continuous():
+    # each half of a wide ramp spans enough colour to fit a gradient -> compare at the seam
+    rgb, a, b = _full_ramp_split()
+    fa, fb = fit_fill(a, rgb, flat_hex="#000000"), fit_fill(b, rgb, flat_hex="#000000")
+    assert gradients_continuous(fa, a, fb, b)
+
+
+def test_gradient_meets_flat_is_not_continuous():
+    # one side ramps, the other is a uniform patch (flat) -> B does not apply (False)
+    H, W = 40, 80
+    rgb = _ramp(H, W, (20, 40, 200), (220, 40, 20))
+    rgb[:, W // 2:] = (20, 60, 210)
+    a = np.zeros((H, W), bool); a[:, : W // 2] = True
+    b = np.zeros((H, W), bool); b[:, W // 2:] = True
+    fa, fb = fit_fill(a, rgb, flat_hex="#000000"), fit_fill(b, rgb, flat_hex="#143CD2")
+    assert not gradients_continuous(fa, a, fb, b)
 ```
 
 - [ ] **Step 2: Run to verify they fail**
 
-Run: `uv run pytest tests/test_surface_merge.py -k "soft" -v`
+Run: `uv run pytest tests/test_surface_merge.py -k "soft or continuous" -v`
 Expected: FAIL — `vectormark.surface_merge` does not exist.
 
 - [ ] **Step 3: Implement the seam test**
@@ -229,10 +254,25 @@ are one surface, never how to draw an edge."""
 from __future__ import annotations
 
 import numpy as np
+from scipy import ndimage
 
+from .candidate import Fill, LinearGradientFill, RadialGradientFill
 from .color import srgb_to_oklab
+from .gradient import _interp_stops_rgb, _model_t
 
 _NEIGHBORS = ((1, 0), (-1, 0), (0, 1), (0, -1))
+
+
+def _kind(fill: Fill) -> str | None:
+    if isinstance(fill, LinearGradientFill):
+        return "linear"
+    if isinstance(fill, RadialGradientFill):
+        return "radial"
+    return None
+
+
+def _model(fill: Fill) -> dict:
+    return {"kind": _kind(fill), "geometry": fill.geometry, "stops": fill.stops}
 
 
 def seam_pairs(mask_a: np.ndarray, mask_b: np.ndarray, rgb: np.ndarray):
@@ -263,41 +303,69 @@ def seam_pairs(mask_a: np.ndarray, mask_b: np.ndarray, rgb: np.ndarray):
 
 def seam_is_soft(mask_a: np.ndarray, mask_b: np.ndarray, rgb: np.ndarray,
                  *, edge_de: float = 0.06) -> bool:
-    """True iff the masks are 4-adjacent and the source color steps smoothly across their
-    shared border (median straddling-pair OKLab ΔE < edge_de). A real object edge — even
-    one whose two sides are color-similar — spikes above edge_de."""
+    """(A) True iff the masks are 4-adjacent and the source color steps smoothly across
+    their shared border (median straddling-pair OKLab ΔE < edge_de). A real object edge —
+    even one whose two sides are color-similar — spikes above edge_de."""
     ca, cb = seam_pairs(mask_a, mask_b, rgb)
     if len(ca) == 0:
         return False
     de = np.linalg.norm(srgb_to_oklab(ca / 255.0) - srgb_to_oklab(cb / 255.0), axis=1)
     return float(np.median(de)) < edge_de
+
+
+def seam_band(mask_a: np.ndarray, mask_b: np.ndarray, *, width: int = 2):
+    """(ys, xs) of mask_a pixels within `width` px of mask_b — the A-side of the seam."""
+    band = mask_a & ndimage.binary_dilation(mask_b, iterations=width)
+    return np.where(band)
+
+
+def _rendered_oklab(model: dict, ys: np.ndarray, xs: np.ndarray) -> np.ndarray:
+    pts = np.column_stack([xs, ys]).astype(float)
+    return srgb_to_oklab(_interp_stops_rgb(_model_t(model, pts), model["stops"]) / 255.0)
+
+
+def gradients_continuous(fill_a: Fill, mask_a: np.ndarray, fill_b: Fill, mask_b: np.ndarray,
+                         *, seam_de: float = 0.045) -> bool:
+    """(B) True iff both fills are gradients over adjacent masks whose models render to
+    agreeing colours across the shared seam (mean OKLab ΔE < seam_de) — one gradient's
+    colour at the seam matches the other's. False if either fill is flat (A handles that)."""
+    if _kind(fill_a) is None or _kind(fill_b) is None:
+        return False
+    ys_a, xs_a = seam_band(mask_a, mask_b)
+    ys_b, xs_b = seam_band(mask_b, mask_a)
+    if len(xs_a) == 0 or len(xs_b) == 0:
+        return False                                     # not adjacent
+    ma, mb = _model(fill_a), _model(fill_b)
+    de1 = np.linalg.norm(_rendered_oklab(ma, ys_b, xs_b) - _rendered_oklab(mb, ys_b, xs_b), axis=1).mean()
+    de2 = np.linalg.norm(_rendered_oklab(mb, ys_a, xs_a) - _rendered_oklab(ma, ys_a, xs_a), axis=1).mean()
+    return max(float(de1), float(de2)) < seam_de
 ```
 
 - [ ] **Step 4: Run to verify they pass**
 
-Run: `uv run pytest tests/test_surface_merge.py -k "soft" -v`
-Expected: PASS. (If `test_within_ramp_seam_is_soft` is borderline, `edge_de` is calibrated in Task 5 — do not loosen it so far that `test_hard_color_step_is_not_soft` also passes.)
+Run: `uv run pytest tests/test_surface_merge.py -k "soft or continuous" -v`
+Expected: PASS. (If `test_within_ramp_seam_is_soft` or `test_two_gradient_halves_are_continuous` is borderline, `edge_de`/`seam_de` are calibrated in Task 5 — do not loosen `edge_de` so far that `test_hard_color_step_is_not_soft` also passes.)
 
 - [ ] **Step 5: Commit**
 
 ```bash
 git add src/vectormark/surface_merge.py tests/test_surface_merge.py
-git commit -m "feat(merge): seam_is_soft — source edge test across a shared border
+git commit -m "feat(merge): seam_is_soft (A) + gradients_continuous (B) seam predicates
 
 Co-Authored-By: Claude Sonnet 4.6 <noreply@anthropic.com>"
 ```
 
 ---
 
-### Task 3: `merge_surfaces` — soft-seam + union-fits-gradient merge
+### Task 3: `merge_surfaces` — hybrid gradient-continuity (B) / soft-seam (A) merge
 
 **Files:**
 - Modify: `src/vectormark/surface_merge.py`
 - Test: `tests/test_surface_merge.py`
 
 **Interfaces:**
-- Consumes: `seam_is_soft` (Task 2), `fill_fit.fit_fill` (Task 1), `types.Region`, `candidate.Fill/LinearGradientFill/RadialGradientFill`.
-- Produces: `merge_surfaces(filled: list[tuple[Region, Fill]], rgb: np.ndarray, *, edge_de=0.06) -> list[tuple[Region, Fill]]` — repeatedly merges any two adjacent surfaces when (a) their shared seam is soft (`seam_is_soft`) AND (b) the union mask fits a parametric gradient (`fit_fill(union)` returns a gradient, not flat). Each merge unions the masks, sets the merged fill to that gradient, and keeps the larger-area member's `label`/`color_hex`. Runs to a fixed point. Deterministic: surfaces are scanned in descending area so the partition is order-independent.
+- Consumes: `gradients_continuous` + `seam_is_soft` (Task 2), `fill_fit.fit_fill` (Task 1), `types.Region`, `candidate.Fill/LinearGradientFill/RadialGradientFill`.
+- Produces: `merge_surfaces(filled: list[tuple[Region, Fill]], rgb: np.ndarray, *, seam_de=0.045, edge_de=0.06) -> list[tuple[Region, Fill]]` — repeatedly merges any two adjacent surfaces, using the hybrid criterion: **(B)** when both fills are gradients, merge if `gradients_continuous` (one gradient's color matches the other's at the seam within `seam_de`); **(A)** otherwise (at least one devolved to a flat fill), merge if `seam_is_soft` (no source edge across the border, `edge_de`). Either path additionally requires the union to fit a parametric gradient (`fit_fill(union)` returns a gradient) — the merged fill IS that union gradient. Keeps the larger-area member's `label`/`color_hex`. Runs to a fixed point. Deterministic: surfaces are scanned in descending area so the partition is order-independent.
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -315,6 +383,7 @@ def _region(label, mask, hex_):
 
 
 def test_ramp_halves_merge_into_one_gradient():
+    # wide halves each fit a gradient -> B path
     rgb, a, b = _full_ramp_split()
     filled = [(_region(0, a, "#1428C8"), _ff(a, rgb, flat_hex="#1428C8")),
               (_region(1, b, "#DC2814"), _ff(b, rgb, flat_hex="#DC2814"))]
@@ -323,6 +392,20 @@ def test_ramp_halves_merge_into_one_gradient():
     region, fill = out[0]
     assert isinstance(fill, LinearGradientFill)
     assert region.mask.sum() == (a | b).sum()           # union silhouette, clean
+
+
+def test_narrow_bands_collapse_to_one_gradient():
+    # narrow strips of one smooth ramp collapse to a single gradient: a strip too narrow
+    # to fit a gradient devolves to flat and merges via the A path; a wide-enough one via
+    # B. Either way the outcome is one gradient.
+    H, W = 40, 96
+    rgb = _ramp(H, W, (20, 40, 200), (220, 40, 20))
+    filled = []
+    for k in range(0, W, 8):
+        m = np.zeros((H, W), bool); m[:, k:k + 8] = True
+        filled.append((_region(k, m, "#808080"), _ff(m, rgb, flat_hex="#808080")))
+    out = merge_surfaces(filled, rgb)
+    assert len(out) == 1 and isinstance(out[0][1], LinearGradientFill)
 
 
 def test_flat_dot_on_ramp_stays_separate():
@@ -352,35 +435,40 @@ def test_two_distinct_flats_do_not_merge():
 
 - [ ] **Step 2: Run to verify they fail**
 
-Run: `uv run pytest tests/test_surface_merge.py -k "merge or stays_separate or distinct_flats" -v`
+Run: `uv run pytest tests/test_surface_merge.py -k "merge or stays_separate or distinct_flats or collapse" -v`
 Expected: FAIL — `merge_surfaces` not defined.
 
 - [ ] **Step 3: Implement `merge_surfaces`**
 
-Append to `src/vectormark/surface_merge.py` (add `from .types import Region`, `from .fill_fit import fit_fill`, and `from .candidate import LinearGradientFill, RadialGradientFill` at the top — `fit_fill` imports from `gradient`, and `surface_merge` does not import `pipeline`, so there is no cycle):
+Append to `src/vectormark/surface_merge.py` (add `from .types import Region` and `from .fill_fit import fit_fill` at the top — `LinearGradientFill`/`RadialGradientFill` are already imported in Task 2. `fit_fill` imports from `gradient`, and `surface_merge` does not import `pipeline`, so there is no cycle):
 
 ```python
 _GRADIENT = (LinearGradientFill, RadialGradientFill)
 
 
 def merge_surfaces(filled: list[tuple["Region", Fill]], rgb: np.ndarray, *,
-                   edge_de: float = 0.06) -> list[tuple["Region", Fill]]:
-    """Fixed-point merge of adjacent surfaces that share a soft seam (no source edge) AND
-    whose union fits a parametric gradient. Each merge unions the two clean masks, uses the
-    union's fitted gradient as the merged fill, and keeps the larger member's label/color_hex.
-    Deterministic: surfaces are scanned in descending area so the same partition results
-    regardless of input order. A hard-bordered feature (the dot) never merges; two distinct
-    flats whose union is not a gradient never merge."""
+                   seam_de: float = 0.045, edge_de: float = 0.06) -> list[tuple["Region", Fill]]:
+    """Fixed-point hybrid merge of adjacent surfaces. (B) both gradients -> merge when one's
+    colour matches the other's at the seam (gradients_continuous, seam_de). (A) at least one
+    flat (a narrow region that devolved) -> merge when the source has no edge across the seam
+    (seam_is_soft, edge_de). Either path also requires the union to fit a parametric gradient,
+    which becomes the merged fill. Keeps the larger member's label/color_hex. Deterministic:
+    descending-area scan -> order-independent partition. A hard-bordered feature (the dot)
+    never merges; two distinct flats whose union is not a gradient never merge."""
     surfaces = list(filled)
     merged = True
     while merged:
         merged = False
         surfaces.sort(key=lambda rf: rf[0].mask.sum(), reverse=True)
         for i in range(len(surfaces)):
-            ri, _fi = surfaces[i]
+            ri, fi = surfaces[i]
             for j in range(i + 1, len(surfaces)):
-                rj, _fj = surfaces[j]
-                if not seam_is_soft(ri.mask, rj.mask, rgb, edge_de=edge_de):
+                rj, fj = surfaces[j]
+                if isinstance(fi, _GRADIENT) and isinstance(fj, _GRADIENT):
+                    ok = gradients_continuous(fi, ri.mask, fj, rj.mask, seam_de=seam_de)  # B
+                else:
+                    ok = seam_is_soft(ri.mask, rj.mask, rgb, edge_de=edge_de)             # A
+                if not ok:
                     continue
                 union = ri.mask | rj.mask
                 rep = ri if ri.mask.sum() >= rj.mask.sum() else rj
@@ -406,7 +494,7 @@ Expected: PASS (all of Task 2 + Task 3 tests).
 
 ```bash
 git add src/vectormark/surface_merge.py tests/test_surface_merge.py
-git commit -m "feat(merge): merge_surfaces — soft-seam + union-fits-gradient merge
+git commit -m "feat(merge): merge_surfaces — hybrid gradient-continuity (B) / soft-seam (A)
 
 Co-Authored-By: Claude Sonnet 4.6 <noreply@anthropic.com>"
 ```
@@ -628,9 +716,9 @@ PY
 
 Expected: gradient logos show ≥1 gradient and FEWER total paths than the banded baseline; flats show 0 gradients.
 
-- [ ] **Step 3: Calibrate `edge_de` only if needed**
+- [ ] **Step 3: Calibrate `seam_de` / `edge_de` only if needed**
 
-If a gradient logo under-merges (residual bands) or a distinct surface over-merges, adjust `edge_de` (the soft-seam threshold, start 0.06) in `surface_merge.py`, and the `max_gradient_de` acceptance in `fit_fill` (start `_GATE_DELTA_E`) only if needed, re-running Step 2 and the Task 2/3 unit tests after each change. Document the final values and the logo that drove them in the commit message. Do NOT change `_GATE_DELTA_E` or `_MIN_STOP_SPAN` (shared with other code) without a separate justification.
+If a gradient logo under-merges (residual bands) or a distinct surface over-merges, adjust the merge thresholds in `surface_merge.py`: `seam_de` (the B-path gradient-continuity tolerance, start 0.045) and `edge_de` (the A-path soft-seam threshold, start 0.06); and the `max_gradient_de` acceptance in `fit_fill` (start `_GATE_DELTA_E`) only if needed. Re-run Step 2 and the Task 2/3 unit tests after each change. Document the final values and the logo that drove them in the commit message. Do NOT change `_GATE_DELTA_E` or `_MIN_STOP_SPAN` (shared with other code) without a separate justification.
 
 - [ ] **Step 4: V-bird visual check (manual)**
 

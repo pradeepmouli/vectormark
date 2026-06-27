@@ -42,11 +42,13 @@ arr ─► [1 segment] ─► Regions ─► [2 shape pass] ─► clean shapes
    - **Raster** — last resort for non-parametric tone (`RasterFill`).
    Geometry is read-only in this stage; a fill decision never moves an edge.
 
-4. **Continuity-merge (new), fill-informed** — the merge criterion is **gradient continuity across a shared seam**, not color similarity:
-   - For each adjacent shape pair, sample each fitted fill's color along the shared border (a few px *inside* each region to skip antialiased seam pixels). If the two boundary colors agree (mean OKLab ΔE < `MERGE_DE`) **and** the ramp direction is consistent across the seam, the two shapes are one surface.
-   - **Merge:** union the two clean masks (the internal seam vanishes; the outer contour stays clean), fuse the two gradients into one spanning the union, and **re-fit geometry on the merged silhouette** via the full `select_geometry` recognition — so the merged surface can be promoted to a *primitive* (`<rect>`/`<polygon>`/`<circle>`), not just a freeform path ("what was a path could be a shape"). Re-run `region_corner_radius` on the union so corners are smooth over the whole surface, never kinked at an old band seam.
+4. **Continuity-merge (new), fill-informed — a hybrid criterion** keyed on the seam, never on color similarity:
+   - **(B) gradient continuity (primary).** When both adjacent shapes fit gradients, merge if one gradient's color *at the shared seam* matches the other's within a ΔE (`seam_de`) — lead-meets-tail. This is the natural case for surfaces that segmented into wide-enough pieces.
+   - **(A) soft-seam fallback.** When a *narrow* region devolved to a flat fill (too little color span to fit a gradient), there is no per-region gradient to compare, so merge instead when the **source** has no hard edge across the shared border — the median straddling-pixel OKLab ΔE is below `edge_de`. A within-gradient band seam is soft; a real object edge — even a same-color feature's border — spikes.
+   - **Both paths additionally require the union to fit a parametric gradient** (so two genuinely distinct flats abutting never merge). The merged fill IS that union gradient.
+   - **Merge:** union the two clean masks (the internal seam vanishes; the outer contour stays clean), and **re-fit geometry on the merged silhouette** via the full `select_geometry` recognition — so the merged surface can be promoted to a *primitive* (`<rect>`/`<polygon>`/`<circle>`), not just a freeform path ("what was a path could be a shape"). Re-run `region_corner_radius` on the union so corners are smooth over the whole surface, never kinked at an old band seam.
    - Iterate to a fixed point so a chain of bands collapses into one gradient.
-   - A flat dot sitting on the gradient wing is **discontinuous** at its border (uniform fill vs ramp; a hard color step) → it never merges and is never swallowed.
+   - A flat dot sitting on the gradient wing has a **hard source edge** at its border (it never matches a soft seam) and is uniform (the B path never applies) → it never merges and is never swallowed, even when its color lies on the wing's ramp.
 
 5. **Emit** — *reuse.* One `<path>` or primitive per final shape; flat/gradient/raster fill in `<defs>`.
 
