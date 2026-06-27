@@ -40,7 +40,9 @@ def test_idealize_logo_file_reports_missing_input(tmp_path):
 
 
 def test_stdio_server_exposes_idealize_logo_tool():
-    async def list_tools_and_resources() -> tuple[dict[str, dict], list[str], str, dict]:
+    import json
+
+    async def list_tools_and_resources():
         params = StdioServerParameters(command="uv", args=["run", "vectormark-mcp"])
         async with stdio_client(params) as (read, write):
             async with ClientSession(read, write) as session:
@@ -48,11 +50,12 @@ def test_stdio_server_exposes_idealize_logo_tool():
                 tools = await session.list_tools()
                 resources = await session.list_resources()
                 widget = await session.read_resource(WIDGET_URI)
+                # file-first tool: pass image as a reference dict
                 tool_result = await session.call_tool(
                     "idealize_logo",
                     {
-                        "image_path": "tests/fixtures/daikonic/source.png",
-                        "colors": 4,
+                        "image": {"path": "tests/fixtures/daikonic/source.png"},
+                        "options": {"colors": 4},
                     },
                 )
                 tool_meta = {
@@ -61,19 +64,23 @@ def test_stdio_server_exposes_idealize_logo_tool():
                 }
                 resource_uris = [str(resource.uri) for resource in resources.resources]
                 widget_text = widget.contents[0].text
-                return tool_meta, resource_uris, widget_text, tool_result.structuredContent
+                # list return: dict→TextContent JSON, preview→ImageContent
+                result_data = json.loads(tool_result.content[0].text)
+                return tool_meta, resource_uris, widget_text, result_data
 
-    tool_meta, resource_uris, widget_text, structured = asyncio.run(list_tools_and_resources())
+    tool_meta, resource_uris, widget_text, result = asyncio.run(list_tools_and_resources())
 
     assert "idealize_logo" in tool_meta
-    assert tool_meta["idealize_logo"]["meta"]["ui"]["resourceUri"] == WIDGET_URI
+    meta = tool_meta["idealize_logo"]["meta"]
+    assert meta["ui"]["resourceUri"] == WIDGET_URI
+    assert meta["openai/fileParams"] == ["image"]
     assert "idealize_logo_data" in tool_meta
     assert "render_idealized_logo" in tool_meta
     assert WIDGET_URI in resource_uris
     assert "Logo idealizer" in widget_text
     assert "vectormark" in widget_text
-    assert structured["svg"].startswith("<svg ")
-    assert structured["image_path"].endswith("tests/fixtures/daikonic/source.png")
+    assert result["svg"].startswith("<svg ")
+    assert result["diagnostics"]["input"]["source_kind"] == "local_path"
 
 
 def _png_b64(width=60, height=60):
@@ -129,3 +136,190 @@ def test_data_tool_ignores_output_path_in_http_mode(tmp_path, monkeypatch):
     assert result["svg"].startswith("<svg ")
     assert result["output_path"] is None       # write suppressed
     assert not out.exists()                     # nothing written to disk
+
+
+# ---------------------------------------------------------------------------
+# Task 3: idealize_logo_image helper tests
+# ---------------------------------------------------------------------------
+
+import base64, io
+from PIL import Image as _Img
+
+
+def _png_b64_solid(size=(48, 48), color=(30, 100, 220)):
+    buf = io.BytesIO(); _Img.new("RGB", size, color).save(buf, format="PNG")
+    return base64.b64encode(buf.getvalue()).decode()
+
+
+def test_idealize_logo_image_from_data_uri():
+    from vectormark.mcp_server import idealize_logo_image
+    result, preview = idealize_logo_image(
+        {"data_uri": f"data:image/png;base64,{_png_b64_solid()}"}, {"colors": 8}, local_trust=False)
+    assert result["svg"].startswith("<svg ") and result["svg_bytes"] == len(result["svg"].encode())
+    d = result["diagnostics"]
+    assert d["input"]["source_kind"] == "data_uri" and d["input"]["mime_type"] == "image/png"
+    assert d["vectormark"]["colors"] == 8 and "element_count" in d["output"]
+    assert result["preview_available"] in (True, False)        # best-effort
+    assert preview is None or isinstance(preview, (bytes, bytearray))
+
+
+def test_idealize_logo_image_path_blocked_without_local_trust(tmp_path):
+    from vectormark.mcp_server import idealize_logo_image
+    from vectormark.mcp_image import ImageError
+    p = tmp_path / "m.png"; _Img.new("RGB", (16, 16), "white").save(p)
+    # local_trust=True works; False rejects
+    r, _ = idealize_logo_image({"path": str(p)}, None, local_trust=True)
+    assert r["svg"].startswith("<svg ")
+    try:
+        idealize_logo_image({"path": str(p)}, None, local_trust=False)
+    except ImageError as e:
+        assert e.error_code == "IMAGE_UNRESOLVABLE"
+    else:
+        raise AssertionError("path must be rejected without local trust")
+
+
+# ---------------------------------------------------------------------------
+# Task 3: idealize_logo MCP tool returns CallToolResult with structuredContent
+# ---------------------------------------------------------------------------
+
+def test_idealize_logo_tool_returns_structured_content():
+    """idealize_logo must return a CallToolResult with structuredContent populated.
+
+    FastMCP passes CallToolResult through verbatim, so both structuredContent and
+    the image block survive — unlike a raw list which sets structuredContent=None.
+    """
+    import asyncio
+    import json
+    from mcp.types import CallToolResult, ImageContent, TextContent
+    from vectormark.mcp_server import mcp
+
+    async def call():
+        return await mcp.call_tool(
+            "idealize_logo",
+            {
+                "image": {"data_uri": f"data:image/png;base64,{_png_b64_solid()}"},
+                "options": {"colors": 4},
+            },
+        )
+
+    res = asyncio.run(call())
+
+    assert isinstance(res, CallToolResult), (
+        f"Expected CallToolResult, got {type(res).__name__}; "
+        "structuredContent will be None when a list is returned"
+    )
+    assert res.isError is False
+
+    # structuredContent must be populated — the widget binds to this
+    sc = res.structuredContent
+    assert sc is not None, "structuredContent must not be None"
+    assert "<svg" in sc["svg"], "structuredContent.svg must contain SVG markup"
+    assert sc["diagnostics"], "structuredContent.diagnostics must be present"
+
+    # TextContent block must carry the same JSON for non-structured clients
+    text_blocks = [b for b in res.content if isinstance(b, TextContent)]
+    assert text_blocks, "a TextContent JSON block must be present in res.content"
+    parsed = json.loads(text_blocks[0].text)
+    assert parsed["svg"] == sc["svg"], "TextContent JSON must match structuredContent"
+
+    # Image block is best-effort; if preview was generated it must be ImageContent
+    if sc.get("preview_available"):
+        image_blocks = [b for b in res.content if isinstance(b, ImageContent)]
+        assert image_blocks, "preview_available=True but no ImageContent block in res.content"
+
+
+# ---------------------------------------------------------------------------
+# Task 4: render_idealized_logo result-shape + E2E structuredContent wire test
+# ---------------------------------------------------------------------------
+
+def test_render_idealized_logo_accepts_full_result():
+    from vectormark.mcp_server import render_idealized_logo
+    res = {"svg": "<svg >x</svg>", "width": 10, "height": 12}
+    out = render_idealized_logo(result=res)
+    assert out["svg"] == res["svg"] and out["width"] == 10 and out["height"] == 12
+    assert out["svg_bytes"] == len(res["svg"].encode())        # re-derived, not trusted
+
+
+def test_stdio_server_exposes_file_first_idealize_logo_with_fileparams():
+    async def go():
+        params = StdioServerParameters(command="uv", args=["run", "vectormark-mcp"])
+        async with stdio_client(params) as (read, write):
+            async with ClientSession(read, write) as session:
+                await session.initialize()
+                tools = {t.name: t for t in (await session.list_tools()).tools}
+                assert "idealize_logo" in tools
+                meta = tools["idealize_logo"].meta or {}
+                assert meta.get("openai/fileParams") == ["image"]
+                # call it with a data_uri image
+                import base64, io
+                from PIL import Image
+                b = io.BytesIO(); Image.new("RGB", (32, 32), (200, 30, 30)).save(b, format="PNG")
+                uri = "data:image/png;base64," + base64.b64encode(b.getvalue()).decode()
+                r = await session.call_tool("idealize_logo", {"image": {"data_uri": uri}})
+                sc = r.structuredContent or {}
+                assert "<svg" in (sc.get("svg") or "") and sc.get("diagnostics")
+    asyncio.run(go())
+
+
+# ---------------------------------------------------------------------------
+# Fix 2: ImageError.error_code must reach the wire as a tool error
+# ---------------------------------------------------------------------------
+
+def test_idealize_logo_tool_surfaces_error_code_on_unsupported_image_type():
+    """idealize_logo must re-raise ImageError as a ToolError carrying the error_code token.
+
+    FastMCP's in-process call_tool propagates ToolError as an exception; we assert
+    the raised exception message contains the machine-readable error_code token so
+    it reaches the wire in both stdio and HTTP transports.
+    """
+    import asyncio
+    from mcp.server.fastmcp.exceptions import ToolError
+    from vectormark.mcp_server import mcp
+
+    # Encode a 1-byte payload that is NOT a valid image — triggers UNSUPPORTED_IMAGE_TYPE.
+    import base64
+    garbage_b64 = base64.b64encode(b"\x00").decode()
+    garbage_uri = f"data:image/png;base64,{garbage_b64}"
+
+    async def call():
+        return await mcp.call_tool(
+            "idealize_logo",
+            {"image": {"data_uri": garbage_uri}},
+        )
+
+    # FastMCP's in-process call_tool raises ToolError rather than returning isError=True.
+    # The error_code token must appear in the raised exception message.
+    try:
+        asyncio.run(call())
+        raise AssertionError("Expected a ToolError to be raised for unsupported image type")
+    except ToolError as exc:
+        error_text = str(exc)
+        assert "UNSUPPORTED_IMAGE_TYPE" in error_text, (
+            f"error_code token not found in ToolError message: {error_text!r}"
+        )
+
+
+def test_idealize_logo_input_schema_exposes_typed_fields():
+    """The idealize_logo input schema must describe image/options fields (not be an
+    opaque object) so ChatGPT can fill the file-param reference and the model can see
+    the available options."""
+    import asyncio
+    from vectormark.mcp_server import mcp
+
+    async def get_schema():
+        tools = {t.name: t for t in await mcp.list_tools()}
+        return tools["idealize_logo"].inputSchema
+
+    schema = asyncio.run(get_schema())
+    defs = schema.get("$defs", {})
+
+    image = schema["properties"]["image"]
+    if "$ref" in image:
+        image = defs[image["$ref"].split("/")[-1]]
+    image_props = set((image.get("properties") or {}).keys())
+    # The ChatGPT file-param fields MUST be present so fileParams can populate them.
+    assert {"download_url", "file_id"} <= image_props
+    assert {"path", "url", "data_uri", "base64"} <= image_props
+
+    options_props = set((defs.get("IdealizeOptions", {}).get("properties") or {}).keys())
+    assert {"colors", "flatten", "no_symmetry", "epsilon", "max_error"} <= options_props

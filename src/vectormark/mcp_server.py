@@ -4,13 +4,25 @@ from __future__ import annotations
 
 import base64
 import io
+import json
 import os
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
 from mcp.server.fastmcp import FastMCP
+from mcp.server.fastmcp.exceptions import ToolError
+from mcp.types import CallToolResult, ImageContent, TextContent
 from PIL import Image
+from pydantic import BaseModel, Field
 
+from .mcp_image import (
+    DEFAULT_COLORS,
+    DEFAULT_MAX_SIZE_PX,
+    ImageError,
+    preprocess_image,
+    resolve_image,
+    svg_output_facts,
+)
 from .pipeline import Options, _flatten_on_white, idealize
 
 # Transport is chosen at startup. stdio = local, full-trust (your own machine, your
@@ -158,6 +170,91 @@ def idealize_logo_bytes(
     )
 
 
+def _render_preview_png(svg: str, width: int, height: int, warnings: list[str]) -> bytes | None:
+    """Best-effort: render the SVG to PNG via resvg-py; None (+ a warning) if unavailable."""
+    try:
+        import resvg_py
+        return bytes(resvg_py.svg_to_bytes(svg_string=svg, width=width, height=height))
+    except Exception as exc:
+        warnings.append(f"preview unavailable: {exc}")
+        return None
+
+
+def idealize_logo_image(
+    image: dict, options: dict | None, *, local_trust: bool
+) -> tuple[dict, bytes | None]:
+    """Resolve -> preprocess -> idealize a referenced image. Returns (structured_result,
+    preview_png_bytes|None). Raises ImageError with a structured code on input failure."""
+    options = options or {}
+    pre = options.get("preprocess") or {}
+    resolved = resolve_image(image, local_trust=local_trust)
+
+    arr, meta = preprocess_image(
+        resolved.bytes,
+        crop_to_content=pre.get("crop_to_content", True),
+        max_size_px=pre.get("max_size_px", DEFAULT_MAX_SIZE_PX),
+        preserve_transparency=pre.get("preserve_transparency", True),
+        quantize=pre.get("quantize", False),
+    )
+
+    opts = Options(
+        epsilon=options.get("epsilon", 1.5),
+        max_error=options.get("max_error", 1.0),
+        max_colors=options.get("colors", DEFAULT_COLORS),
+        flatten=options.get("flatten", False),
+        no_symmetry=options.get("no_symmetry", False),
+    )
+    try:
+        svg = idealize(arr, options=opts)
+    except Exception as exc:
+        raise ImageError(
+            "VECTORMARK_FAILED", f"vectormark failed to process the image: {exc}"
+        ) from exc
+
+    with Image.open(io.BytesIO(resolved.bytes)) as src:
+        ow, oh = src.size
+    warnings: list[str] = []
+    preview = _render_preview_png(svg, meta.width, meta.height, warnings)
+    _svg_bytes = len(svg.encode())
+
+    diagnostics = {
+        "input": {
+            "source_kind": resolved.source_kind,
+            "mime_type": resolved.mime_type,
+            "bytes": len(resolved.bytes),
+            "sha256": resolved.sha256,
+            "original_width": ow,
+            "original_height": oh,
+        },
+        "processed": {
+            "width": meta.width,
+            "height": meta.height,
+            "cropped": meta.cropped,
+            "resized": meta.resized,
+            "transparent": meta.transparent,
+            "quantized": meta.quantized,
+        },
+        "vectormark": {
+            "colors": opts.max_colors,
+            "flatten": opts.flatten,
+            "no_symmetry": opts.no_symmetry,
+            "epsilon": opts.epsilon,
+            "max_error": opts.max_error,
+        },
+        "output": {"svg_bytes": _svg_bytes, **svg_output_facts(svg)},
+        "warnings": warnings,
+    }
+    result = {
+        "svg": svg,
+        "width": meta.width,
+        "height": meta.height,
+        "svg_bytes": _svg_bytes,
+        "preview_available": preview is not None,
+        "diagnostics": diagnostics,
+    }
+    return result, preview
+
+
 mcp = FastMCP(
     "vectormark",
     instructions=(
@@ -167,50 +264,88 @@ mcp = FastMCP(
 )
 
 
-def idealize_logo(
-    image_path: str,
-    output_path: str | None = None,
-    epsilon: float = 1.5,
-    max_error: float = 1.0,
-    colors: int = 16,
-    flatten: bool = False,
-    no_symmetry: bool = False,
-) -> dict[str, object]:
-    """Convert a local raster logo file into structured SVG."""
+class ImageRef(BaseModel):
+    """A reference to the source image. Provide exactly one source. ChatGPT/host file
+    params fill `download_url` (+ `file_id`); callers may instead pass a `path`, https
+    `url`, `data_uri`, or bare `base64`."""
 
-    return idealize_logo_file(
-        image_path,
-        output_path=output_path,
-        epsilon=epsilon,
-        max_error=max_error,
-        colors=colors,
-        flatten=flatten,
-        no_symmetry=no_symmetry,
-    ).to_dict()
+    download_url: str | None = Field(
+        None, description="Temporary URL to GET the file bytes (ChatGPT/host file param)."
+    )
+    file_id: str | None = Field(None, description="Host file identifier accompanying download_url.")
+    mime_type: str | None = Field(None, description="Optional declared MIME type of the file.")
+    file_name: str | None = Field(None, description="Optional original file name.")
+    path: str | None = Field(
+        None, description="Local filesystem path. Resolved only on the stdio/local-trust server; rejected over HTTP."
+    )
+    url: str | None = Field(None, description="Explicit https URL to fetch (SSRF-guarded).")
+    data_uri: str | None = Field(None, description="A data:image/...;base64,... URI.")
+    base64: str | None = Field(None, description="Bare base64-encoded image bytes (PNG/JPEG/WebP).")
 
 
-# Filesystem-reading tool: registered only under the local stdio transport. Over an
-# HTTP transport the server may be network-reachable, so arbitrary-path file reads are
-# withheld; remote callers use idealize_logo_data (base64) instead.
-if _LOCAL_TRUST:
-    idealize_logo = mcp.tool(
-        title="Idealize logo",
-        description="Convert a local raster logo file into structured SVG with an interactive preview.",
-        meta={
-            "ui": {"resourceUri": WIDGET_URI},
-            "openai/outputTemplate": WIDGET_URI,
-            "openai/toolInvocation/invoking": "Idealizing logo...",
-            "openai/toolInvocation/invoked": "Idealized logo.",
-        },
-    )(idealize_logo)
+class PreprocessOpts(BaseModel):
+    """Server-side preprocessing applied before idealization."""
+
+    crop_to_content: bool = Field(True, description="Trim transparent/near-white margins to the content bounding box.")
+    max_size_px: int = Field(DEFAULT_MAX_SIZE_PX, description="Downscale (never upscale) so the longer side is at most this many px.")
+    preserve_transparency: bool = Field(True, description="Keep alpha through cropping; composite on white at the end.")
+    quantize: bool = Field(False, description="Pre-quantize the raster (usually harmful; vectormark extracts its own palette).")
+
+
+class IdealizeOptions(BaseModel):
+    """Idealization parameters. All optional with sensible defaults."""
+
+    colors: int = Field(DEFAULT_COLORS, description="Max palette colors. A CEILING, not a target — flats stay flat; raise it to let gradients keep their bands.")
+    flatten: bool = Field(False, description="Emit plain paths instead of native SVG primitives and <use> mirror.")
+    no_symmetry: bool = Field(False, description="Disable symmetry detection.")
+    epsilon: float = Field(1.5, description="Primitive/polygon recognition tolerance in pixels.")
+    max_error: float = Field(1.0, description="Bézier fit tolerance in pixels.")
+    preprocess: PreprocessOpts = Field(default_factory=PreprocessOpts, description="Server-side preprocessing options.")
+
+
+@mcp.tool(
+    title="Idealize logo",
+    description=(
+        "Idealize a raster logo into clean editable SVG. Pass the image by reference: a "
+        "ChatGPT/host file (download_url+file_id), a local path, an https url, a data: URI, "
+        "or base64. The server resolves and preprocesses it; no client-side base64 needed."
+    ),
+    meta={
+        "openai/fileParams": ["image"],
+        "ui": {"resourceUri": WIDGET_URI},
+        "openai/outputTemplate": WIDGET_URI,
+        "openai/toolInvocation/invoking": "Idealizing logo...",
+        "openai/toolInvocation/invoked": "Idealized logo.",
+    },
+)
+def idealize_logo(image: ImageRef, options: IdealizeOptions | None = None) -> CallToolResult:
+    """File-first logo idealization. Returns structured content plus a best-effort image block."""
+    image_dict = image.model_dump(exclude_none=True)
+    options_dict = options.model_dump() if options is not None else None
+    try:
+        result, preview = idealize_logo_image(image_dict, options_dict, local_trust=_LOCAL_TRUST)
+    except ImageError as err:
+        raise ToolError(f"[{err.error_code}] {err.message}") from err
+    content: list[TextContent | ImageContent] = [
+        TextContent(type="text", text=json.dumps(result))
+    ]
+    if preview is not None:
+        content.append(
+            ImageContent(
+                type="image",
+                data=base64.b64encode(preview).decode(),
+                mimeType="image/png",
+            )
+        )
+    return CallToolResult(content=content, structuredContent=result, isError=False)
 
 
 @mcp.tool(
     title="Idealize logo from data",
     description=(
-        "Idealize a base64-encoded raster image (e.g. one an agent just generated) into "
-        "structured SVG, without needing a local file path. Accepts a bare base64 string "
-        "or a data:image/...;base64,... URI."
+        "DEPRECATED fallback. Prefer `idealize_logo` with an image reference. Idealize a "
+        "base64-encoded raster (bare base64 or a data:image/...;base64,... URI) into SVG, "
+        "for hosts that cannot pass a file reference."
     ),
     meta={
         "ui": {"resourceUri": WIDGET_URI},
@@ -244,10 +379,7 @@ def idealize_logo_data(
 
 @mcp.tool(
     title="Render idealized logo",
-    description=(
-        "Render a vectormark SVG result in the ChatGPT/MCP Apps widget. "
-        "Call idealize_logo first, then pass its returned fields here."
-    ),
+    description="Render an idealize_logo result in the ChatGPT/MCP Apps widget. Pass the whole result object.",
     meta={
         "ui": {"resourceUri": WIDGET_URI},
         "openai/outputTemplate": WIDGET_URI,
@@ -255,22 +387,18 @@ def idealize_logo_data(
         "openai/toolInvocation/invoked": "Rendered SVG preview.",
     },
 )
-def render_idealized_logo(
-    image_path: str,
-    svg: str,
-    width: int,
-    height: int,
-    output_path: str | None = None,
-) -> dict[str, object]:
-    """Render an existing idealized SVG result in the vectormark app."""
-
+def render_idealized_logo(result: dict | None = None, image_path: str = "", svg: str = "",
+                          width: int = 0, height: int = 0) -> dict[str, object]:
+    """Render an existing idealized SVG result in the vectormark app. Accepts the full
+    `idealize_logo` result (preferred) or the legacy flat fields."""
+    if result:
+        svg = result.get("svg", svg)
+        width = result.get("width", width)
+        height = result.get("height", height)
+        image_path = (result.get("diagnostics", {}).get("input", {}).get("source_kind")) or image_path
     return IdealizeLogoResult(
-        image_path=image_path,
-        output_path=output_path,
-        width=width,
-        height=height,
-        svg_bytes=len(svg.encode()),   # derived from svg, not trusted from the caller
-        svg=svg,
+        image_path=image_path, output_path=None, width=width, height=height,
+        svg_bytes=len(svg.encode()), svg=svg,   # svg_bytes re-derived, never trusted from caller
     ).to_dict()
 
 
