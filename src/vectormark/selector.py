@@ -12,7 +12,7 @@ from dataclasses import dataclass
 import numpy as np
 
 from .candidate import Candidate, FlatFill
-from .contour import region_contours, significant_contours
+from .contour import significant_contours
 from .fit import Shape, fit_path, recognize_polygon, recognize_primitive, MAX_POLY_VERTICES
 from .refine import (
     half_ellipse_cap_fit, rounded_trapezoid_fit, symmetric_fit, symmetric_polygon_fit,
@@ -47,6 +47,8 @@ def _loose_bounded_polygon(contour: np.ndarray, max_vertices: int, epsilon: floa
             return Shape("polygon", {"points": [(float(x), float(y)) for x, y in simp]})
         eps *= 1.6
     simp = simp[:max_vertices] if len(simp) > max_vertices else simp
+    if len(simp) < 3:
+        simp = np.asarray(contour, float)[:3]
     return Shape("polygon", {"points": [(float(x), float(y)) for x, y in simp]})
 
 

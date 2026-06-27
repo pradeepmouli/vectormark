@@ -175,9 +175,10 @@ def test_clean_region_has_no_nofit():
 def test_frayed_region_falls_back_to_bounded_nofit():
     cands = generate_geometry_candidates(_region_from_mask(_frayed_mask()), _Opt(), None, 0.0)
     assert cands, "candidate set must never be empty"
-    # the frayed blob cannot be a real bounded shape -> NOFIT fallback, still bounded
+    # the frayed blob cannot be a real bounded shape -> NOFIT fallback must fire
+    assert any(c.strategy == NOFIT for c in cands), \
+        f"expected NOFIT in strategies {[c.strategy for c in cands]}"
     nofit = [c for c in cands if c.strategy == NOFIT]
-    if nofit:
-        pts = nofit[0].shape.params["points"]
-        from vectormark.fit import MAX_POLY_VERTICES
-        assert 3 <= len(pts) <= MAX_POLY_VERTICES
+    pts = nofit[0].shape.params["points"]
+    from vectormark.fit import MAX_POLY_VERTICES
+    assert 3 <= len(pts) <= MAX_POLY_VERTICES

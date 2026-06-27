@@ -15,6 +15,7 @@ from .contour import corner_indices, rdp
 MAX_PATH_SEGMENTS = 12   # a "shape" is simple; a path needing more drawing commands than
                          # this is fraying (tracing AA noise), not a shape -> disqualified.
 MAX_POLY_VERTICES = 10   # a path/polygon "shape" has few corners; more is a traced jagged edge.
+ROBUST_RESIDUAL_TOL = 1.0   # acceptance multiplier on epsilon for the robust (RMS) residual.
 
 
 @dataclass
@@ -25,9 +26,6 @@ class Shape:
 
 def _max_residual(model, pts: np.ndarray) -> float:
     return float(np.abs(model.residuals(pts)).max())
-
-
-ROBUST_RESIDUAL_TOL = 1.0   # acceptance multiplier on epsilon for the robust (RMS) residual.
 
 
 def _robust_residual(model, pts: np.ndarray) -> float:

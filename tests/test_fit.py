@@ -1,6 +1,9 @@
 import numpy as np
 from vectormark.contour import outer_contour
-from vectormark.fit import recognize_primitive
+from vectormark.fit import (
+    MAX_PATH_SEGMENTS, MAX_POLY_VERTICES,
+    fit_path, recognize_polygon, recognize_primitive,
+)
 
 
 def _disk(cx, cy, r, size=60):
@@ -35,9 +38,6 @@ def test_rejects_half_ellipse_region():
     assert recognize_primitive(c, epsilon=1.0) is None
 
 
-from vectormark.fit import recognize_polygon
-
-
 def _trapezoid(size=60):
     m = np.zeros((size, size), bool)
     for y in range(10, 40):
@@ -63,9 +63,6 @@ def _disk_local(size=60):
     return ((xx - 30) ** 2 + (yy - 30) ** 2) <= 18 * 18
 
 
-from vectormark.fit import fit_path
-
-
 def test_fit_path_of_square_uses_only_lines():
     mask = np.zeros((30, 30), bool); mask[6:24, 6:24] = True
     c = outer_contour(mask)
@@ -82,9 +79,6 @@ def test_fit_path_of_dome_uses_curve():
     shape = fit_path(c, epsilon=1.0, max_error=0.8)
     # curved top -> inflection-free quadratic arcs (Q), never cubic (C)
     assert shape.kind == "path" and "Q" in shape.params["d"] and "C" not in shape.params["d"]
-
-
-from vectormark.fit import MAX_PATH_SEGMENTS, MAX_POLY_VERTICES
 
 
 def _square(n=40):
