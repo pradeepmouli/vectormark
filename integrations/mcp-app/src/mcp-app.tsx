@@ -307,13 +307,14 @@ function VectormarkApp({
       const nextResult = await app.callServerTool({
         name: "idealize_logo",
         arguments: {
-          image_path: form.image_path,
-          output_path: form.output_path || undefined,
-          colors: Number(form.colors ?? 16),
-          epsilon: Number(form.epsilon ?? 1.5),
-          max_error: Number(form.max_error ?? 1),
-          flatten: Boolean(form.flatten),
-          no_symmetry: Boolean(form.no_symmetry),
+          image: { path: form.image_path },
+          options: {
+            colors: Number(form.colors ?? 16),
+            epsilon: Number(form.epsilon ?? 1.5),
+            max_error: Number(form.max_error ?? 1),
+            flatten: Boolean(form.flatten),
+            no_symmetry: Boolean(form.no_symmetry),
+          },
         },
       });
       onResult(nextResult);
