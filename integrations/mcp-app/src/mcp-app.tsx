@@ -183,7 +183,7 @@ function AppRoot() {
   const [toolResult, setToolResult] = useState<CallToolResult | null>(null);
   const [hostContext, setHostContext] = useState<McpUiHostContext | undefined>();
   const [errorText, setErrorText] = useState<string | null>(null);
-  const [theme, setTheme] = useState<Theme>("default");
+  const [theme, setTheme] = useState<Theme>("daikonic");
 
   const { app, isConnected, error } = useApp({
     appInfo: { name: "vectormark", version: "0.0.1" },
