@@ -9,12 +9,16 @@ import binascii
 import hashlib
 import io
 import ipaddress
+import re
 import socket
 from dataclasses import dataclass
 from pathlib import Path
 from urllib.parse import urlparse, urljoin
 
+import numpy as np
 from PIL import Image
+
+from .pipeline import _flatten_on_white
 
 MAX_INPUT_BYTES = 20 * 1024 * 1024
 MAX_DIMENSION_PX = 4096
@@ -200,3 +204,77 @@ def resolve_image(image: dict, *, local_trust: bool, fetch=_default_fetch) -> Re
     mime = _validate(data)
     return ResolvedImage(bytes=data, mime_type=mime, sha256=hashlib.sha256(data).hexdigest(),
                          source_kind=kind, filename=name)
+
+
+# ---------------------------------------------------------------------------
+# Task-2: preprocess_image + svg_output_facts
+# ---------------------------------------------------------------------------
+
+@dataclass(frozen=True)
+class ProcessedMeta:
+    width: int
+    height: int
+    cropped: bool
+    resized: bool
+    transparent: bool
+    quantized: bool
+
+
+def _content_bbox(im: Image.Image):
+    """Bounding box of non-transparent (if alpha) or non-near-white (if opaque) content."""
+    if "A" in im.getbands():
+        bbox = im.getchannel("A").point(lambda a: 255 if a > 8 else 0).getbbox()
+    else:
+        gray = im.convert("L").point(lambda v: 0 if v >= 250 else 255)   # near-white -> background
+        bbox = gray.getbbox()
+    return bbox
+
+
+def preprocess_image(data: bytes, *, crop_to_content: bool = True,
+                     max_size_px: int = DEFAULT_MAX_SIZE_PX, preserve_transparency: bool = True,
+                     quantize: bool = False) -> tuple[np.ndarray, ProcessedMeta]:
+    """Fidelity-preserving preprocess: optionally crop to content, downscale only if larger
+    than max_size_px, keep alpha until the final white composite. Returns an (H,W,3) uint8
+    RGB array ready for idealize, plus the processing metadata."""
+    im = Image.open(io.BytesIO(data))
+    im.load()
+    transparent = "A" in im.getbands() and im.getchannel("A").getextrema()[0] < 255
+
+    cropped = False
+    if crop_to_content:
+        bbox = _content_bbox(im)
+        if bbox and bbox != (0, 0, im.width, im.height):
+            im = im.crop(bbox)
+            cropped = True
+
+    resized = False
+    if max(im.size) > max_size_px:
+        scale = max_size_px / max(im.size)
+        im = im.resize((max(1, round(im.width * scale)), max(1, round(im.height * scale))), Image.LANCZOS)
+        resized = True
+
+    quantized = False
+    if quantize:
+        im = im.convert("RGBA").quantize(colors=256).convert("RGBA")
+        quantized = True
+
+    arr = _flatten_on_white(im) if (preserve_transparency or transparent) else np.asarray(im.convert("RGB"), np.uint8)
+    h, w = arr.shape[:2]
+    return arr, ProcessedMeta(width=w, height=h, cropped=cropped, resized=resized,
+                              transparent=bool(transparent), quantized=quantized)
+
+
+_PRIMITIVE_RE = re.compile(r"<(rect|circle|ellipse|polygon|line)\b")
+_ELEMENT_RE = re.compile(r"<(path|rect|circle|ellipse|polygon|line|use|image)\b")
+
+
+def svg_output_facts(svg: str) -> dict:
+    """Structural facts about an emitted SVG for diagnostics."""
+    element_count = len(_ELEMENT_RE.findall(svg))
+    return {
+        "element_count": element_count,
+        "has_defs": "<defs" in svg,
+        "has_paths": "<path" in svg,
+        "has_primitives": bool(_PRIMITIVE_RE.search(svg)),
+        "has_symmetry": "<use" in svg,
+    }

@@ -1,6 +1,7 @@
 import base64
 import io
 import socket
+import numpy as np
 import pytest
 from PIL import Image
 from vectormark.mcp_image import resolve_image, ImageError, MAX_INPUT_BYTES
@@ -139,3 +140,41 @@ def test_resolve_none_is_unresolvable():
     with pytest.raises(ImageError) as exc:
         resolve_image({}, local_trust=True)
     assert exc.value.error_code == "IMAGE_UNRESOLVABLE"
+
+
+# ---------------------------------------------------------------------------
+# Task-2 tests: preprocess_image + svg_output_facts
+# ---------------------------------------------------------------------------
+
+def _rgba(size, color, alpha):
+    im = Image.new("RGBA", size, (*color, alpha))
+    return im
+
+
+def test_preprocess_crops_transparent_margin_and_keeps_size():
+    from vectormark.mcp_image import preprocess_image
+    im = Image.new("RGBA", (100, 100), (0, 0, 0, 0))           # all transparent
+    im.paste((200, 30, 30, 255), (30, 30, 70, 70))            # a 40x40 opaque block
+    buf = io.BytesIO(); im.save(buf, format="PNG")
+    arr, meta = preprocess_image(buf.getvalue())
+    assert meta.transparent is True and meta.cropped is True
+    assert meta.width == 40 and meta.height == 40              # cropped to content
+    assert arr.shape == (40, 40, 3) and arr.dtype == np.uint8
+
+
+def test_preprocess_downscales_only_when_larger():
+    from vectormark.mcp_image import preprocess_image
+    big = io.BytesIO(); Image.new("RGB", (2000, 1000), (10, 20, 30)).save(big, format="PNG")
+    arr, meta = preprocess_image(big.getvalue(), crop_to_content=False, max_size_px=1024)
+    assert meta.resized is True and max(meta.width, meta.height) == 1024
+    small = io.BytesIO(); Image.new("RGB", (300, 200), (10, 20, 30)).save(small, format="PNG")
+    arr2, meta2 = preprocess_image(small.getvalue(), crop_to_content=False, max_size_px=1024)
+    assert meta2.resized is False and (meta2.width, meta2.height) == (300, 200)
+
+
+def test_svg_output_facts():
+    from vectormark.mcp_image import svg_output_facts
+    svg = '<svg><defs><linearGradient/></defs><rect/><path/><use href="#s0"/></svg>'
+    f = svg_output_facts(svg)
+    assert f["has_defs"] and f["has_paths"] and f["has_primitives"] and f["has_symmetry"]
+    assert f["element_count"] == 3                              # rect + path + use
