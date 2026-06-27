@@ -42,6 +42,14 @@ def test_linear_gradient_reconstructs():
                       [(0.0, (37, 99, 235)), (1.0, (219, 39, 119))])
     svg = idealize(img, options=Options())
     assert svg.count("<linearGradient") == 1
+    # Mask-bounded quality gate: measure ΔE only over pixels the SVG painted (non-white
+    # in the rendered output).  Without _expand_footprint the gradient bbox may not cover
+    # the full canvas, so a canvas-wide ΔE is inflated by uncovered white pixels; the
+    # painted region itself must reconstruct faithfully within the fit gate.
+    rendered = render_svg(svg, w, h)
+    painted = np.any(rendered < 250, axis=-1)      # non-white pixels in the render
+    assert painted.any(), "SVG painted nothing — no non-white pixels"
+    assert mean_delta_e(rendered[painted], img[painted]) <= 0.06
 
 
 def test_radial_gradient_reconstructs():
@@ -79,3 +87,44 @@ def test_linear_gradient_flatten_emits_userspace_gradient():
     assert 'gradientUnits="userSpaceOnUse"' in svg
     assert "url(#g0)" in svg
     assert "<g transform=" not in svg          # flatten bakes geometry; no wrapping transform
+    # Same mask-bounded ΔE gate as the non-flatten variant.
+    rendered = render_svg(svg, w, h)
+    painted = np.any(rendered < 250, axis=-1)
+    assert painted.any(), "SVG painted nothing — no non-white pixels"
+    assert mean_delta_e(rendered[painted], img[painted]) <= 0.06
+
+
+def _bilinear_2d_field(h: int, w: int) -> np.ndarray:
+    """A corner-to-corner bilinear blend of 4 saturated colors — a genuine 2D color field
+    that no single linear or radial gradient can faithfully represent.
+    Corners: TL=red, TR=green, BL=blue, BR=yellow."""
+    yy, xx = np.mgrid[:h, :w]
+    tx = xx / (w - 1)           # 0..1 left→right
+    ty = yy / (h - 1)           # 0..1 top→bottom
+    tl = np.array([220, 40, 40], float)    # top-left: red
+    tr = np.array([40, 200, 40], float)    # top-right: green
+    bl = np.array([40, 40, 220], float)    # bottom-left: blue
+    br = np.array([220, 200, 40], float)   # bottom-right: yellow
+    img = np.empty((h, w, 3), float)
+    for ch in range(3):
+        top = tl[ch] * (1 - tx) + tr[ch] * tx
+        bot = bl[ch] * (1 - tx) + br[ch] * tx
+        img[:, :, ch] = top * (1 - ty) + bot * ty
+    return img.round().astype(np.uint8)
+
+
+def test_2d_field_raster_path_not_triggered():
+    """A 2D bilinear blend exercises the 2D-color-field case.  fill_fit.py currently
+    does NOT call _fit_stretch (gradient.py), so RasterFill is unreachable from
+    idealize(); the <pattern>/<image> emit path is covered only by test_emit.py unit
+    tests.  The pipeline falls back to a flat or parametric fill and must not crash.
+    This test pins the documented realistic outcome and flags when _fit_stretch is
+    eventually wired into fill_fit (at which point '<pattern' will appear here and the
+    assertion should be updated accordingly)."""
+    h, w = 120, 120
+    img = _bilinear_2d_field(h, w)
+    svg = idealize(img, options=Options())
+    # RasterFill is NOT produced; no <pattern>/<image> in the output.
+    assert "<pattern" not in svg and "<image" not in svg
+    # The pipeline must emit at least one filled shape (it does not crash or return empty).
+    assert any(tag in svg for tag in ("<path", "<rect", "<circle", "<ellipse", "<polygon"))

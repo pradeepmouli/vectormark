@@ -107,9 +107,9 @@ def _build_report(cands: list[Candidate], axes: list[AxisLine]) -> IdealizeRepor
     strategies: dict[str, int] = {}
     gradients = 0
     for c in cands:
-        if c.source == "gradient":
+        if isinstance(c.fill, (LinearGradientFill, RadialGradientFill)):
             gradients += 1
-        if c.strategy is not None:                 # None for occlusion / lens / gradient
+        if c.strategy is not None:                 # None for occlusion / lens
             strategies[c.strategy] = strategies.get(c.strategy, 0) + 1
     return IdealizeReport(types.MappingProxyType(dict(strategies)), gradients, len(cands), tuple(axes))
 
@@ -189,10 +189,14 @@ def _render_body(
         reconstructed, comp = reconstruct_scene(comp, axis, (h, w))
 
         # Seam-merge adjacent regions into surfaces, then fit fill per merged surface.
-        # Passing flat fills into merge_surfaces forces path A (seam_is_soft) for all
-        # merges, which avoids intermediate gradient-type mismatches that would prevent
-        # path B from joining them later. After merging, fit_fill runs once per surface
-        # on the full (possibly unioned) mask. No footprint reconstruction.
+        # This 2-pass drives only path A (seam_is_soft): flat fills are passed into
+        # merge_surfaces so none of the surfaces entering the merge loop carry gradient
+        # fills, and gradients_continuous (path B) therefore returns False for every pair.
+        # Path B is intentionally preserved in merge_surfaces and is covered by its own
+        # unit tests, but is NOT exercised end-to-end from here because intermediate
+        # gradient-type mismatches (radial vs linear on partial merges) made per-region
+        # path-B merges unreliable.
+        # TODO(follow-up): revisit B-primary once per-region gradient-kind is stable.
         if rgb is not None:
             flat_filled = [(r, FlatFill(r.color_hex)) for r in comp]
             merged = merge_surfaces(flat_filled, rgb)

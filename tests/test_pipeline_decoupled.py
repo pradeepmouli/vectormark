@@ -1,6 +1,6 @@
 import re
 import numpy as np
-from vectormark.pipeline import idealize, Options
+from vectormark.pipeline import idealize, Options, IdealizeReport
 
 
 def _wing_with_dot():
@@ -31,3 +31,13 @@ def test_flat_logo_uses_no_gradient():
     img[20:60, 20:60] = (200, 40, 40)
     svg = idealize(img, options=Options(max_colors=16))
     assert "<linearGradient" not in svg and "<radialGradient" not in svg
+
+
+def test_report_gradients_counts_fill_type_not_source():
+    """report.gradients must count candidates whose fill is a gradient, not candidates
+    with source=='gradient' (no such source exists in the new pipeline — all filled
+    regions are source='region')."""
+    svg, report = idealize(_wing_with_dot(), options=Options(max_colors=16), report=True)
+    assert isinstance(report, IdealizeReport)
+    # the wing region gets a LinearGradientFill, so gradients >= 1
+    assert report.gradients >= 1

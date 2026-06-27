@@ -99,6 +99,9 @@ def gradients_continuous(fill_a: Fill, mask_a: np.ndarray, fill_b: Fill, mask_b:
 _GRADIENT = (LinearGradientFill, RadialGradientFill)
 
 
+# NOTE: the pipeline currently calls merge_surfaces with flat fills only (FlatFill per
+# region), so the B branch (gradients_continuous) is never reached from the pipeline —
+# only path A (seam_is_soft) runs end-to-end. Path B is reachable only by unit tests.
 def merge_surfaces(filled: list[tuple[Region, Fill]], rgb: np.ndarray, *,
                    seam_de: float = 0.045, edge_de: float = 0.06) -> list[tuple[Region, Fill]]:
     """Fixed-point hybrid merge of adjacent surfaces. (B) both gradients -> merge when one's
