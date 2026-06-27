@@ -143,7 +143,6 @@ def test_data_tool_ignores_output_path_in_http_mode(tmp_path, monkeypatch):
 # ---------------------------------------------------------------------------
 
 import base64, io
-import numpy as np
 from PIL import Image as _Img
 
 
@@ -227,3 +226,36 @@ def test_idealize_logo_tool_returns_structured_content():
     if sc.get("preview_available"):
         image_blocks = [b for b in res.content if isinstance(b, ImageContent)]
         assert image_blocks, "preview_available=True but no ImageContent block in res.content"
+
+
+# ---------------------------------------------------------------------------
+# Task 4: render_idealized_logo result-shape + E2E structuredContent wire test
+# ---------------------------------------------------------------------------
+
+def test_render_idealized_logo_accepts_full_result():
+    from vectormark.mcp_server import render_idealized_logo
+    res = {"svg": "<svg >x</svg>", "width": 10, "height": 12}
+    out = render_idealized_logo(result=res)
+    assert out["svg"] == res["svg"] and out["width"] == 10 and out["height"] == 12
+    assert out["svg_bytes"] == len(res["svg"].encode())        # re-derived, not trusted
+
+
+def test_stdio_server_exposes_file_first_idealize_logo_with_fileparams():
+    async def go():
+        params = StdioServerParameters(command="uv", args=["run", "vectormark-mcp"])
+        async with stdio_client(params) as (read, write):
+            async with ClientSession(read, write) as session:
+                await session.initialize()
+                tools = {t.name: t for t in (await session.list_tools()).tools}
+                assert "idealize_logo" in tools
+                meta = tools["idealize_logo"].meta or {}
+                assert meta.get("openai/fileParams") == ["image"]
+                # call it with a data_uri image
+                import base64, io
+                from PIL import Image
+                b = io.BytesIO(); Image.new("RGB", (32, 32), (200, 30, 30)).save(b, format="PNG")
+                uri = "data:image/png;base64," + base64.b64encode(b.getvalue()).decode()
+                r = await session.call_tool("idealize_logo", {"image": {"data_uri": uri}})
+                sc = r.structuredContent or {}
+                assert "<svg" in (sc.get("svg") or "") and sc.get("diagnostics")
+    asyncio.run(go())

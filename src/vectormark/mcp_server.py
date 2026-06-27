@@ -213,6 +213,7 @@ def idealize_logo_image(
         ow, oh = src.size
     warnings: list[str] = []
     preview = _render_preview_png(svg, meta.width, meta.height, warnings)
+    _svg_bytes = len(svg.encode())
 
     diagnostics = {
         "input": {
@@ -238,14 +239,14 @@ def idealize_logo_image(
             "epsilon": opts.epsilon,
             "max_error": opts.max_error,
         },
-        "output": {"svg_bytes": len(svg.encode()), **svg_output_facts(svg)},
+        "output": {"svg_bytes": _svg_bytes, **svg_output_facts(svg)},
         "warnings": warnings,
     }
     result = {
         "svg": svg,
         "width": meta.width,
         "height": meta.height,
-        "svg_bytes": len(svg.encode()),
+        "svg_bytes": _svg_bytes,
         "preview_available": preview is not None,
         "diagnostics": diagnostics,
     }
@@ -296,9 +297,9 @@ def idealize_logo(image: dict, options: dict | None = None) -> CallToolResult:
 @mcp.tool(
     title="Idealize logo from data",
     description=(
-        "Idealize a base64-encoded raster image (e.g. one an agent just generated) into "
-        "structured SVG, without needing a local file path. Accepts a bare base64 string "
-        "or a data:image/...;base64,... URI."
+        "DEPRECATED fallback. Prefer `idealize_logo` with an image reference. Idealize a "
+        "base64-encoded raster (bare base64 or a data:image/...;base64,... URI) into SVG, "
+        "for hosts that cannot pass a file reference."
     ),
     meta={
         "ui": {"resourceUri": WIDGET_URI},
@@ -332,10 +333,7 @@ def idealize_logo_data(
 
 @mcp.tool(
     title="Render idealized logo",
-    description=(
-        "Render a vectormark SVG result in the ChatGPT/MCP Apps widget. "
-        "Call idealize_logo first, then pass its returned fields here."
-    ),
+    description="Render an idealize_logo result in the ChatGPT/MCP Apps widget. Pass the whole result object.",
     meta={
         "ui": {"resourceUri": WIDGET_URI},
         "openai/outputTemplate": WIDGET_URI,
@@ -343,22 +341,18 @@ def idealize_logo_data(
         "openai/toolInvocation/invoked": "Rendered SVG preview.",
     },
 )
-def render_idealized_logo(
-    image_path: str,
-    svg: str,
-    width: int,
-    height: int,
-    output_path: str | None = None,
-) -> dict[str, object]:
-    """Render an existing idealized SVG result in the vectormark app."""
-
+def render_idealized_logo(result: dict | None = None, image_path: str = "", svg: str = "",
+                          width: int = 0, height: int = 0) -> dict[str, object]:
+    """Render an existing idealized SVG result in the vectormark app. Accepts the full
+    `idealize_logo` result (preferred) or the legacy flat fields."""
+    if result:
+        svg = result.get("svg", svg)
+        width = result.get("width", width)
+        height = result.get("height", height)
+        image_path = (result.get("diagnostics", {}).get("input", {}).get("source_kind")) or image_path
     return IdealizeLogoResult(
-        image_path=image_path,
-        output_path=output_path,
-        width=width,
-        height=height,
-        svg_bytes=len(svg.encode()),   # derived from svg, not trusted from the caller
-        svg=svg,
+        image_path=image_path, output_path=None, width=width, height=height,
+        svg_bytes=len(svg.encode()), svg=svg,   # svg_bytes re-derived, never trusted from caller
     ).to_dict()
 
 

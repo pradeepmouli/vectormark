@@ -17,23 +17,36 @@ uv run vectormark-mcp
 
 The server exposes three tools:
 
-- `idealize_logo` converts a local raster logo **file** into structured SVG.
-- `idealize_logo_data` converts a **base64-encoded** raster (a bare base64 string
-  or a `data:image/...;base64,...` URI) into structured SVG — no local file needed.
-  This is the handoff for a "draw then idealize" agent flow: an image-generation
-  tool emits the raster as bytes/base64, which this tool idealizes directly.
-- `render_idealized_logo` renders an existing result in the app resource. Text-only
-  clients can ignore it.
+- **`idealize_logo({image, options})`** — primary file-first tool. Pass the image
+  by reference: a ChatGPT/host file (`download_url`+`file_id`), a local `path`, an
+  HTTPS `url`, a `data_uri`, or raw `base64`. The server resolves and preprocesses
+  the reference; no client-side base64 encoding is required. The tool is marked
+  `openai/fileParams` so ChatGPT-generated or uploaded images can be passed
+  directly as file references. Returns structured SVG, dimensions, diagnostics, and
+  a best-effort PNG preview block.
 
-Tool arguments:
+  > For ChatGPT-generated or uploaded images, pass the image/file reference
+  > directly (the tool is marked `openai/fileParams`). Do not base64-encode
+  > unless using a fallback host that cannot provide file references.
 
-- `image_path` - local PNG/JPG path.
-- `output_path` - optional SVG output path. Parent directories are created.
+- **`idealize_logo_data`** *(DEPRECATED fallback)* — accepts a bare base64 string
+  or a `data:image/...;base64,...` URI. Use only on hosts that cannot provide file
+  references; prefer `idealize_logo` everywhere else.
+
+- **`render_idealized_logo({result})`** — renders an existing `idealize_logo` result
+  in the app widget. Pass the whole result object returned by `idealize_logo`;
+  `svg_bytes` is re-derived server-side from the SVG (never trusted from the caller).
+  Text-only clients can ignore this tool.
+
+Tool options (passed inside the `options` dict for `idealize_logo`):
+
 - `epsilon` - primitive/polygon recognition tolerance in pixels.
 - `max_error` - Bezier fit tolerance in pixels.
 - `colors` - maximum palette colors.
 - `flatten` - emit plain paths instead of native SVG primitives and `<use>`.
 - `no_symmetry` - disable symmetry detection.
+- `preprocess.crop_to_content` / `preprocess.max_size_px` / `preprocess.preserve_transparency`
+  / `preprocess.quantize` — preprocessing controls.
 
 `idealize_logo` is also an MCP App tool. UI-capable clients discover the React
 view from `_meta.ui.resourceUri`, then read `ui://vectormark/logo-widget.html`.
@@ -122,12 +135,13 @@ Then in ChatGPT: **Settings → Connectors → Developer mode → Add** the URL
 `https://<name>.trycloudflare.com/mcp`.
 
 **Safe-by-default over HTTP.** Because an HTTP transport can be network-reachable,
-the filesystem tools are withheld automatically: `idealize_logo` (arbitrary-path
-file read) is **not registered**, and `idealize_logo_data` **ignores `output_path`**
-(no host writes). Only `idealize_logo_data` (base64 in, SVG out), the preview
-renderer, and the widget are exposed — which is exactly the ChatGPT flow: an
-image-generation tool emits the raster as base64, ChatGPT passes it to
-`idealize_logo_data`, and the widget previews the SVG. A trycloudflare URL is
+host-filesystem access is restricted automatically: `idealize_logo` still works
+but rejects `path`-based image references (no arbitrary file read), and
+`idealize_logo_data` **ignores `output_path`** (no host writes). Over HTTP, the
+primary flow is the ChatGPT file-first flow: ChatGPT passes the image reference
+(e.g. `download_url`+`file_id`) directly to `idealize_logo` (no base64 needed);
+the widget previews the returned SVG. `idealize_logo_data` remains available as
+a fallback for hosts that cannot provide file references. A trycloudflare URL is
 unauthenticated, so keep it ephemeral or put Cloudflare Access / OAuth in front for
 anything beyond personal testing.
 
