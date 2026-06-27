@@ -1,0 +1,83 @@
+# Bounded Shape Grammar — Design
+
+**Status:** approved (brainstorming)
+**Date:** 2026-06-27
+**Area:** `src/vectormark/selector.py`, `src/vectormark/fit.py`, `src/vectormark/score.py`, geometry-candidate generation + hole handling. Builds on the shape/fill decoupling (PR #40).
+
+## Goal
+
+Produce **clean silhouettes** — no frayed/serrated edges, no hole-speckle, small features (e.g. the V-bird's middle dot) intact — by treating geometric complexity as a **definition**, not an optimization. A shape *is* simple; the fitter may only emit members of a bounded simple-shape grammar. A frayed, over-segmented boundary is not a badly-approximated shape — it is **not a shape at all**, and so is never produced.
+
+## Motivation (observed failure)
+
+On the V-bird, the wings render with serrated edges and the interior shows white-speck holes; the middle dot is shattered. Root cause, confirmed by reading the fitter:
+
+- `generate_geometry_candidates` already hypothesizes the *clean* shapes (a bounded polygon / rounded-trapezoid for a wing, a `circle` primitive for a dot). But it **also** offers the unbounded `fit_path` candidate, which subdivides convex quadratics until the boundary error is under `max_error` — so it faithfully traces the antialiased, quantization-jagged mask boundary. That frayed path scores **higher fidelity** than the clean shapes, and the scorer picks it. Fidelity beats simplicity today.
+- The white specks are tiny **inner contours** (antialiased boundary pixels that quantize to in-between colors, form sub-`min_area` regions, get dropped → unassigned holes inside the mark) emitted as even-odd holes.
+- The dot shatters because its antialiased ring quantizes away; tracing the eroded mask yields a broken core.
+
+The complexity tradeoff is therefore mis-framed as fidelity-vs-simplicity. Under the correct framing — **a shape is constitutively simple** — the frayed path is disqualified, and the clean bounded shape wins by default. Fitting a primitive (circle) to the dot's *evidence* (its bulk) rather than tracing its eroded boundary recovers the full circle.
+
+This is the partner change to the shape/fill decoupling (PR #40): fills are already independent of geometry, so constraining the *shape* never disturbs the gradients.
+
+## Architecture (this spec — the core)
+
+A region's geometry is **the best-fitting member of a bounded simple-shape grammar**, selected by fidelity among valid simple shapes only.
+
+1. **The grammar is the candidate set.** `generate_geometry_candidates` may only emit *simple* hypotheses:
+   - primitives (rect, circle, ellipse, rounded-rect, trapezoid) and the existing symmetric fits — already bounded by construction;
+   - a free **polygon** bounded to ≤ `MAX_POLY_VERTICES` vertices;
+   - a free **path** bounded to ≤ `MAX_PATH_SEGMENTS` convex-quadratic segments.
+   The unbounded `fit_path`/`recognize_polygon` are **capped**: a fit that cannot reach the fidelity floor *within the bound* is **not produced** as a candidate. A frayed boundary (dozens of segments) is therefore unrepresentable — it can never be selected.
+
+2. **Selection = fidelity among valid simple shapes.** The existing render-ΔE scorer (`score.py`) still ranks candidates, but the candidate set now contains only grammar members. **Parsimony becomes the membership rule (the bound), not a soft tiebreak** — simplicity is enforced before scoring, not traded against fidelity during it.
+
+3. **Holes are shapes too.** Sub-threshold inner contours (the white specks) are not simple shapes → **dropped** (the silhouette is filled over them). A genuine, simple inner hole (a real donut) is kept — as an even-odd hole or its own shape — when it itself clears the size/simplicity bar.
+
+4. **Fit to evidence, not to the mask boundary.** Primitive recognition (the dot → `circle`) is driven by the region's bulk/extent, so an eroded antialiased ring does not shrink or break the recovered shape.
+
+5. **No-fit (interim, this spec).** If *no* grammar member meets the fidelity floor (a genuinely non-simple silhouette), emit the **best (loosest) bounded shape** anyway — clean but approximate — and **log** the region (strategy/ΔE) so the corpus reveals exactly which marks need decomposition. This is the seam for the fast-follow.
+
+6. **Fills are untouched** — decoupled in PR #40.
+
+## Out of scope (fast-follow slice, not this spec)
+
+**Decomposition.** When no bounded grammar member fits, the region isn't one shape and should **split into simpler shapes and recurse** — via **concavity-split** (split the silhouette at its significant concave vertices into convex sub-pieces, each simple by construction; bounded, terminating, non-overlapping; genuine overlap is already handled upstream by occlusion reconstruction, so peeling's generality isn't needed). The interim no-fit behavior (#5) plus the corpus log determine which marks actually need this before we build it.
+
+Also out of scope: **performance** (the slow occlusion `binary_erosion` and the parametric-search cost are a separate follow-up); **raster** (a fill strategy, never a shape — wiring `_fit_stretch` into `fit_fill` is the separate PR-#40 fill follow-up).
+
+## Components / where it lands
+
+- **`src/vectormark/fit.py`** — `fit_path` gains `MAX_PATH_SEGMENTS`; `recognize_polygon` gains `MAX_POLY_VERTICES`. Each returns `None` (no candidate) when it cannot meet the fidelity floor within the bound, instead of an over-segmented result.
+- **`src/vectormark/selector.py`** — `generate_geometry_candidates` only appends bounded candidates; drops the unbounded path/polygon; threads the no-fit log.
+- **`src/vectormark/score.py`** — parsimony as membership (bound) rather than soft cost; the render-ΔE fidelity floor used to admit/reject a bounded fit.
+- **Hole handling** (contour/holed-path emission in `selector.py`/`fit.py`) — drop sub-threshold inner contours.
+
+## Tunable constants (calibrated against the corpus, not assumed)
+
+- `MAX_PATH_SEGMENTS` ≈ 12 (convex quadratics).
+- `MAX_POLY_VERTICES` ≈ 10.
+- Fidelity floor: a render-ΔE threshold (region-mean) above which a bounded fit is rejected / the no-fit path fires.
+- Hole-drop threshold: minimum inner-contour area (relative to the mark, matching the existing resolution-independent `min_region_fraction` convention) below which an inner contour is filled rather than emitted.
+
+## Testing
+
+- **Acceptance (V-bird):** wings emit as clean bounded polygons/trapezoids and dots as clean circles (not frayed paths); no white-speck holes; no serration; the middle dot is a single full-size circle. Verified visually + by element/segment counts (no path exceeds the segment bound).
+- **Corpus regression:** the bound must NOT degrade currently-good outputs — genuinely-curvy-but-simple logos must still fit within the bound (calibrate `MAX_PATH_SEGMENTS` so they survive); flats unchanged. Compare before/after element + segment counts and render-ΔE; flag any mark that newly hits the no-fit path (a decomposition candidate).
+- **Unit:** `fit_path` returns `None` past the segment bound when error can't be met; `recognize_polygon` respects the vertex cap; a sub-threshold inner contour is dropped; a circle is recovered from an eroded-ring synthetic dot.
+
+## Addendum — Robust noise-tolerant recognition (2026-06-27, after seeing the output)
+
+Rendering the V-bird through the bounded grammar fixed the fraying and specks (the bound's job) but **over-simplified**: dots came out as angular NOFIT polygons (not circles) and the wings' rounded corners were lost. Diagnosis: for a noisy/eroded region, the circle, polygon, AND rounded-shape fitters all **reject** it — every recognizer gates on the **MAX residual** (`_max_residual` = `abs(residuals).max()`; `_max_point_to_polyline`; the refine fits' `.max() > max_error*1.6`), so a few px of antialiased boundary jitter veto a genuinely-circular dot or rounded wing → the region falls to the `NOFIT` loose polygon. The least-squares fits (skimage `CircleModel`/`EllipseModel`) already fit the *bulk* correctly; only the **acceptance test** is brittle. This is "fit to evidence" (a stated goal) not actually delivered.
+
+**Fix (this branch):** change recognizer acceptance from the MAX residual to a **robust statistic** (RMS or a high-but-not-max percentile / median of `|residuals|`) so a noisy boundary minority can no longer veto a genuine shape. Apply consistently to `recognize_primitive` (circle, ellipse), `recognize_polygon` (a robust `point-to-polyline`), and the refine fits (`rounded_trapezoid_fit`, `half_ellipse_cap_fit`). With render-ΔE selection, a noisy disc then recognizes as a `circle` and a noisy wing as a rounded trapezoid (its better corner fidelity beats the angular polygon), instead of NOFIT. The robust statistic + threshold are calibrated against the corpus.
+
+**Why the boundary is noisy at all (root cause):** the source raster's edges are smooth because they're *antialiased* (boundary pixels are blends spread over ~1-2px). But `quantize` hard-assigns every pixel to its nearest palette color, collapsing each antialiased blend to a per-pixel binary decision → a **staircase**; `segment`/`outer_contour` (`find_contours` at level 0.5 on the *binary* mask) then trace that staircase. The boundary noise is **manufactured by quantization**, not inherent to the image — we are being robust (Task 5) against noise we created.
+
+**Planned follow-up (separate spec, OUT OF SCOPE here) — antialiasing-aware sub-pixel boundary extraction:** the principled fix is to *not create the staircase* — extract each region's boundary from the **soft antialiased signal** rather than the hard binary mask, so the contour is smooth **by construction** and the robust-acceptance tolerance can tighten back toward exact. Approaches (existing algorithm families, to evaluate in the follow-up): run `find_contours` at level 0.5 on a **continuous per-region membership/coverage field** (derived from per-pixel color distance to the region's color vs its neighbors) instead of the bilevel mask; treat antialiasing as **fractional coverage** and localize the sub-pixel edge from the blend ratio; or AA-aware/de-antialiasing contour tracers. (Post-hoc smoothing of the jagged contour — denoise after the fact — is the weaker fallback if soft-field extraction proves hard.) Deferred until robust fitting is in and we see what edge roughness remains.
+
+## Risks
+
+- **Bound too low** → over-rejects a legitimately curvy simple logo → it hits the no-fit interim (loose fit) or degrades. Mitigation: calibrate `MAX_PATH_SEGMENTS`/`MAX_POLY_VERTICES` against the corpus; the bound must be generous enough to keep good outputs while disqualifying fraying (dozens of segments).
+- **Interim no-fit approximation** → an intricate mark that needs decomposition will look clean-but-loose until the fast-follow lands; mitigated by logging so it's visible, not silent.
+- **Hole-drop too aggressive** → a genuine small inner shape (a real hole/counter) gets filled. Mitigation: the threshold mirrors `min_region_fraction`; genuine counters in logos are typically above it.

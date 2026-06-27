@@ -29,10 +29,11 @@ POLYGON = "polygon"              # recognize_polygon
 PATH = "path"                    # fit_path
 HOLED_SYM = "holed_symmetric"    # multi-contour mirrored halves (even-odd)
 HOLED_PATH = "holed_path"        # multi-contour per-contour fit (even-odd)
+NOFIT = "nofit"                  # loosest bounded fallback when no grammar member fits (logged)
 
 KNOWN_STRATEGIES = frozenset({
     PRIMITIVE, TRAPEZOID, SYM_POLYGON, CAP, SYMMETRIC,
-    POLYGON, PATH, HOLED_SYM, HOLED_PATH,
+    POLYGON, PATH, HOLED_SYM, HOLED_PATH, NOFIT,
 })
 
 

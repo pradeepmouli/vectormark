@@ -12,6 +12,12 @@ from ._fitcurve import fit_quadratic_beziers
 from .contour import corner_indices, rdp
 
 
+MAX_PATH_SEGMENTS = 12   # a "shape" is simple; a path needing more drawing commands than
+                         # this is fraying (tracing AA noise), not a shape -> disqualified.
+MAX_POLY_VERTICES = 10   # a path/polygon "shape" has few corners; more is a traced jagged edge.
+ROBUST_RESIDUAL_TOL = 1.0   # acceptance multiplier on epsilon for the robust (RMS) residual.
+
+
 @dataclass
 class Shape:
     kind: str                 # "circle" | "ellipse" | "rect" | "polygon" | "path"
@@ -20,6 +26,14 @@ class Shape:
 
 def _max_residual(model, pts: np.ndarray) -> float:
     return float(np.abs(model.residuals(pts)).max())
+
+
+def _robust_residual(model, pts: np.ndarray) -> float:
+    """RMS of |perpendicular residuals| — tolerant of a noisy boundary minority,
+    unlike the MAX. The least-squares model already fits the bulk; this just accepts
+    on the bulk error instead of the worst outlier."""
+    r = np.asarray(model.residuals(pts), float)
+    return float(np.sqrt(np.mean(r * r)))
 
 
 def recognize_primitive(contour: np.ndarray, *, epsilon: float) -> Shape | None:
@@ -33,7 +47,7 @@ def recognize_primitive(contour: np.ndarray, *, epsilon: float) -> Shape | None:
 
     # circle
     cm = CircleModel.from_estimate(pts)
-    if cm and _max_residual(cm, pts) <= epsilon:
+    if cm and _robust_residual(cm, pts) <= epsilon * ROBUST_RESIDUAL_TOL:
         xc, yc = cm.center
         return Shape("circle", {"cx": xc, "cy": yc, "r": cm.radius})
 
@@ -43,7 +57,7 @@ def recognize_primitive(contour: np.ndarray, *, epsilon: float) -> Shape | None:
         xc, yc = em.center
         a, b = em.axis_lengths
         theta = em.theta
-        if _max_residual(em, pts) <= epsilon and (abs(theta) < 0.08 or abs(abs(theta) - np.pi) < 0.08):
+        if _robust_residual(em, pts) <= epsilon * ROBUST_RESIDUAL_TOL and (abs(theta) < 0.08 or abs(abs(theta) - np.pi) < 0.08):
             return Shape("ellipse", {"cx": xc, "cy": yc, "rx": a, "ry": b})
 
     # axis-aligned rectangle: bbox fill ratio near 1, rotated-rect ~ axis-aligned,
@@ -68,7 +82,7 @@ def recognize_primitive(contour: np.ndarray, *, epsilon: float) -> Shape | None:
     return None
 
 
-def recognize_polygon(contour: np.ndarray, *, epsilon: float, max_vertices: int = 8) -> Shape | None:
+def recognize_polygon(contour: np.ndarray, *, epsilon: float, max_vertices: int = MAX_POLY_VERTICES) -> Shape | None:
     """Emit a <polygon> when the contour simplifies to few straight edges."""
     pts = np.asarray(contour, dtype=float)
     if len(pts) < 3:
@@ -78,8 +92,8 @@ def recognize_polygon(contour: np.ndarray, *, epsilon: float, max_vertices: int 
         simp = simp[:-1]
     if not (3 <= len(simp) <= max_vertices):
         return None
-    # every original point must lie within ε of the simplified polygon edges
-    if _max_point_to_polyline(pts, np.vstack([simp, simp[0]])) > epsilon:
+    # every original point must lie within ε of the simplified polygon edges (RMS gate)
+    if _robust_point_to_polyline(pts, np.vstack([simp, simp[0]])) > epsilon * ROBUST_RESIDUAL_TOL:
         return None
     return Shape("polygon", {"points": [(float(x), float(y)) for x, y in simp]})
 
@@ -91,6 +105,14 @@ def _max_point_to_polyline(pts: np.ndarray, poly: np.ndarray) -> float:
         d = min(_point_seg_dist(p, s[0], s[1]) for s in segs)
         worst = max(worst, d)
     return worst
+
+
+def _robust_point_to_polyline(pts: np.ndarray, poly: np.ndarray) -> float:
+    """RMS of each point's distance to the nearest polyline segment (robust counterpart
+    of `_max_point_to_polyline`)."""
+    segs = np.stack([poly[:-1], poly[1:]], axis=1)
+    d = np.array([min(_point_seg_dist(p, s[0], s[1]) for s in segs) for p in pts])
+    return float(np.sqrt(np.mean(d * d)))
 
 
 def _point_seg_dist(p, a, b) -> float:
@@ -109,20 +131,26 @@ def _fmt(v: float) -> str:
     return f"{v:.2f}".rstrip("0").rstrip(".")
 
 
-def fit_path(contour: np.ndarray, *, epsilon: float, max_error: float) -> Shape:
-    """Corner-split the contour; emit lines for straight runs, Béziers otherwise."""
+def fit_path(contour: np.ndarray, *, epsilon: float, max_error: float,
+             max_segments: int = MAX_PATH_SEGMENTS,
+             max_vertices: int = MAX_POLY_VERTICES) -> Shape | None:
+    """Corner-split the contour; emit lines for straight runs, quadratic Béziers otherwise.
+    Returns None if the result needs more than `max_segments` drawing commands — a frayed
+    boundary is not a simple shape and must not be emitted."""
     pts = np.asarray(contour, dtype=float)
     closed = np.allclose(pts[0], pts[-1])
     ring = pts[:-1] if closed else pts
     simp = rdp(ring, epsilon)
     corners = corner_indices(np.vstack([simp, simp[0]]), angle_threshold_deg=40)
-    # map corner positions in `simp` back to indices in `ring`
     corner_pts = simp[corners] if corners else simp[[0]]
     cut_idx = sorted({int(np.argmin(np.hypot(*(ring - cp).T))) for cp in corner_pts})
     if len(cut_idx) < 2:
         cut_idx = [0, len(ring) // 2]
+    if len(cut_idx) > max_vertices:   # too many corner-runs = angular fraying, not a shape
+        return None
 
     d = f"M{_fmt(ring[cut_idx[0]][0])} {_fmt(ring[cut_idx[0]][1])} "
+    segs = 0
     for k in range(len(cut_idx)):
         i0 = cut_idx[k]
         i1 = cut_idx[(k + 1) % len(cut_idx)]
@@ -131,8 +159,12 @@ def fit_path(contour: np.ndarray, *, epsilon: float, max_error: float) -> Shape:
             continue
         if _segment_is_straight(seg, epsilon):
             d += f"L{_fmt(seg[-1][0])} {_fmt(seg[-1][1])} "
+            segs += 1
         else:
             for b in fit_quadratic_beziers(seg, max_error):
                 d += f"Q{_fmt(b[1][0])} {_fmt(b[1][1])} {_fmt(b[2][0])} {_fmt(b[2][1])} "
+                segs += 1
+        if segs > max_segments:
+            return None
     d += "Z"
     return Shape("path", {"d": d})
