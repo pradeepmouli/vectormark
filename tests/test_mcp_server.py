@@ -259,3 +259,41 @@ def test_stdio_server_exposes_file_first_idealize_logo_with_fileparams():
                 sc = r.structuredContent or {}
                 assert "<svg" in (sc.get("svg") or "") and sc.get("diagnostics")
     asyncio.run(go())
+
+
+# ---------------------------------------------------------------------------
+# Fix 2: ImageError.error_code must reach the wire as a tool error
+# ---------------------------------------------------------------------------
+
+def test_idealize_logo_tool_surfaces_error_code_on_unsupported_image_type():
+    """idealize_logo must re-raise ImageError as a ToolError carrying the error_code token.
+
+    FastMCP's in-process call_tool propagates ToolError as an exception; we assert
+    the raised exception message contains the machine-readable error_code token so
+    it reaches the wire in both stdio and HTTP transports.
+    """
+    import asyncio
+    from mcp.server.fastmcp.exceptions import ToolError
+    from vectormark.mcp_server import mcp
+
+    # Encode a 1-byte payload that is NOT a valid image — triggers UNSUPPORTED_IMAGE_TYPE.
+    import base64
+    garbage_b64 = base64.b64encode(b"\x00").decode()
+    garbage_uri = f"data:image/png;base64,{garbage_b64}"
+
+    async def call():
+        return await mcp.call_tool(
+            "idealize_logo",
+            {"image": {"data_uri": garbage_uri}},
+        )
+
+    # FastMCP's in-process call_tool raises ToolError rather than returning isError=True.
+    # The error_code token must appear in the raised exception message.
+    try:
+        asyncio.run(call())
+        raise AssertionError("Expected a ToolError to be raised for unsupported image type")
+    except ToolError as exc:
+        error_text = str(exc)
+        assert "UNSUPPORTED_IMAGE_TYPE" in error_text, (
+            f"error_code token not found in ToolError message: {error_text!r}"
+        )

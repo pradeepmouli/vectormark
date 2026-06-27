@@ -10,6 +10,7 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 
 from mcp.server.fastmcp import FastMCP
+from mcp.server.fastmcp.exceptions import ToolError
 from mcp.types import CallToolResult, ImageContent, TextContent
 from PIL import Image
 
@@ -279,7 +280,10 @@ mcp = FastMCP(
 )
 def idealize_logo(image: dict, options: dict | None = None) -> CallToolResult:
     """File-first logo idealization. Returns structured content plus a best-effort image block."""
-    result, preview = idealize_logo_image(image, options, local_trust=_LOCAL_TRUST)
+    try:
+        result, preview = idealize_logo_image(image, options, local_trust=_LOCAL_TRUST)
+    except ImageError as err:
+        raise ToolError(f"[{err.error_code}] {err.message}") from err
     content: list[TextContent | ImageContent] = [
         TextContent(type="text", text=json.dumps(result))
     ]
