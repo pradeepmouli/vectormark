@@ -11,7 +11,9 @@ from scipy import ndimage
 
 from .candidate import Fill, LinearGradientFill, RadialGradientFill
 from .color import srgb_to_oklab
+from .fill_fit import fit_fill
 from .gradient import _interp_stops_rgb, _model_t
+from .types import Region
 
 _NEIGHBORS = ((1, 0), (-1, 0), (0, 1), (0, -1))
 
@@ -92,3 +94,45 @@ def gradients_continuous(fill_a: Fill, mask_a: np.ndarray, fill_b: Fill, mask_b:
     de1 = np.linalg.norm(_rendered_oklab(ma, ys_b, xs_b) - _rendered_oklab(mb, ys_b, xs_b), axis=1).mean()
     de2 = np.linalg.norm(_rendered_oklab(mb, ys_a, xs_a) - _rendered_oklab(ma, ys_a, xs_a), axis=1).mean()
     return max(float(de1), float(de2)) < seam_de
+
+
+_GRADIENT = (LinearGradientFill, RadialGradientFill)
+
+
+def merge_surfaces(filled: list[tuple[Region, Fill]], rgb: np.ndarray, *,
+                   seam_de: float = 0.045, edge_de: float = 0.06) -> list[tuple[Region, Fill]]:
+    """Fixed-point hybrid merge of adjacent surfaces. (B) both gradients -> merge when one's
+    colour matches the other's at the seam (gradients_continuous, seam_de). (A) at least one
+    flat (a narrow region that devolved) -> merge when the source has no edge across the seam
+    (seam_is_soft, edge_de). Either path also requires the union to fit a parametric gradient,
+    which becomes the merged fill. Keeps the larger member's label/color_hex. Deterministic:
+    descending-area scan -> order-independent partition. A hard-bordered feature (the dot)
+    never merges; two distinct flats whose union is not a gradient never merge."""
+    surfaces = list(filled)
+    merged = True
+    while merged:
+        merged = False
+        surfaces.sort(key=lambda rf: rf[0].mask.sum(), reverse=True)
+        for i in range(len(surfaces)):
+            ri, fi = surfaces[i]
+            for j in range(i + 1, len(surfaces)):
+                rj, fj = surfaces[j]
+                if isinstance(fi, _GRADIENT) and isinstance(fj, _GRADIENT):
+                    ok = gradients_continuous(fi, ri.mask, fj, rj.mask, seam_de=seam_de)  # B
+                else:
+                    ok = seam_is_soft(ri.mask, rj.mask, rgb, edge_de=edge_de)             # A
+                if not ok:
+                    continue
+                union = ri.mask | rj.mask
+                rep = ri if ri.mask.sum() >= rj.mask.sum() else rj
+                new_fill = fit_fill(union, rgb, flat_hex=rep.color_hex)
+                if not isinstance(new_fill, _GRADIENT):
+                    continue                              # union isn't a gradient: not a merge
+                new_region = Region(label=rep.label, mask=union, color_hex=rep.color_hex)
+                surfaces = ([s for k, s in enumerate(surfaces) if k not in (i, j)]
+                            + [(new_region, new_fill)])
+                merged = True
+                break
+            if merged:
+                break
+    return surfaces
