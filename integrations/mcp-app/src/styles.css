@@ -27,20 +27,23 @@
 
 /* ─── Daikonic brand theme — opt-in, toggled via JS dataset.theme ─────────── */
 :root[data-theme="daikonic"] {
-  --vm-bg: #071f33;
-  --vm-panel: #0d2d47;
-  --vm-panel-strong: #133758;
-  --vm-text: #e6f0f8;
-  --vm-muted: #7fa8bf;
-  --vm-border: rgba(31, 171, 159, 0.28);
-  --vm-accent: #fe830e;
-  --vm-accent-strong: #ed3125;
-  --vm-danger: #ff7070;
+  --vm-bg: #0C0C14;
+  --vm-panel: #181824;
+  --vm-panel-strong: #20202e;
+  --vm-text: #e8e6e1;
+  --vm-muted: #9a98a4;
+  --vm-border: rgba(255, 255, 255, 0.08);
+  --vm-accent: #00D4AA;
+  --vm-accent-strong: #46ecd5;
+  --vm-danger: #fb2c36;
+  /* Prefer Outfit/JetBrains Mono; degrade gracefully if not installed (no web-font load). */
+  --font-sans: "Outfit", "Inter", ui-sans-serif, system-ui, sans-serif;
+  --font-mono: "JetBrains Mono", ui-monospace, monospace;
 }
 
 :root[data-theme="daikonic"] body {
   background:
-    linear-gradient(135deg, rgba(254, 131, 14, 0.10), transparent 42%),
+    linear-gradient(135deg, rgba(0, 212, 170, 0.10), transparent 42%),
     var(--vm-bg);
 }
 

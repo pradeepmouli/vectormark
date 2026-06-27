@@ -57,15 +57,13 @@ interface IdealizeLogoResult {
   height: number;
   svg_bytes: number;
   preview_available?: boolean;
-  /** Legacy fields — accepted for backward compat but never displayed. */
+  /** Legacy field — accepted for backward compat but never displayed. */
   image_path?: string;
-  output_path?: string | null;
   diagnostics?: Diagnostics;
 }
 
 interface IdealizeLogoInput {
   image_path?: string;
-  output_path?: string | null;
   epsilon?: number;
   max_error?: number;
   colors?: number;
@@ -108,7 +106,6 @@ function parseStructuredResult(result: CallToolResult | null): IdealizeLogoResul
       svg_bytes: Number(structured.svg_bytes ?? structured.svg.length),
       preview_available: structured.preview_available ?? false,
       image_path: structured.image_path,
-      output_path: structured.output_path ?? null,
       diagnostics: structured.diagnostics,
     };
   }
@@ -125,7 +122,6 @@ function parseStructuredResult(result: CallToolResult | null): IdealizeLogoResul
         svg_bytes: Number(parsed.svg_bytes ?? parsed.svg.length),
         preview_available: parsed.preview_available ?? false,
         image_path: parsed.image_path,
-        output_path: parsed.output_path ?? null,
         diagnostics: parsed.diagnostics,
       };
     }
@@ -368,17 +364,6 @@ function VectormarkApp({
               setForm((current) => ({ ...current, image_path: event.target.value }))
             }
             placeholder="/path/to/logo.png"
-          />
-        </label>
-
-        <label className="field field-wide">
-          SVG output path
-          <input
-            value={form.output_path ?? ""}
-            onChange={(event) =>
-              setForm((current) => ({ ...current, output_path: event.target.value }))
-            }
-            placeholder="Optional"
           />
         </label>
 
