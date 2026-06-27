@@ -1,6 +1,5 @@
 import numpy as np
 from vectormark.surface_merge import seam_is_soft, gradients_continuous, merge_surfaces
-from vectormark.fill_fit import fit_fill
 from vectormark.fill_fit import fit_fill as _ff
 from vectormark.types import Region
 from vectormark.candidate import LinearGradientFill, RadialGradientFill
@@ -57,7 +56,7 @@ def test_non_adjacent_masks_are_not_soft():
 def test_two_gradient_halves_are_continuous():
     # each half of a wide ramp spans enough colour to fit a gradient -> compare at the seam
     rgb, a, b = _full_ramp_split()
-    fa, fb = fit_fill(a, rgb, flat_hex="#000000"), fit_fill(b, rgb, flat_hex="#000000")
+    fa, fb = _ff(a, rgb, flat_hex="#000000"), _ff(b, rgb, flat_hex="#000000")
     assert gradients_continuous(fa, a, fb, b)
 
 
@@ -68,8 +67,17 @@ def test_gradient_meets_flat_is_not_continuous():
     rgb[:, W // 2:] = (20, 60, 210)
     a = np.zeros((H, W), bool); a[:, : W // 2] = True
     b = np.zeros((H, W), bool); b[:, W // 2:] = True
-    fa, fb = fit_fill(a, rgb, flat_hex="#000000"), fit_fill(b, rgb, flat_hex="#143CD2")
+    fa, fb = _ff(a, rgb, flat_hex="#000000"), _ff(b, rgb, flat_hex="#143CD2")
     assert not gradients_continuous(fa, a, fb, b)
+
+
+def test_non_adjacent_gradients_not_continuous():
+    # two non-touching gradient blobs have no shared seam -> False
+    rgb, a, _ = _full_ramp_split()
+    far = np.zeros_like(a); far[:, 70:] = True       # disjoint from a (left half)
+    fa = _ff(a, rgb, flat_hex="#000000")
+    fb = _ff(far, rgb, flat_hex="#000000")
+    assert not gradients_continuous(fa, a, fb, far)
 
 
 # ── Task 3: merge_surfaces ────────────────────────────────────────────────────
@@ -118,6 +126,7 @@ def test_flat_dot_on_ramp_stays_separate():
               (_region(1, b, "#143CD2"), _ff(b, rgb, flat_hex="#143CD2"))]
     out = merge_surfaces(filled, rgb)
     assert len(out) == 2                                 # NOT merged
+
 
 def test_two_distinct_flats_do_not_merge():
     # two solid colors meeting at a soft-ish AA edge: union is NOT a gradient -> no merge.

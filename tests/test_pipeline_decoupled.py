@@ -41,3 +41,25 @@ def test_report_gradients_counts_fill_type_not_source():
     assert isinstance(report, IdealizeReport)
     # the wing region gets a LinearGradientFill, so gradients >= 1
     assert report.gradients >= 1
+
+
+def _two_gradient_blobs():
+    """Two disconnected smooth-ramp rectangles on white — each should get its own gradient."""
+    H, W = 120, 240
+    img = np.full((H, W, 3), 255, np.uint8)
+    # left blob: horizontal blue->red ramp
+    for x in range(10, 100):
+        t = (x - 10) / 89
+        img[20:100, x] = [round(20 + t * 200), 40, round(200 - t * 180)]
+    # right blob: horizontal green->purple ramp (separate component, no adjacency)
+    for x in range(140, 230):
+        t = (x - 140) / 89
+        img[20:100, x] = [round(40 + t * 160), round(180 - t * 160), round(20 + t * 180)]
+    return img
+
+
+def test_two_disconnected_gradient_blobs_each_get_gradient():
+    """Two spatially separate ramp blobs must each be emitted with a gradient fill."""
+    svg, report = idealize(_two_gradient_blobs(), options=Options(max_colors=16), report=True)
+    grad_count = svg.count("<linearGradient") + svg.count("<radialGradient")
+    assert grad_count >= 2, f"expected >= 2 gradients, got {grad_count}"

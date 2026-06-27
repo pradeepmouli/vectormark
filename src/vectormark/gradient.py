@@ -23,26 +23,10 @@ _MIN_STOP_SPAN = 0.02    # OKLab end-to-end travel a fit must show to count as a
 _BLOB_DOMINANCE = 0.85   # smooth-gradient path: min fraction of the foreground that must lie
                          # in a single connected component for the mark to be treated as one
                          # gradient blob (rejects multi-glyph wordmarks before any fit).
-_THIN_BAND_TOL = 0.10   # max mean band-area fraction (group_area / total_fg / band count) for a
-                        # >= _MIN_BANDS group to count as a finely-quantized continuous tone rather
-                        # than a few chunky similar-coloured facets. Keeps faceted logos (Sketch)
-                        # crisp instead of smearing them into a gradient that ΔE cannot tell apart.
-_SMOOTH_VAR_TOL = 0.005  # min mean within-region OKLab variation for a DOMINANT group to count
-                         # as a genuine continuous tone (vs distinct flat regions). A smooth
-                         # gradient's bands quantize varying pixels (var > 0); distinct flats are
-                         # internally uniform (var ~ 0). Without this the dominance branch would
-                         # gradient-fit a crisp two-tone logo whose tones merge under MERGE_TOL.
 _STRETCH_GRID_STEPS = (8, 16, 24, 32, 48)   # NxN downsample sizes for the stretch-fill;
                                             # the renderer bilinearly stretches the grid
                                             # back over the footprint. Last entry is the cap.
 _STRETCH_TARGET = 0.05                       # grow the grid until mean per-pixel ΔE <= this.
-_PARAM_FALLBACK_TOL = 0.07   # max mean per-pixel ΔE for a merged component to prefer an
-                             # editable parametric gradient over a raster stretch-fill.
-
-MERGE_TOL = 0.15   # max OKLab colour step between two spatially-adjacent regions for them
-                   # to merge into one vector component. Below this = one smooth field (gradient
-                   # bands, within-facet shading); above = a real boundary (facet edge, outline).
-                   # Corpus: within-field steps <=0.12, boundary steps >=0.27 -> clean gap.
 
 
 def _hex_to_oklab(hex_colors: list[str]) -> np.ndarray:

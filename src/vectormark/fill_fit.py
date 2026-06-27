@@ -7,7 +7,14 @@ from __future__ import annotations
 import numpy as np
 
 from .candidate import Fill, FlatFill, LinearGradientFill, RadialGradientFill
+from .color import srgb_to_oklab
 from .gradient import _GATE_DELTA_E, _best_parametric
+
+# Conservative pre-check threshold: mean OKLab distance from centroid below this →
+# region is effectively flat, skip the expensive parametric search entirely.
+# Real gradients produce mean centroid-spread ≈ 0.010+ (genuine spans ≥ 0.039
+# end-to-end per _MIN_STOP_SPAN; flat-with-AA spans ≈ 0). 0.005 is well below.
+_FLAT_OKLAB_SPREAD_THRESHOLD = 0.005
 
 
 def fit_fill(mask: np.ndarray, rgb: np.ndarray, *, flat_hex: str,
@@ -18,6 +25,16 @@ def fit_fill(mask: np.ndarray, rgb: np.ndarray, *, flat_hex: str,
     both exists and re-renders within `max_gradient_de` mean OKLab ΔE; in that case the
     corresponding gradient fill is returned. The silhouette is the caller's; this only
     chooses how to paint inside it."""
+    ys, xs = np.where(mask)
+    if len(xs) == 0:
+        return FlatFill(flat_hex)
+    pixels = rgb[ys, xs].astype(float)
+    oklab = srgb_to_oklab(pixels / 255.0)
+    centroid = oklab.mean(axis=0)
+    spread = float(np.linalg.norm(oklab - centroid, axis=1).mean())
+    if spread < _FLAT_OKLAB_SPREAD_THRESHOLD:
+        return FlatFill(flat_hex)
+
     best = _best_parametric(mask, rgb)
     if best is None:
         return FlatFill(flat_hex)

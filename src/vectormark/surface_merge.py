@@ -59,8 +59,9 @@ def seam_pairs(mask_a: np.ndarray, mask_b: np.ndarray, rgb: np.ndarray):
 def seam_is_soft(mask_a: np.ndarray, mask_b: np.ndarray, rgb: np.ndarray,
                  *, edge_de: float = 0.06) -> bool:
     """(A) True iff the masks are 4-adjacent and the source color steps smoothly across
-    their shared border (median straddling-pair OKLab ΔE < edge_de). A real object edge —
-    even one whose two sides are color-similar — spikes above edge_de."""
+    their shared border (median straddling-pair OKLab ΔE < edge_de).
+    Same-color-at-seam features are not distinguishable here; the merge's
+    union-fits-gradient guard handles them."""
     ca, cb = seam_pairs(mask_a, mask_b, rgb)
     if len(ca) == 0:
         return False

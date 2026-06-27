@@ -30,6 +30,10 @@ def test_linear_ramp_is_gradient():
     fill = fit_fill(mask, rgb, flat_hex="#000000")
     assert isinstance(fill, (LinearGradientFill, RadialGradientFill))
     assert len(fill.stops) >= 2
+    if isinstance(fill, LinearGradientFill):
+        assert set(fill.geometry.keys()) >= {"x1", "y1", "x2", "y2"}
+    else:
+        assert set(fill.geometry.keys()) >= {"cx", "cy", "r"}
 
 
 def test_flat_hex_used_only_for_flat_decision():
