@@ -12,7 +12,7 @@ import ipaddress
 import socket
 from dataclasses import dataclass
 from pathlib import Path
-from urllib.parse import urlparse
+from urllib.parse import urlparse, urljoin
 
 from PIL import Image
 
@@ -46,24 +46,10 @@ class ResolvedImage:
     filename: str | None = None
 
 
-def _default_fetch(url: str, *, max_bytes: int = MAX_INPUT_BYTES, timeout: float = _FETCH_TIMEOUT) -> bytes:
-    """GET `url` and return up to max_bytes; raises ImageError(IMAGE_UNRESOLVABLE) on failure."""
-    import httpx
-    try:
-        with httpx.Client(timeout=timeout, follow_redirects=True) as client:
-            resp = client.get(url)
-            resp.raise_for_status()
-            data = resp.content
-    except Exception as exc:  # network / HTTP / decode
-        raise ImageError("IMAGE_UNRESOLVABLE", f"could not fetch image url: {exc}") from exc
-    if len(data) > max_bytes:
-        raise ImageError("IMAGE_TOO_LARGE", "fetched image exceeds the size limit")
-    return data
-
-
-def _assert_url_safe(url: str) -> None:
+def _assert_url_safe(url: str) -> str:
     """SSRF guard for a caller-supplied `url`: https only, no loopback/private/link-local/
-    metadata hosts."""
+    metadata hosts. Resolves DNS once and returns the first validated IP string so callers
+    can pin the connection to that address (closing the TOCTOU rebind window)."""
     parsed = urlparse(url)
     if parsed.scheme != "https" or not parsed.hostname:
         raise ImageError("URL_NOT_ALLOWED", "url must be an absolute https URL")
@@ -75,6 +61,87 @@ def _assert_url_safe(url: str) -> None:
         ip = ipaddress.ip_address(info[4][0])
         if ip.is_loopback or ip.is_private or ip.is_link_local or ip.is_reserved or ip.is_multicast:
             raise ImageError("URL_NOT_ALLOWED", "url resolves to a non-public address")
+    return infos[0][4][0]  # validated IP for DNS pinning
+
+
+def _default_fetch(url: str, *, max_bytes: int = MAX_INPUT_BYTES, timeout: float = _FETCH_TIMEOUT) -> bytes:
+    """GET `url` and return up to max_bytes; raises ImageError on failure.
+
+    Security hardening:
+    - ``follow_redirects=False`` + manual loop: every Location header is re-validated
+      via ``_assert_url_safe`` before following, with a cap of 5 hops.  A redirect to a
+      private IP or non-https scheme raises ``ImageError("URL_NOT_ALLOWED", ...)``.
+      (Closes SSRF redirect bypass — HIGH-1.)
+    - DNS pinning: ``_assert_url_safe`` resolves the hostname once and returns the
+      validated IP.  The TCP connection is made to that IP so httpx never re-resolves
+      the hostname.  The original hostname is forwarded via the ``Host`` header and the
+      ``sni_hostname`` request extension so the TLS handshake and certificate verification
+      use the hostname, not the IP.  (Closes TOCTOU rebind — HIGH-3.)
+    - Body is streamed and aborted as soon as it exceeds ``max_bytes``, capping memory
+      usage against hostile oversized responses.
+    """
+    import httpx
+
+    _MAX_REDIRECTS = 5
+    current_url = url
+
+    try:
+        with httpx.Client(timeout=timeout, follow_redirects=False) as client:
+            for hop in range(_MAX_REDIRECTS + 1):
+                if hop == _MAX_REDIRECTS:
+                    raise ImageError("URL_NOT_ALLOWED", "too many redirects")
+
+                # Validate and pin DNS in one step: resolve once, connect to that IP.
+                pinned_ip = _assert_url_safe(current_url)
+                parsed = urlparse(current_url)
+                hostname = parsed.hostname
+                port = parsed.port or 443
+                path_qs = (parsed.path or "/") + (f"?{parsed.query}" if parsed.query else "")
+
+                # Build the request URL from the pinned IP so httpx never re-resolves.
+                # IPv6 literals must be enclosed in brackets.
+                ip_obj = ipaddress.ip_address(pinned_ip)
+                ip_literal = f"[{pinned_ip}]" if ip_obj.version == 6 else pinned_ip
+                pinned_url = f"https://{ip_literal}:{port}{path_qs}"
+
+                request = httpx.Request(
+                    "GET",
+                    pinned_url,
+                    headers={"Host": hostname},
+                    # sni_hostname is forwarded to httpcore so TLS SNI and cert
+                    # verification use the original hostname, not the IP address.
+                    extensions={"sni_hostname": hostname.encode()},
+                )
+                resp = client.send(request, stream=True)
+
+                if resp.status_code in (301, 302, 303, 307, 308):
+                    location = resp.headers.get("location", "")
+                    resp.close()
+                    if not location:
+                        raise ImageError("IMAGE_UNRESOLVABLE", "redirect with no Location header")
+                    # Resolve relative Location references to an absolute URL, then
+                    # re-validate via _assert_url_safe on the next hop (HIGH-1).
+                    if not location.startswith(("http://", "https://")):
+                        location = urljoin(current_url, location)
+                    current_url = location
+                    continue
+
+                chunks: list[bytes] = []
+                size = 0
+                try:
+                    resp.raise_for_status()
+                    for chunk in resp.iter_bytes():
+                        size += len(chunk)
+                        if size > max_bytes:
+                            raise ImageError("IMAGE_TOO_LARGE", "fetched image exceeds the size limit")
+                        chunks.append(chunk)
+                finally:
+                    resp.close()
+                return b"".join(chunks)
+    except ImageError:
+        raise
+    except Exception as exc:
+        raise ImageError("IMAGE_UNRESOLVABLE", f"could not fetch image url: {exc}") from exc
 
 
 def _decode_b64(data: str) -> bytes:
@@ -110,6 +177,9 @@ def resolve_image(image: dict, *, local_trust: bool, fetch=_default_fetch) -> Re
     data_uri -> base64. Raises ImageError with a structured code on any failure."""
     image = image or {}
     if image.get("download_url"):
+        # HIGH-2: apply the same SSRF guard to download_url that the url branch uses.
+        # download_url is caller-supplied with no signature; treat it as untrusted.
+        _assert_url_safe(image["download_url"])
         data, kind, name = fetch(image["download_url"]), "platform_file", image.get("file_name")
     elif image.get("path"):
         if not local_trust:
