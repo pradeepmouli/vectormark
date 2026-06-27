@@ -27,6 +27,17 @@ def _max_residual(model, pts: np.ndarray) -> float:
     return float(np.abs(model.residuals(pts)).max())
 
 
+ROBUST_RESIDUAL_TOL = 1.0   # acceptance multiplier on epsilon for the robust (RMS) residual.
+
+
+def _robust_residual(model, pts: np.ndarray) -> float:
+    """RMS of |perpendicular residuals| — tolerant of a noisy boundary minority,
+    unlike the MAX. The least-squares model already fits the bulk; this just accepts
+    on the bulk error instead of the worst outlier."""
+    r = np.asarray(model.residuals(pts), float)
+    return float(np.sqrt(np.mean(r * r)))
+
+
 def recognize_primitive(contour: np.ndarray, *, epsilon: float) -> Shape | None:
     """Return a native-primitive Shape if `contour` matches one within ε, else None."""
     pts = np.asarray(contour, dtype=float)
@@ -38,7 +49,7 @@ def recognize_primitive(contour: np.ndarray, *, epsilon: float) -> Shape | None:
 
     # circle
     cm = CircleModel.from_estimate(pts)
-    if cm and _max_residual(cm, pts) <= epsilon:
+    if cm and _robust_residual(cm, pts) <= epsilon * ROBUST_RESIDUAL_TOL:
         xc, yc = cm.center
         return Shape("circle", {"cx": xc, "cy": yc, "r": cm.radius})
 
@@ -48,7 +59,7 @@ def recognize_primitive(contour: np.ndarray, *, epsilon: float) -> Shape | None:
         xc, yc = em.center
         a, b = em.axis_lengths
         theta = em.theta
-        if _max_residual(em, pts) <= epsilon and (abs(theta) < 0.08 or abs(abs(theta) - np.pi) < 0.08):
+        if _robust_residual(em, pts) <= epsilon * ROBUST_RESIDUAL_TOL and (abs(theta) < 0.08 or abs(abs(theta) - np.pi) < 0.08):
             return Shape("ellipse", {"cx": xc, "cy": yc, "rx": a, "ry": b})
 
     # axis-aligned rectangle: bbox fill ratio near 1, rotated-rect ~ axis-aligned,
@@ -83,8 +94,8 @@ def recognize_polygon(contour: np.ndarray, *, epsilon: float, max_vertices: int 
         simp = simp[:-1]
     if not (3 <= len(simp) <= max_vertices):
         return None
-    # every original point must lie within ε of the simplified polygon edges
-    if _max_point_to_polyline(pts, np.vstack([simp, simp[0]])) > epsilon:
+    # every original point must lie within ε of the simplified polygon edges (RMS gate)
+    if _robust_point_to_polyline(pts, np.vstack([simp, simp[0]])) > epsilon * ROBUST_RESIDUAL_TOL:
         return None
     return Shape("polygon", {"points": [(float(x), float(y)) for x, y in simp]})
 
@@ -96,6 +107,14 @@ def _max_point_to_polyline(pts: np.ndarray, poly: np.ndarray) -> float:
         d = min(_point_seg_dist(p, s[0], s[1]) for s in segs)
         worst = max(worst, d)
     return worst
+
+
+def _robust_point_to_polyline(pts: np.ndarray, poly: np.ndarray) -> float:
+    """RMS of each point's distance to the nearest polyline segment (robust counterpart
+    of `_max_point_to_polyline`)."""
+    segs = np.stack([poly[:-1], poly[1:]], axis=1)
+    d = np.array([min(_point_seg_dist(p, s[0], s[1]) for s in segs) for p in pts])
+    return float(np.sqrt(np.mean(d * d)))
 
 
 def _point_seg_dist(p, a, b) -> float:

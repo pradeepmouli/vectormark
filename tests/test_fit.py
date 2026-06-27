@@ -136,3 +136,36 @@ def test_polygon_default_bound_is_the_constant():
     assert shp is not None and 3 <= len(shp.params["points"]) <= MAX_POLY_VERTICES
     # forcing a 2-vertex bound rejects it
     assert recognize_polygon(ring, epsilon=1.5, max_vertices=2) is None
+
+
+# ── Task-5 tests: robust (RMS) recognition acceptance ────────────────────────
+
+def _disc_mask(r=20, noise=False, seed=0):
+    H = W = 80
+    yy, xx = np.ogrid[:H, :W]
+    m = ((yy - 40) ** 2 + (xx - 40) ** 2) <= r ** 2
+    if noise:  # erode a noisy 2px antialiased ring, like a quantized dot
+        rng = np.random.default_rng(seed)
+        ring = (((yy - 40) ** 2 + (xx - 40) ** 2) <= r ** 2) & ~(((yy - 40) ** 2 + (xx - 40) ** 2) <= (r - 2) ** 2)
+        m = m & ~(ring & (rng.random((H, W)) < 0.5))
+    return m
+
+
+def test_noisy_disc_recovers_as_circle():
+    # the eroded/quantized dot must recognize as a circle (fit to the bulk), not be rejected
+    c = outer_contour(_disc_mask(noise=True))
+    shp = recognize_primitive(c, epsilon=1.5)
+    assert shp is not None and shp.kind == "circle"
+
+
+def test_clean_disc_still_circle():
+    shp = recognize_primitive(outer_contour(_disc_mask()), epsilon=1.5)
+    assert shp is not None and shp.kind == "circle"
+
+
+def test_square_is_not_accepted_as_circle():
+    # robustness must NOT over-accept: a square's points are far from any circle
+    H = W = 80
+    m = np.zeros((H, W), bool); m[20:60, 20:60] = True
+    shp = recognize_primitive(outer_contour(m), epsilon=1.5)
+    assert shp is None or shp.kind in ("rect", "ellipse")  # never 'circle'
