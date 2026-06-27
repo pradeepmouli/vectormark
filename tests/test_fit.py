@@ -82,3 +82,46 @@ def test_fit_path_of_dome_uses_curve():
     shape = fit_path(c, epsilon=1.0, max_error=0.8)
     # curved top -> inflection-free quadratic arcs (Q), never cubic (C)
     assert shape.kind == "path" and "Q" in shape.params["d"] and "C" not in shape.params["d"]
+
+
+from vectormark.fit import MAX_PATH_SEGMENTS, MAX_POLY_VERTICES
+
+
+def _square(n=40):
+    # a clean axis-aligned square contour (closed ring), well under the segment budget
+    top = [(x, 0) for x in range(n)]
+    right = [(n - 1, y) for y in range(n)]
+    bot = [(x, n - 1) for x in range(n - 1, -1, -1)]
+    left = [(0, y) for y in range(n - 1, -1, -1)]
+    return np.array(top + right + bot + left + [top[0]], float)
+
+
+def _noisy_blob(n=200, seed=0):
+    # a jagged closed contour that needs many segments -> must exceed the budget
+    rng = np.random.default_rng(seed)
+    t = np.linspace(0, 2 * np.pi, n)
+    r = 50 + rng.normal(0, 6, n)              # heavy per-vertex radial noise
+    pts = np.column_stack([60 + r * np.cos(t), 60 + r * np.sin(t)])
+    return np.vstack([pts, pts[0]])
+
+
+def test_clean_shape_fits_within_budget():
+    shape = fit_path(_square(), epsilon=1.5, max_error=1.0)
+    assert shape is not None
+    d = shape.params["d"]
+    assert d.count("L") + d.count("Q") <= MAX_PATH_SEGMENTS
+
+
+def test_frayed_contour_exceeds_budget_returns_none():
+    # with a tight max_error the jagged blob needs > MAX_PATH_SEGMENTS quadratics
+    assert fit_path(_noisy_blob(), epsilon=0.5, max_error=0.5) is None
+
+
+def test_explicit_low_budget_rejects():
+    assert fit_path(_square(), epsilon=1.5, max_error=1.0, max_segments=2) is None
+
+
+def test_vertex_cap_rejects_too_many_corners():
+    # _square() produces 3 corner-runs; a cap of 2 must reject it via the vertex gate
+    # (segment count is tiny, so this exercises the vertex cap in isolation)
+    assert fit_path(_square(), epsilon=1.5, max_error=1.0, max_vertices=2) is None

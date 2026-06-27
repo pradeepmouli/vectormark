@@ -12,6 +12,11 @@ from ._fitcurve import fit_quadratic_beziers
 from .contour import corner_indices, rdp
 
 
+MAX_PATH_SEGMENTS = 12   # a "shape" is simple; a path needing more drawing commands than
+                         # this is fraying (tracing AA noise), not a shape -> disqualified.
+MAX_POLY_VERTICES = 10   # a path/polygon "shape" has few corners; more is a traced jagged edge.
+
+
 @dataclass
 class Shape:
     kind: str                 # "circle" | "ellipse" | "rect" | "polygon" | "path"
@@ -109,20 +114,26 @@ def _fmt(v: float) -> str:
     return f"{v:.2f}".rstrip("0").rstrip(".")
 
 
-def fit_path(contour: np.ndarray, *, epsilon: float, max_error: float) -> Shape:
-    """Corner-split the contour; emit lines for straight runs, Béziers otherwise."""
+def fit_path(contour: np.ndarray, *, epsilon: float, max_error: float,
+             max_segments: int = MAX_PATH_SEGMENTS,
+             max_vertices: int = MAX_POLY_VERTICES) -> Shape | None:
+    """Corner-split the contour; emit lines for straight runs, quadratic Béziers otherwise.
+    Returns None if the result needs more than `max_segments` drawing commands — a frayed
+    boundary is not a simple shape and must not be emitted."""
     pts = np.asarray(contour, dtype=float)
     closed = np.allclose(pts[0], pts[-1])
     ring = pts[:-1] if closed else pts
     simp = rdp(ring, epsilon)
     corners = corner_indices(np.vstack([simp, simp[0]]), angle_threshold_deg=40)
-    # map corner positions in `simp` back to indices in `ring`
     corner_pts = simp[corners] if corners else simp[[0]]
     cut_idx = sorted({int(np.argmin(np.hypot(*(ring - cp).T))) for cp in corner_pts})
     if len(cut_idx) < 2:
         cut_idx = [0, len(ring) // 2]
+    if len(cut_idx) > max_vertices:   # too many corner-runs = angular fraying, not a shape
+        return None
 
     d = f"M{_fmt(ring[cut_idx[0]][0])} {_fmt(ring[cut_idx[0]][1])} "
+    segs = 0
     for k in range(len(cut_idx)):
         i0 = cut_idx[k]
         i1 = cut_idx[(k + 1) % len(cut_idx)]
@@ -131,8 +142,12 @@ def fit_path(contour: np.ndarray, *, epsilon: float, max_error: float) -> Shape:
             continue
         if _segment_is_straight(seg, epsilon):
             d += f"L{_fmt(seg[-1][0])} {_fmt(seg[-1][1])} "
+            segs += 1
         else:
             for b in fit_quadratic_beziers(seg, max_error):
                 d += f"Q{_fmt(b[1][0])} {_fmt(b[1][1])} {_fmt(b[2][0])} {_fmt(b[2][1])} "
+                segs += 1
+        if segs > max_segments:
+            return None
     d += "Z"
     return Shape("path", {"d": d})

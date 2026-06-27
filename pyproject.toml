@@ -55,3 +55,8 @@ packages = ["src/vectormark"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-q"
+
+[dependency-groups]
+dev = [
+    "pytest>=9.0.3",
+]

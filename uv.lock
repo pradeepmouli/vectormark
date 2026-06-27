@@ -1122,6 +1122,11 @@ server = [
     { name = "mcp" },
 ]
 
+[package.dev-dependencies]
+dev = [
+    { name = "pytest" },
+]
+
 [package.metadata]
 requires-dist = [
     { name = "mcp", marker = "extra == 'server'", specifier = ">=1.13" },
@@ -1135,3 +1140,6 @@ requires-dist = [
     { name = "vectormark", extras = ["scoring", "server"], marker = "extra == 'dev'" },
 ]
 provides-extras = ["scoring", "server", "dev"]
+
+[package.metadata.requires-dev]
+dev = [{ name = "pytest", specifier = ">=9.0.3" }]
