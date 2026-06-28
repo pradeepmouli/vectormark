@@ -8,7 +8,7 @@ import numpy as np
 from shapely.geometry import Polygon
 from skimage.measure import CircleModel, EllipseModel
 
-from ._fitcurve import fit_quadratic_beziers
+from ._fitcurve import fit_cubic_beziers
 from .contour import corner_indices, rdp
 
 
@@ -155,8 +155,10 @@ def _build_corner_path(ring: np.ndarray, epsilon: float, max_error: float) -> tu
             d += f"L{_fmt(seg[-1][0])} {_fmt(seg[-1][1])} "
             segs += 1
         else:
-            for b in fit_quadratic_beziers(seg, max_error):
-                d += f"Q{_fmt(b[1][0])} {_fmt(b[1][1])} {_fmt(b[2][0])} {_fmt(b[2][1])} "
+            for b in fit_cubic_beziers(seg, max_error):
+                d += (f"C{_fmt(b[1][0])} {_fmt(b[1][1])} "
+                      f"{_fmt(b[2][0])} {_fmt(b[2][1])} "
+                      f"{_fmt(b[3][0])} {_fmt(b[3][1])} ")
                 segs += 1
     d += "Z"
     return d, len(cut_idx), segs
