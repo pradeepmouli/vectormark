@@ -176,6 +176,27 @@ def _build_corner_path(ring: np.ndarray, epsilon: float, max_error: float) -> tu
     return d, len(cut_idx), segs
 
 
+def fit_edge(pts: np.ndarray, *, epsilon: float, max_error: float) -> str:
+    """Fit an open polyline between fixed endpoints into an SVG path fragment.
+
+    No M or Z is emitted (caller emits the M with pts[0]). Straight runs →
+    L; curved runs → C (denoise + cubic). Endpoints preserved exactly.
+    """
+    pts = np.asarray(pts, dtype=float)
+    if len(pts) < 2:
+        return ""
+    if _segment_is_straight(pts, epsilon):
+        return f"L{_fmt(pts[-1][0])} {_fmt(pts[-1][1])} "
+    run = rdp(pts, min(PATH_DENOISE_EPS, max_error)) if len(pts) > 4 else pts
+    beziers = fit_cubic_beziers(run, max_error)
+    d = ""
+    for b in beziers:
+        d += (f"C{_fmt(b[1][0])} {_fmt(b[1][1])} "
+              f"{_fmt(b[2][0])} {_fmt(b[2][1])} "
+              f"{_fmt(b[3][0])} {_fmt(b[3][1])} ")
+    return d
+
+
 def fit_path(contour: np.ndarray, *, epsilon: float, max_error: float,
              max_segments: int = MAX_PATH_SEGMENTS,
              max_vertices: int = MAX_POLY_VERTICES) -> Shape:
