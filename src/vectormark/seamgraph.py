@@ -288,3 +288,196 @@ def snap_junctions(graph: EdgeGraph, *, reach: float = 1.5) -> EdgeGraph:
         ))
 
     return EdgeGraph(nodes=final_nodes, edges=new_edges)
+
+
+# ---------------------------------------------------------------------------
+# Task 5: Region reassembly → path d
+# ---------------------------------------------------------------------------
+
+from vectormark.fit import fit_edge as _fit_edge_fn
+
+
+def _fmt(v: float) -> str:
+    return f"{v:.2f}".rstrip("0").rstrip(".")
+
+
+def _edge_svg_fragment_forward(
+    edge: Edge, beziers: list, *, start_pt: tuple
+) -> str:
+    """SVG fragment for this edge traversed forward (pts[0]→pts[-1]).
+    Returns commands after the M (caller already emitted M for pts[0])."""
+    _ = start_pt  # consumed by caller's M
+    return _beziers_to_fragment(beziers, edge.pts[-1])
+
+
+def _edge_svg_fragment_reversed(
+    edge: Edge, beziers: list, *, start_pt: tuple
+) -> str:
+    """SVG fragment for this edge traversed reversed (pts[-1]→pts[0])."""
+    _ = start_pt
+    return _beziers_to_fragment_reversed(beziers, edge.pts[0])
+
+
+def _beziers_to_fragment(beziers: list, end_pt: np.ndarray) -> str:
+    """Emit bezier list as SVG fragment ending at end_pt. Straight → L, curve → C."""
+    if not beziers:
+        # Straight line (fit_edge emitted an L — re-emit to end_pt)
+        return f"L{_fmt(end_pt[0])} {_fmt(end_pt[1])} "
+    d = ""
+    for b in beziers:
+        d += (f"C{_fmt(b[1][0])} {_fmt(b[1][1])} "
+              f"{_fmt(b[2][0])} {_fmt(b[2][1])} "
+              f"{_fmt(b[3][0])} {_fmt(b[3][1])} ")
+    return d
+
+
+def _beziers_to_fragment_reversed(beziers: list, end_pt: np.ndarray) -> str:
+    """Emit reversed bezier list (each cubic reversed + list reversed)."""
+    if not beziers:
+        return f"L{_fmt(end_pt[0])} {_fmt(end_pt[1])} "
+    d = ""
+    for b in reversed(beziers):
+        # Reverse cubic: swap P0↔P3, P1↔P2
+        rev = np.array([b[3], b[2], b[1], b[0]])
+        d += (f"C{_fmt(rev[1][0])} {_fmt(rev[1][1])} "
+              f"{_fmt(rev[2][0])} {_fmt(rev[2][1])} "
+              f"{_fmt(rev[3][0])} {_fmt(rev[3][1])} ")
+    return d
+
+
+def _fit_edge_beziers(edge: Edge, *, epsilon: float, max_error: float) -> list:
+    """Fit edge.pts as an open arc; return list of (4,2) bezier arrays.
+    Straight edges return []."""
+    from vectormark.fit import _segment_is_straight
+    pts = edge.pts
+    if _segment_is_straight(pts, epsilon):
+        return []
+    frag = _fit_edge_fn(pts, epsilon=epsilon, max_error=max_error)
+    # Parse C commands from the fragment string
+    beziers = []
+    # We need to reconstruct bezier arrays from the fragment.
+    # Since fit_edge returns the complete fragment, re-run fit_cubic_beziers
+    from vectormark.contour import rdp
+    from vectormark._fitcurve import fit_cubic_beziers
+    from vectormark.fit import PATH_DENOISE_EPS
+    run = rdp(pts, min(PATH_DENOISE_EPS, max_error)) if len(pts) > 4 else pts
+    beziers = list(fit_cubic_beziers(run, max_error))
+    return beziers
+
+
+def _order_edges_for_region(
+    graph: EdgeGraph, region_idx: int
+) -> list[tuple[int, bool]]:
+    """Return list of (edge_index, forward) pairs forming a closed walk for region_idx.
+    forward=True means edge traversed pts[0]→pts[-1]; False means pts[-1]→pts[0].
+    Raises if a closed walk cannot be formed."""
+
+    # Collect incident edges and their traversal direction for this region
+    incident: list[tuple[int, bool]] = []
+    for i, e in enumerate(graph.edges):
+        if e.region_a == region_idx or e.region_b == region_idx:
+            # Determine traversal direction:
+            # For a seam (region_a < region_b), forward means the contour of region_a
+            # traced the edge in its natural direction. region_b uses it reversed.
+            if e.region_b is None:
+                # Boundary edge: always forward for its owner region
+                forward = True
+            elif e.region_a == region_idx:
+                forward = True
+            else:
+                forward = False
+            incident.append((i, forward))
+
+    if not incident:
+        return []
+
+    # Build node-to-(edge_idx, forward) adjacency for this region
+    # Each edge contributes two endpoints based on traversal direction
+    def edge_endpoints(edge_idx: int, forward: bool) -> tuple[int, int]:
+        e = graph.edges[edge_idx]
+        if forward:
+            return e.node0, e.node1
+        else:
+            return e.node1, e.node0
+
+    # Topological sort: build closed walk
+    # Map: tail_node → list of (edge_idx, forward)
+    from collections import defaultdict
+    tail_to_edge: dict[int, list[tuple[int, bool]]] = defaultdict(list)
+    for ei, fwd in incident:
+        tail, _ = edge_endpoints(ei, fwd)
+        tail_to_edge[tail].append((ei, fwd))
+
+    # Start from smallest edge index for determinism
+    start_ei, start_fwd = min(incident, key=lambda x: x[0])
+    start_tail, start_head = edge_endpoints(start_ei, start_fwd)
+
+    walk: list[tuple[int, bool]] = [(start_ei, start_fwd)]
+    used = {start_ei}
+    current_node = start_head
+
+    while current_node != start_tail:
+        candidates = [
+            (ei, fwd) for (ei, fwd) in tail_to_edge[current_node]
+            if ei not in used
+        ]
+        if not candidates:
+            break
+        # Deterministic: pick smallest edge index
+        next_ei, next_fwd = min(candidates, key=lambda x: x[0])
+        walk.append((next_ei, next_fwd))
+        used.add(next_ei)
+        _, current_node = edge_endpoints(next_ei, next_fwd)
+
+    return walk
+
+
+def region_path_d(
+    graph: EdgeGraph,
+    region_idx: int,
+    *,
+    epsilon: float,
+    max_error: float,
+    _edge_cache: dict | None = None,
+) -> str:
+    """Assemble a closed SVG path d for region_idx from the shared edge graph.
+    Each edge is fitted once (cached by edge index). Shared seams: both regions
+    use the same bezier list (reversed as needed) → gap-free invariant.
+    """
+    if _edge_cache is None:
+        _edge_cache = {}
+
+    walk = _order_edges_for_region(graph, region_idx)
+    if not walk:
+        return ""
+
+    d = ""
+    first = True
+    for edge_idx, forward in walk:
+        edge = graph.edges[edge_idx]
+
+        # Fit once, cache by edge index
+        if edge_idx not in _edge_cache:
+            _edge_cache[edge_idx] = _fit_edge_beziers(
+                edge, epsilon=epsilon, max_error=max_error
+            )
+        beziers = _edge_cache[edge_idx]
+
+        if forward:
+            start_pt = edge.pts[0]
+            end_pt = edge.pts[-1]
+        else:
+            start_pt = edge.pts[-1]
+            end_pt = edge.pts[0]
+
+        if first:
+            d += f"M{_fmt(start_pt[0])} {_fmt(start_pt[1])} "
+            first = False
+
+        if forward:
+            d += _beziers_to_fragment(beziers, end_pt)
+        else:
+            d += _beziers_to_fragment_reversed(beziers, end_pt)
+
+    d += "Z"
+    return d
