@@ -48,6 +48,8 @@ class Options:
     corner_radius: float | None = None  # shared fillet radius; None = auto from geometry
     fidelity_tol: float = 0.06        # selector's render-ΔE gate (slice 4a)
     selection: SelectionPolicy | None = None  # manual candidate selection (slice 4b)
+    working_max_dim: int | None = 768  # downscale inputs whose longest side exceeds this
+                                        # (LANCZOS) before segmentation; None disables.
 
 
 COVERAGE_HOLE_TOL = 0.05   # if >5% of a region's eroded interior would fall below the 0.5
@@ -345,6 +347,23 @@ def _idealize_rectified(arr: np.ndarray, opt: Options, rho: float, w0: int, h0: 
         doc = render_svg_doc(w0, h0, [wrap, *body, "</g>"], defs)
     axes = [_map_axis(a, affine) for a in frame_axes]
     return doc, cands, axes
+
+
+def _condition_input(arr: np.ndarray, working_max_dim: int | None) -> np.ndarray:
+    """Downscale an oversized RGB array to a working resolution before segmentation, so
+    input noise stops fragmenting at high pixel counts. Longest side -> working_max_dim,
+    aspect-preserving, LANCZOS. Returns arr unchanged when disabled or already small.
+    Downscale only — never upscale, never denoise."""
+    if working_max_dim is None:
+        return arr
+    h, w = arr.shape[:2]
+    longest = max(h, w)
+    if longest <= working_max_dim:
+        return arr
+    scale = working_max_dim / longest
+    new_w, new_h = round(w * scale), round(h * scale)
+    img = Image.fromarray(arr).resize((new_w, new_h), Image.LANCZOS)
+    return np.asarray(img, dtype=np.uint8)
 
 
 def _flatten_on_white(im: Image.Image) -> np.ndarray:
