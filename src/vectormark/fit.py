@@ -19,6 +19,12 @@ PATH_COARSEN_STEPS = 10    # coarsening iterations; 1.6**10 ≈ 110× — enough
                            # contour toward a triangle (3 cmds), so any budget >=3 is reachable.
 PATH_COARSEN_FACTOR = 1.6  # tolerance growth per step (matches _loose_bounded_polygon).
 ROBUST_RESIDUAL_TOL = 1.0   # acceptance multiplier on epsilon for the robust (RMS) residual.
+PATH_DENOISE_EPS = 0.5      # sub-pixel rdp denoise applied to a curved run before cubic fitting.
+                            # Antialiasing staircases a shallow-diagonal edge into ~½px zigzags;
+                            # the inflection guard reads each zigzag as a real S-curve and shatters
+                            # the arc into many tiny cubics that bust the segment budget. ½px is the
+                            # sub-pixel AA boundary scale — it erases the staircase without touching
+                            # any curvature a half-pixel-faithful fit would keep.
 
 
 @dataclass
@@ -155,7 +161,13 @@ def _build_corner_path(ring: np.ndarray, epsilon: float, max_error: float) -> tu
             d += f"L{_fmt(seg[-1][0])} {_fmt(seg[-1][1])} "
             segs += 1
         else:
-            for b in fit_cubic_beziers(seg, max_error):
+            # Denoise the run before cubic fitting (see PATH_DENOISE_EPS): strips the
+            # sub-pixel antialiasing staircase so the inflection guard sees only real
+            # curvature instead of shattering the arc at every zigzag. Capped at the fit
+            # tolerance so we never simplify more than the fit itself would. Endpoints
+            # (the corner cuts) are preserved by rdp, so join tangents are unaffected.
+            run = rdp(seg, min(PATH_DENOISE_EPS, max_error)) if len(seg) > 4 else seg
+            for b in fit_cubic_beziers(run, max_error):
                 d += (f"C{_fmt(b[1][0])} {_fmt(b[1][1])} "
                       f"{_fmt(b[2][0])} {_fmt(b[2][1])} "
                       f"{_fmt(b[3][0])} {_fmt(b[3][1])} ")
