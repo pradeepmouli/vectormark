@@ -88,7 +88,7 @@ def test_solid_region_with_palette_twin_stays_interior():
     from vectormark.softlabel import soft_label_field, region_coverage
     H, W = 40, 80
     img = np.full((H, W, 3), 255.0)                 # white bg
-    img[10:30, 5:25] = (1, 75, 172)                 # solid #014BAC block (label A)
+    img[10:30, 5:25] = (1, 70, 165)                 # shifted toward twin: nearest=row1, but d1≈1.5×d0 → old d0<0.5*d1 heuristic sees "band"
     img[10:30, 55:75] = (1, 61, 151)               # solid #013D97 block (twin, far away)
     palette = np.array([(255, 255, 255), (1, 75, 172), (1, 61, 151)], float)
     L = soft_label_field(img, palette)
@@ -96,6 +96,7 @@ def test_solid_region_with_palette_twin_stays_interior():
     interior_A = L[15:25, 10:20, :]
     assert interior_A[..., 1].min() > 0.99, "solid twin-color block interior must stay one-hot"
     # and its region coverage is ~1 on the mask interior (was ~0.5 before the fix)
-    maskA = np.zeros((H, W), bool); maskA[10:30, 5:25] = True
+    # Interior-only mask (3 px inset from block edges, safely outside the 2-px AA band)
+    maskA = np.zeros((H, W), bool); maskA[13:27, 8:22] = True
     cov = region_coverage(L, 1, maskA)
     assert cov[maskA].mean() > 0.9
