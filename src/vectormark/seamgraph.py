@@ -183,3 +183,108 @@ def build_graph(
             edges.append(edge)
 
     return EdgeGraph(nodes=nodes, edges=edges)
+
+
+# ---------------------------------------------------------------------------
+# Task 3: Junction snapping
+# ---------------------------------------------------------------------------
+
+def snap_junctions(graph: EdgeGraph, *, reach: float = 1.5) -> EdgeGraph:
+    """Cluster graph nodes within `reach` px where ≥3 edges are incident,
+    replace each cluster with its centroid, and move incident edge endpoints.
+    Uses a deterministic union-find sorted by (x, y) position."""
+
+    nodes = list(graph.nodes)
+    edges = list(graph.edges)
+    n = len(nodes)
+
+    # Count edge incidence per node
+    incidence: list[int] = [0] * n
+    for e in edges:
+        incidence[e.node0] += 1
+        incidence[e.node1] += 1
+
+    # Deterministic union-find: process candidates sorted by position
+    parent = list(range(n))
+
+    def find(i: int) -> int:
+        while parent[i] != i:
+            parent[i] = parent[parent[i]]
+            i = parent[i]
+        return i
+
+    def union(i: int, j: int) -> None:
+        ri, rj = find(i), find(j)
+        if ri == rj:
+            return
+        # Value-ordered: lower index becomes root (deterministic)
+        if ri < rj:
+            parent[rj] = ri
+        else:
+            parent[ri] = rj
+
+    # Collect candidate nodes (those with ≥3 incident edges or close to such nodes)
+    # Sort by position for determinism
+    sorted_indices = sorted(range(n), key=lambda i: (nodes[i][0], nodes[i][1]))
+
+    for ii in range(len(sorted_indices)):
+        for jj in range(ii + 1, len(sorted_indices)):
+            i, j = sorted_indices[ii], sorted_indices[jj]
+            xi, yi = nodes[i]
+            xj, yj = nodes[j]
+            dist = ((xi - xj) ** 2 + (yi - yj) ** 2) ** 0.5
+            if xj - xi > reach:
+                break  # sorted by x — once x-gap exceeds reach, all later nodes are also beyond
+            if dist <= reach:
+                union(i, j)
+
+    # Group nodes by root
+    from collections import defaultdict
+    clusters: dict[int, list[int]] = defaultdict(list)
+    for i in range(n):
+        clusters[find(i)].append(i)
+
+    # Only snap clusters where ≥3 edges incident across the cluster
+    new_nodes = list(nodes)
+    node_remap: dict[int, int] = {}  # old node idx → new node idx
+
+    # Build list of new (unique) nodes
+    final_nodes: list[tuple[float, float]] = []
+    old_to_new: dict[int, int] = {}
+
+    # Process clusters
+    for root, members in sorted(clusters.items()):
+        cluster_incidence = sum(incidence[m] for m in members)
+        if len(members) >= 2 and cluster_incidence >= 3:
+            # Snap to centroid
+            cx = sum(nodes[m][0] for m in members) / len(members)
+            cy = sum(nodes[m][1] for m in members) / len(members)
+            new_idx = len(final_nodes)
+            final_nodes.append((_round6(cx), _round6(cy)))
+            for m in members:
+                old_to_new[m] = new_idx
+        else:
+            # Keep each node as-is
+            for m in members:
+                new_idx = len(final_nodes)
+                final_nodes.append(nodes[m])
+                old_to_new[m] = new_idx
+
+    # Rebuild edges with remapped node indices, adjusting endpoint pts
+    new_edges: list[Edge] = []
+    for e in edges:
+        n0 = old_to_new[e.node0]
+        n1 = old_to_new[e.node1]
+        pts = e.pts.copy()
+        # Update first/last point to match snapped node position
+        pts[0] = np.array(final_nodes[n0])
+        pts[-1] = np.array(final_nodes[n1])
+        new_edges.append(Edge(
+            pts=pts,
+            region_a=e.region_a,
+            region_b=e.region_b,
+            node0=n0,
+            node1=n1,
+        ))
+
+    return EdgeGraph(nodes=final_nodes, edges=new_edges)
