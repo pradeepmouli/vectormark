@@ -18,10 +18,12 @@ def _polygon_area(c: np.ndarray) -> float:
     return float(abs(np.dot(x, np.roll(y, 1)) - np.dot(y, np.roll(x, 1))) / 2.0)
 
 
-def region_contours(mask: np.ndarray) -> list[np.ndarray]:
-    """All sub-pixel contours of `mask` (outer boundary + any holes), each an
-    (N, 2) (x, y) array, sorted by enclosed area descending (outer first)."""
-    padded = np.pad(mask.astype(float), 1)
+def region_contours(mask: np.ndarray, *, coverage: np.ndarray | None = None) -> list[np.ndarray]:
+    """All sub-pixel contours (outer + holes), (N,2) (x,y), area-sorted (outer first).
+    With `coverage` (a float α field, boundary at 0.5) the contour is extracted from the
+    smooth field instead of the bilevel mask; `coverage=None` is the original behavior."""
+    field = mask.astype(float) if coverage is None else coverage
+    padded = np.pad(field, 1)
     contours = find_contours(padded, 0.5)               # (row, col) == (y, x)
     out = [np.column_stack([c[:, 1] - 1, c[:, 0] - 1]) for c in contours]  # -> (x,y), unpad
     out.sort(key=_polygon_area, reverse=True)
@@ -47,9 +49,12 @@ def significant_contours(mask: np.ndarray, *, min_hole_fraction: float = HOLE_AR
     return keep
 
 
-def outer_contour(mask: np.ndarray) -> np.ndarray:
-    """Longest sub-pixel contour of `mask`, as an (N, 2) array of (x, y) points."""
-    padded = np.pad(mask.astype(float), 1)
+def outer_contour(mask: np.ndarray, *, coverage: np.ndarray | None = None) -> np.ndarray:
+    """Longest sub-pixel contour of `mask`, as an (N, 2) array of (x, y) points.
+    With `coverage` (a float α field, boundary at 0.5) the contour is extracted from the
+    smooth field instead of the bilevel mask; `coverage=None` is the original behavior."""
+    field = mask.astype(float) if coverage is None else coverage
+    padded = np.pad(field, 1)
     contours = find_contours(padded, 0.5)
     if not contours:
         return np.empty((0, 2))
