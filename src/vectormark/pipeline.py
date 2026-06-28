@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 import types
 from collections.abc import Mapping
 from dataclasses import dataclass
@@ -48,6 +49,8 @@ class Options:
     corner_radius: float | None = None  # shared fillet radius; None = auto from geometry
     fidelity_tol: float = 0.06        # selector's render-ΔE gate (slice 4a)
     selection: SelectionPolicy | None = None  # manual candidate selection (slice 4b)
+    working_max_dim: int | None = 768  # downscale inputs whose longest side exceeds this
+                                        # (LANCZOS) before segmentation; None disables.
 
 
 COVERAGE_HOLE_TOL = 0.05   # if >5% of a region's eroded interior would fall below the 0.5
@@ -347,6 +350,30 @@ def _idealize_rectified(arr: np.ndarray, opt: Options, rho: float, w0: int, h0: 
     return doc, cands, axes
 
 
+def _condition_input(arr: np.ndarray, working_max_dim: int | None) -> np.ndarray:
+    """Downscale an oversized RGB array to a working resolution before segmentation, so
+    input noise stops fragmenting at high pixel counts. Longest side -> working_max_dim,
+    aspect-preserving, LANCZOS. Returns arr unchanged when disabled or already small.
+    Downscale only — never upscale, never denoise."""
+    if working_max_dim is None:
+        return arr
+    h, w = arr.shape[:2]
+    longest = max(h, w)
+    if longest <= working_max_dim:
+        return arr
+    scale = working_max_dim / longest
+    new_w, new_h = round(w * scale), round(h * scale)
+    img = Image.fromarray(arr).resize((new_w, new_h), Image.LANCZOS)
+    return np.asarray(img, dtype=np.uint8)
+
+
+def _set_svg_output_size(svg: str, width: int, height: int) -> str:
+    """Rewrite the <svg> element's width/height attributes to the original input size,
+    leaving viewBox (working space) intact — a pure display scale (SVG is resolution-free)."""
+    return re.sub(r'(<svg\b[^>]*?)\bwidth="\d+"\s+height="\d+"',
+                  rf'\1width="{width}" height="{height}"', svg, count=1)
+
+
 def _flatten_on_white(im: Image.Image) -> np.ndarray:
     """RGB (H,W,3) uint8 with any alpha composited onto WHITE (a transparent surround is
     background, not a mark). PIL's plain `convert("RGB")` instead DROPS alpha, keeping each
@@ -371,6 +398,8 @@ def idealize(image, *, options: Options | None = None, report: bool = False) -> 
         arr = np.asarray(image, dtype=np.uint8)
         if arr.ndim == 3 and arr.shape[2] == 4:            # RGBA array -> composite on white
             arr = _flatten_on_white(Image.fromarray(arr, "RGBA"))
+    orig_h, orig_w = arr.shape[:2]
+    arr = _condition_input(arr, opt.working_max_dim)
     h0, w0 = arr.shape[:2]
 
     w, h, regions = _segment_image(arr, opt)
@@ -391,4 +420,6 @@ def idealize(image, *, options: Options | None = None, report: bool = False) -> 
             body, defs, cands, axes = _render_body(w, h, regions, opt, rgb=arr)
             svg = render_svg_doc(w, h, body, defs)
 
+    if (arr.shape[1], arr.shape[0]) != (orig_w, orig_h):
+        svg = _set_svg_output_size(svg, orig_w, orig_h)
     return (svg, _build_report(cands, axes)) if report else svg
