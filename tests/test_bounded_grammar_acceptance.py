@@ -25,14 +25,12 @@ VBIRD = "/Users/pmouli/GitHub.nosync/active/py/vectormark/scratch/real-logos/vbi
 
 
 def _max_path_segments(svg: str) -> int:
-    """Worst-case drawing-command count in any single <path> d= attribute.
-
-    Counts L (lineto), Q (quadratic Bézier), and C (cubic Bézier) tokens —
-    the three commands that grow with geometric complexity.
-    """
+    """Worst-case drawing-command count in any single closed SUBPATH (a path's d may hold
+    several M...Z loops for a holed shape; the grammar budget is per simple loop)."""
     worst = 0
     for d in re.findall(r'd="([^"]*)"', svg):
-        worst = max(worst, d.count("L") + d.count("Q") + d.count("C"))
+        for sub in re.split(r"(?=M)", d):                 # split into M...  loops
+            worst = max(worst, sub.count("L") + sub.count("Q") + sub.count("C"))
     return worst
 
 

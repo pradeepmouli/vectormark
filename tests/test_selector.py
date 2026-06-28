@@ -172,13 +172,17 @@ def test_clean_region_has_no_nofit():
     assert strategies & {PRIMITIVE, POLYGON, PATH}  # at least one real grammar member
 
 
-def test_frayed_region_falls_back_to_bounded_nofit():
+def test_frayed_region_falls_back_to_bounded_path():
+    import re
+    from vectormark.fit import MAX_PATH_SEGMENTS
     cands = generate_geometry_candidates(_region_from_mask(_frayed_mask()), _Opt(), None, 0.0)
     assert cands, "candidate set must never be empty"
-    # the frayed blob cannot be a real bounded shape -> NOFIT fallback must fire
-    assert any(c.strategy == NOFIT for c in cands), \
-        f"expected NOFIT in strategies {[c.strategy for c in cands]}"
-    nofit = [c for c in cands if c.strategy == NOFIT]
-    pts = nofit[0].shape.params["points"]
-    from vectormark.fit import MAX_POLY_VERTICES
-    assert 3 <= len(pts) <= MAX_POLY_VERTICES
+    # fit_path is now the universal non-primitive fallback — NOFIT no longer fires for
+    # non-holed regions; a frayed blob must produce a bounded PATH instead.
+    assert any(c.strategy == PATH for c in cands), \
+        f"expected PATH in strategies {[c.strategy for c in cands]}"
+    path_cands = [c for c in cands if c.strategy == PATH]
+    d = path_cands[0].shape.params["d"]
+    n_cmds = len(re.findall(r"[LQ]", d))
+    assert n_cmds <= MAX_PATH_SEGMENTS, \
+        f"PATH candidate has {n_cmds} drawing commands, exceeds budget {MAX_PATH_SEGMENTS}"

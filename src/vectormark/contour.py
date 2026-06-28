@@ -18,10 +18,12 @@ def _polygon_area(c: np.ndarray) -> float:
     return float(abs(np.dot(x, np.roll(y, 1)) - np.dot(y, np.roll(x, 1))) / 2.0)
 
 
-def region_contours(mask: np.ndarray) -> list[np.ndarray]:
-    """All sub-pixel contours of `mask` (outer boundary + any holes), each an
-    (N, 2) (x, y) array, sorted by enclosed area descending (outer first)."""
-    padded = np.pad(mask.astype(float), 1)
+def region_contours(mask: np.ndarray, *, coverage: np.ndarray | None = None) -> list[np.ndarray]:
+    """All sub-pixel contours (outer + holes), (N,2) (x,y), area-sorted (outer first).
+    With `coverage` (a float α field, boundary at 0.5) the contour is extracted from the
+    smooth field instead of the bilevel mask; `coverage=None` is the original behavior."""
+    field = mask.astype(float) if coverage is None else coverage
+    padded = np.pad(field, 1)
     contours = find_contours(padded, 0.5)               # (row, col) == (y, x)
     out = [np.column_stack([c[:, 1] - 1, c[:, 0] - 1]) for c in contours]  # -> (x,y), unpad
     out.sort(key=_polygon_area, reverse=True)
@@ -32,10 +34,11 @@ HOLE_AREA_FRACTION = 0.01   # an inner contour smaller than this fraction of the
                             # area is quantization speckle, not an intentional counter.
 
 
-def significant_contours(mask: np.ndarray, *, min_hole_fraction: float = HOLE_AREA_FRACTION):
+def significant_contours(mask: np.ndarray, *, min_hole_fraction: float = HOLE_AREA_FRACTION, coverage: np.ndarray | None = None):
     """Outer contour + only inner contours that clear the area fraction. Drops tiny
-    noise holes (the white specks) while keeping genuine counters."""
-    contours = [c for c in region_contours(mask) if len(c) >= 3]
+    noise holes (the white specks) while keeping genuine counters. Pass `coverage` to
+    extract from the smooth soft field instead of the bilevel mask."""
+    contours = [c for c in region_contours(mask, coverage=coverage) if len(c) >= 3]
     if not contours:
         return []
     areas = [_polygon_area(c) for c in contours]
@@ -47,9 +50,12 @@ def significant_contours(mask: np.ndarray, *, min_hole_fraction: float = HOLE_AR
     return keep
 
 
-def outer_contour(mask: np.ndarray) -> np.ndarray:
-    """Longest sub-pixel contour of `mask`, as an (N, 2) array of (x, y) points."""
-    padded = np.pad(mask.astype(float), 1)
+def outer_contour(mask: np.ndarray, *, coverage: np.ndarray | None = None) -> np.ndarray:
+    """Longest sub-pixel contour of `mask`, as an (N, 2) array of (x, y) points.
+    With `coverage` (a float α field, boundary at 0.5) the contour is extracted from the
+    smooth field instead of the bilevel mask; `coverage=None` is the original behavior."""
+    field = mask.astype(float) if coverage is None else coverage
+    padded = np.pad(field, 1)
     contours = find_contours(padded, 0.5)
     if not contours:
         return np.empty((0, 2))
@@ -168,13 +174,14 @@ def _corner_radius_at(before: np.ndarray, after: np.ndarray, vertex: np.ndarray)
     return inset / denom
 
 
-def region_corner_radius(mask: np.ndarray) -> float:
+def region_corner_radius(mask: np.ndarray, *, coverage: np.ndarray | None = None) -> float:
     """One representative corner-fillet radius (px) for the shape in `mask`, measured from
     its outer contour; 0.0 for a sharp-cornered shape. rdp-approximates the contour to
     find its corners, measures the angle-corrected fillet radius at each (see
     _corner_radius_at), and returns the median — padded by _CORNER_DEANTIALIAS_PAD only
-    when a real fillet is detected, so a sharp corner reads exactly 0.0."""
-    cs = region_contours(mask)
+    when a real fillet is detected, so a sharp corner reads exactly 0.0. Pass `coverage`
+    to extract from the smooth soft field instead of the bilevel mask."""
+    cs = region_contours(mask, coverage=coverage)
     if not cs or len(cs[0]) < 12:
         return 0.0
     contour = cs[0]

@@ -15,6 +15,9 @@ from .contour import corner_indices, rdp
 MAX_PATH_SEGMENTS = 12   # a "shape" is simple; a path needing more drawing commands than
                          # this is fraying (tracing AA noise), not a shape -> disqualified.
 MAX_POLY_VERTICES = 10   # a path/polygon "shape" has few corners; more is a traced jagged edge.
+PATH_COARSEN_STEPS = 10    # coarsening iterations; 1.6**10 ≈ 110× — enough to collapse any
+                           # contour toward a triangle (3 cmds), so any budget >=3 is reachable.
+PATH_COARSEN_FACTOR = 1.6  # tolerance growth per step (matches _loose_bounded_polygon).
 ROBUST_RESIDUAL_TOL = 1.0   # acceptance multiplier on epsilon for the robust (RMS) residual.
 
 
@@ -131,24 +134,15 @@ def _fmt(v: float) -> str:
     return f"{v:.2f}".rstrip("0").rstrip(".")
 
 
-def fit_path(contour: np.ndarray, *, epsilon: float, max_error: float,
-             max_segments: int = MAX_PATH_SEGMENTS,
-             max_vertices: int = MAX_POLY_VERTICES) -> Shape | None:
-    """Corner-split the contour; emit lines for straight runs, quadratic Béziers otherwise.
-    Returns None if the result needs more than `max_segments` drawing commands — a frayed
-    boundary is not a simple shape and must not be emitted."""
-    pts = np.asarray(contour, dtype=float)
-    closed = np.allclose(pts[0], pts[-1])
-    ring = pts[:-1] if closed else pts
+def _build_corner_path(ring: np.ndarray, epsilon: float, max_error: float) -> tuple[str, int, int]:
+    """Build the corner-split path once at the given tolerances.  Returns (d, n_cuts, n_segs)
+    so the caller can decide whether the result fits its budget."""
     simp = rdp(ring, epsilon)
     corners = corner_indices(np.vstack([simp, simp[0]]), angle_threshold_deg=40)
     corner_pts = simp[corners] if corners else simp[[0]]
     cut_idx = sorted({int(np.argmin(np.hypot(*(ring - cp).T))) for cp in corner_pts})
     if len(cut_idx) < 2:
         cut_idx = [0, len(ring) // 2]
-    if len(cut_idx) > max_vertices:   # too many corner-runs = angular fraying, not a shape
-        return None
-
     d = f"M{_fmt(ring[cut_idx[0]][0])} {_fmt(ring[cut_idx[0]][1])} "
     segs = 0
     for k in range(len(cut_idx)):
@@ -164,7 +158,26 @@ def fit_path(contour: np.ndarray, *, epsilon: float, max_error: float,
             for b in fit_quadratic_beziers(seg, max_error):
                 d += f"Q{_fmt(b[1][0])} {_fmt(b[1][1])} {_fmt(b[2][0])} {_fmt(b[2][1])} "
                 segs += 1
-        if segs > max_segments:
-            return None
     d += "Z"
+    return d, len(cut_idx), segs
+
+
+def fit_path(contour: np.ndarray, *, epsilon: float, max_error: float,
+             max_segments: int = MAX_PATH_SEGMENTS,
+             max_vertices: int = MAX_POLY_VERTICES) -> Shape:
+    """Corner-split the contour into lines + quadratic Béziers. The segment/vertex limits are
+    a complexity BUDGET, not a veto: if a fit exceeds them, the tolerances are coarsened and
+    the path refit until it fits — a bounded path is always returned (never None). Coarsening
+    also absorbs residual boundary staircase."""
+    pts = np.asarray(contour, dtype=float)
+    closed = np.allclose(pts[0], pts[-1])
+    ring = pts[:-1] if closed else pts
+    eps, merr = float(epsilon), float(max_error)
+    d, ncut, nseg = _build_corner_path(ring, eps, merr)
+    for _ in range(PATH_COARSEN_STEPS):
+        if ncut <= max_vertices and nseg <= max_segments:
+            break
+        eps *= PATH_COARSEN_FACTOR
+        merr *= PATH_COARSEN_FACTOR
+        d, ncut, nseg = _build_corner_path(ring, eps, merr)
     return Shape("path", {"d": d})

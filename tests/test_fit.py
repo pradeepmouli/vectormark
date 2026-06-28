@@ -1,9 +1,15 @@
+import re
+
 import numpy as np
 from vectormark.contour import outer_contour
 from vectormark.fit import (
     MAX_PATH_SEGMENTS, MAX_POLY_VERTICES,
     fit_path, recognize_polygon, recognize_primitive,
 )
+
+
+def _path_cmds(shape):
+    return len(re.findall(r"[LQ]", shape.params["d"]))   # L/Q drawing commands
 
 
 def _disk(cx, cy, r, size=60):
@@ -106,19 +112,23 @@ def test_clean_shape_fits_within_budget():
     assert d.count("L") + d.count("Q") <= MAX_PATH_SEGMENTS
 
 
-def test_frayed_contour_exceeds_budget_returns_none():
-    # with a tight max_error the jagged blob needs > MAX_PATH_SEGMENTS quadratics
-    assert fit_path(_noisy_blob(), epsilon=0.5, max_error=0.5) is None
+def test_fit_path_noisy_blob_is_bounded_not_none():
+    s = fit_path(_noisy_blob(), epsilon=0.5, max_error=0.5)
+    assert s is not None and s.kind == "path"
+    assert _path_cmds(s) <= MAX_PATH_SEGMENTS            # budget held by coarsening
 
 
-def test_explicit_low_budget_rejects():
-    assert fit_path(_square(), epsilon=1.5, max_error=1.0, max_segments=2) is None
+def test_fit_path_respects_segment_budget():
+    s = fit_path(_square(), epsilon=1.5, max_error=1.0, max_segments=4)
+    assert s is not None and s.kind == "path"
+    assert _path_cmds(s) <= 4                            # coarsened to fit the budget
 
 
-def test_vertex_cap_rejects_too_many_corners():
-    # _square() produces 3 corner-runs; a cap of 2 must reject it via the vertex gate
-    # (segment count is tiny, so this exercises the vertex cap in isolation)
-    assert fit_path(_square(), epsilon=1.5, max_error=1.0, max_vertices=2) is None
+def test_fit_path_always_returns_a_path():
+    # An unsatisfiably-tight budget (a closed shape needs >=3 edges) must still yield a path,
+    # never None — best-effort coarsest fit.
+    s = fit_path(_square(), epsilon=1.5, max_error=1.0, max_segments=2)
+    assert s is not None and s.kind == "path"
 
 
 def test_polygon_default_bound_is_the_constant():
