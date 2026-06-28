@@ -42,7 +42,7 @@ def label_boundary(
     """Return (contour Nx2 as (x,y), seam_bool N) for the region's `contour_index`-th
     contour (0 = outer boundary, 1 = largest hole, ...). A contour point is a seam if
     any OTHER region's mask sits within `reach` px of it; else it is own boundary."""
-    contours = region_contours(region.mask)
+    contours = region_contours(region.mask, coverage=region.coverage)
     if contour_index >= len(contours):
         return np.empty((0, 2)), np.empty((0,), bool)
     contour = contours[contour_index]
@@ -233,7 +233,7 @@ def complete_annulus(
     own arcs. Returns {"kind":"annulus","params":{cx,cy,r_outer,r_inner}} or None when
     the region has no hole, either circle can't be fit, the radii don't nest, or the
     centres aren't concentric within `concentric_tol`."""
-    if len(region_contours(region.mask)) < 2:
+    if len(region_contours(region.mask, coverage=region.coverage)) < 2:
         return None                                       # no hole -> not a ring
     outer_c, outer_seam = label_boundary(region, others, contour_index=0)
     inner_c, inner_seam = label_boundary(region, others, contour_index=1)

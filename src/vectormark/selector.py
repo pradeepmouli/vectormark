@@ -72,7 +72,7 @@ def generate_geometry_candidates(
     fit_path) are added ONLY when nothing symmetry-preserving was produced — i.e.
     neither a refine fit (`sym`) NOR an axis-snapped primitive — so the scorer can
     never pick a cheaper non-symmetric geometry over a valid symmetric one."""
-    contours = significant_contours(region.mask)
+    contours = significant_contours(region.mask, coverage=region.coverage)
     if not contours:
         return []
 

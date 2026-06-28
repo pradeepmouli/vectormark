@@ -34,10 +34,11 @@ HOLE_AREA_FRACTION = 0.01   # an inner contour smaller than this fraction of the
                             # area is quantization speckle, not an intentional counter.
 
 
-def significant_contours(mask: np.ndarray, *, min_hole_fraction: float = HOLE_AREA_FRACTION):
+def significant_contours(mask: np.ndarray, *, min_hole_fraction: float = HOLE_AREA_FRACTION, coverage: np.ndarray | None = None):
     """Outer contour + only inner contours that clear the area fraction. Drops tiny
-    noise holes (the white specks) while keeping genuine counters."""
-    contours = [c for c in region_contours(mask) if len(c) >= 3]
+    noise holes (the white specks) while keeping genuine counters. Pass `coverage` to
+    extract from the smooth soft field instead of the bilevel mask."""
+    contours = [c for c in region_contours(mask, coverage=coverage) if len(c) >= 3]
     if not contours:
         return []
     areas = [_polygon_area(c) for c in contours]
@@ -173,13 +174,14 @@ def _corner_radius_at(before: np.ndarray, after: np.ndarray, vertex: np.ndarray)
     return inset / denom
 
 
-def region_corner_radius(mask: np.ndarray) -> float:
+def region_corner_radius(mask: np.ndarray, *, coverage: np.ndarray | None = None) -> float:
     """One representative corner-fillet radius (px) for the shape in `mask`, measured from
     its outer contour; 0.0 for a sharp-cornered shape. rdp-approximates the contour to
     find its corners, measures the angle-corrected fillet radius at each (see
     _corner_radius_at), and returns the median — padded by _CORNER_DEANTIALIAS_PAD only
-    when a real fillet is detected, so a sharp corner reads exactly 0.0."""
-    cs = region_contours(mask)
+    when a real fillet is detected, so a sharp corner reads exactly 0.0. Pass `coverage`
+    to extract from the smooth soft field instead of the bilevel mask."""
+    cs = region_contours(mask, coverage=coverage)
     if not cs or len(cs[0]) < 12:
         return 0.0
     contour = cs[0]

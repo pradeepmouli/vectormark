@@ -50,6 +50,11 @@ class Options:
     selection: SelectionPolicy | None = None  # manual candidate selection (slice 4b)
 
 
+def _hex_to_rgb(hx: str) -> tuple[int, int, int]:
+    """Parse a '#RRGGBB' string to an (R, G, B) int tuple."""
+    return (int(hx[1:3], 16), int(hx[3:5], 16), int(hx[5:7], 16))
+
+
 def _segment_image(arr: np.ndarray, opt: Options) -> tuple[int, int, list[Region]]:
     """Quantize + segment an RGB array into flat-color regions, dropping ones too
     small to be intentional.
@@ -58,6 +63,8 @@ def _segment_image(arr: np.ndarray, opt: Options) -> tuple[int, int, list[Region
     mark's scale), not the canvas, so it is resolution-independent: padding the
     image or feeding a higher-res copy does not change which regions survive. A
     small absolute floor first removes single-pixel quantization noise."""
+    from .softlabel import soft_label_field, region_coverage
+    from .segment import _background_color
     h, w, _ = arr.shape
     palette = extract_palette(arr, max_colors=opt.max_colors)
     q = quantize(arr, palette)
@@ -65,6 +72,16 @@ def _segment_image(arr: np.ndarray, opt: Options) -> tuple[int, int, list[Region
     if regions:
         cut = opt.min_region_fraction * max(r.area for r in regions)
         regions = [r for r in regions if r.area >= cut]
+    if regions:
+        bg = _background_color(q)
+        # stable-ordered unique region colors + background appended so it competes as a label
+        colors = list({r.color_hex: None for r in regions}.keys())
+        rows = [tuple(int(c) for c in _hex_to_rgb(hx)) for hx in colors] + [bg]
+        pal = np.array(rows, np.uint8)
+        hex_to_idx = {hx: i for i, hx in enumerate(colors)}
+        L = soft_label_field(arr.astype(float), pal)
+        for r in regions:
+            r.coverage = region_coverage(L, hex_to_idx[r.color_hex], r.mask)
     return w, h, regions
 
 
@@ -151,7 +168,7 @@ def build_candidates(
         # (base = candidates from prior components, so per-component lookups address sN).
         eid = f"s{base + len(cands)}"
         element = opt.selection.for_id(eid) if opt.selection is not None else None
-        cr = opt.corner_radius if opt.corner_radius is not None else region_corner_radius(region.mask)
+        cr = opt.corner_radius if opt.corner_radius is not None else region_corner_radius(region.mask, coverage=region.coverage)
         shape, strategy = select_geometry(region, opt, fit_axis, cr, source_rgb,
                                           element=element, eid=eid)
         if shape is None:
