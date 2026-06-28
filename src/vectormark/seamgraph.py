@@ -46,3 +46,140 @@ def classify_contour(
         lv[region_idx] = -np.inf
         result[i] = int(np.argmax(lv))
     return result
+
+
+# ---------------------------------------------------------------------------
+# Task 2: Planar edge graph
+# ---------------------------------------------------------------------------
+
+from dataclasses import dataclass, field
+from typing import Optional
+
+
+@dataclass
+class Edge:
+    pts: np.ndarray          # (N,2) points along this edge, forward direction
+    region_a: int            # first (lower-index) region
+    region_b: Optional[int]  # second region, or None for boundary vs background
+    node0: int               # index into EdgeGraph.nodes for pts[0]
+    node1: int               # index into EdgeGraph.nodes for pts[-1]
+
+
+@dataclass
+class EdgeGraph:
+    nodes: list[tuple[float, float]] = field(default_factory=list)
+    edges: list[Edge] = field(default_factory=list)
+
+
+def _round6(v: float) -> float:
+    return round(float(v), 6)
+
+
+def _pt_key(pt) -> tuple[float, float]:
+    return (_round6(pt[0]), _round6(pt[1]))
+
+
+def _coord_key(pts: np.ndarray) -> frozenset:
+    """Canonical (direction-independent) key for a run of points.
+    Uses frozenset so duplicate vertices (contour wrap artifacts) don't break dedup."""
+    return frozenset((_round6(p[0]), _round6(p[1])) for p in pts)
+
+
+def _split_runs(contour: np.ndarray, labels: np.ndarray) -> list[tuple[int, int, int]]:
+    """Split a closed contour into maximal runs of constant label.
+    Returns list of (start_idx, end_idx, label) where indices are into contour.
+    The contour is treated as a closed loop (last point connects back to first).
+    """
+    N = len(contour)
+    if N == 0:
+        return []
+
+    # Find transition indices (where label changes)
+    transitions = []
+    for i in range(N):
+        if labels[i] != labels[(i - 1) % N]:
+            transitions.append(i)
+
+    if not transitions:
+        # Entire contour is one run
+        return [(0, N - 1, int(labels[0]))]
+
+    runs = []
+    for k, t in enumerate(transitions):
+        start = t
+        end = (transitions[(k + 1) % len(transitions)] - 1) % N
+        lbl = int(labels[start])
+        runs.append((start, end, lbl))
+    return runs
+
+
+def _extract_run_pts(contour: np.ndarray, start: int, end: int) -> np.ndarray:
+    """Extract contour points from start to end (inclusive), wrapping around."""
+    N = len(contour)
+    if start <= end:
+        return contour[start:end + 1]
+    # Wrap around
+    return np.vstack([contour[start:], contour[:end + 1]])
+
+
+def _node_index(
+    nodes: list[tuple[float, float]],
+    node_map: dict[tuple[float, float], int],
+    pt,
+) -> int:
+    key = _pt_key(pt)
+    if key not in node_map:
+        node_map[key] = len(nodes)
+        nodes.append(key)
+    return node_map[key]
+
+
+def build_graph(
+    region_contours: dict[int, np.ndarray],
+    L: np.ndarray,
+    *,
+    bg_idx: int,
+) -> EdgeGraph:
+    """Classify each region's contour, split into maximal constant-label runs,
+    dedup seam runs by exact coordinate match, and build the planar edge graph."""
+
+    # Collect all runs from all regions
+    all_runs: list[tuple[int, int, np.ndarray]] = []
+    for ridx, contour in sorted(region_contours.items()):
+        labels = classify_contour(contour, L, ridx, bg_idx=bg_idx)
+        runs = _split_runs(contour, labels)
+        for (start, end, lbl) in runs:
+            pts = _extract_run_pts(contour, start, end)
+            if len(pts) < 2:
+                continue
+            all_runs.append((ridx, lbl, pts))
+
+    # Build node list and edge list, deduplicating seam runs
+    nodes: list[tuple[float, float]] = []
+    node_map: dict[tuple[float, float], int] = {}
+    edges: list[Edge] = []
+    seam_key_to_edge_idx: dict[frozenset, int] = {}
+
+    for ridx, other_lbl, pts in all_runs:
+        is_seam = other_lbl != bg_idx
+        ck = _coord_key(pts)
+
+        if is_seam and ck in seam_key_to_edge_idx:
+            # Seam already stored from the other region — skip duplicate
+            continue
+
+        n0 = _node_index(nodes, node_map, pts[0])
+        n1 = _node_index(nodes, node_map, pts[-1])
+
+        if is_seam:
+            r_a = min(ridx, other_lbl)
+            r_b = max(ridx, other_lbl)
+            edge = Edge(pts=pts, region_a=r_a, region_b=r_b, node0=n0, node1=n1)
+            idx = len(edges)
+            edges.append(edge)
+            seam_key_to_edge_idx[ck] = idx
+        else:
+            edge = Edge(pts=pts, region_a=ridx, region_b=None, node0=n0, node1=n1)
+            edges.append(edge)
+
+    return EdgeGraph(nodes=nodes, edges=edges)
