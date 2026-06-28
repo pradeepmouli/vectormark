@@ -56,11 +56,6 @@ COVERAGE_HOLE_TOL = 0.05   # if >5% of a region's eroded interior would fall bel
                            # keep the binary mask there instead of punching holes.
 
 
-def _hex_to_rgb(hx: str) -> tuple[int, int, int]:
-    """Parse a '#RRGGBB' string to an (R, G, B) int tuple."""
-    return (int(hx[1:3], 16), int(hx[3:5], 16), int(hx[5:7], 16))
-
-
 def attach_coverage_field(regions: list[Region], rgb: np.ndarray, max_colors: int) -> None:
     """Attach `region.coverage` from ONE shared soft label field, computed over the given
     regions' colors + background, evaluated on each region's CURRENT mask — so merged and
