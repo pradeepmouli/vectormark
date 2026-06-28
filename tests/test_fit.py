@@ -9,7 +9,7 @@ from vectormark.fit import (
 
 
 def _path_cmds(shape):
-    return len(re.findall(r"[LQ]", shape.params["d"]))   # L/Q drawing commands
+    return len(re.findall(r"[LCQ]", shape.params["d"]))   # L/C/Q drawing commands
 
 
 def _disk(cx, cy, r, size=60):
@@ -83,8 +83,8 @@ def test_fit_path_of_dome_uses_curve():
     dome = (((xx - 40) ** 2 / 900 + (yy - 55) ** 2 / 1600) <= 1) & (yy <= 55)
     c = outer_contour(dome)
     shape = fit_path(c, epsilon=1.0, max_error=0.8)
-    # curved top -> inflection-free quadratic arcs (Q), never cubic (C)
-    assert shape.kind == "path" and "Q" in shape.params["d"] and "C" not in shape.params["d"]
+    # curved top -> inflection-free cubic arcs (C), never quadratic (Q)
+    assert shape.kind == "path" and "C" in shape.params["d"] and "Q" not in shape.params["d"]
 
 
 def _square(n=40):
@@ -109,7 +109,7 @@ def test_clean_shape_fits_within_budget():
     shape = fit_path(_square(), epsilon=1.5, max_error=1.0)
     assert shape is not None
     d = shape.params["d"]
-    assert d.count("L") + d.count("Q") <= MAX_PATH_SEGMENTS
+    assert d.count("L") + d.count("C") + d.count("Q") <= MAX_PATH_SEGMENTS
 
 
 def test_fit_path_noisy_blob_is_bounded_not_none():
@@ -173,3 +173,17 @@ def test_square_is_not_accepted_as_circle():
     m = np.zeros((H, W), bool); m[20:60, 20:60] = True
     shp = recognize_primitive(outer_contour(m), epsilon=1.5)
     assert shp is None or shp.kind in ("rect", "ellipse")  # never 'circle'
+
+
+def _disk_contour(r=40, cx=50, cy=50, n=200):
+    th = np.linspace(0, 2*np.pi, n)
+    return np.c_[cx + r*np.cos(th), cy + r*np.sin(th)]
+
+def test_fit_path_emits_cubics_for_curves():
+    s = fit_path(_disk_contour(), epsilon=1.0, max_error=1.5)
+    assert s is not None and "C" in s.params["d"]      # cubic commands now emitted
+    assert "Q" not in s.params["d"]                    # no quadratics
+
+def test_fit_path_curve_is_compact():
+    d = fit_path(_disk_contour(), epsilon=1.0, max_error=1.5).params["d"]
+    assert d.count("C") <= 8                            # a near-circle is a handful of cubics
