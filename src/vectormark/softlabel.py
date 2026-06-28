@@ -10,6 +10,8 @@ from scipy import ndimage
 
 from .color import srgb_to_oklab
 
+BAND_REACH = 2   # px each side of a label transition treated as an antialiasing band
+
 
 def alpha_unmix(rgb: np.ndarray, c_a: np.ndarray, c_b: np.ndarray) -> np.ndarray:
     """Coverage of color A in a two-color blend V = α·c_a + (1−α)·c_b.
@@ -43,13 +45,22 @@ def soft_label_field(rgb: np.ndarray, palette: np.ndarray) -> np.ndarray:
     d0 = np.take_along_axis(dist, n0[..., None], 2)[..., 0]
     d1 = np.take_along_axis(dist, n1[..., None], 2)[..., 0]
 
+    # spatial band: a pixel is an AA-boundary candidate only if it is within BAND_REACH
+    # of a nearest-label (n0) transition; solid interiors are one-hot regardless of
+    # palette twin colors in OKLab (replaces color-only d0 < 0.5*d1 heuristic).
+    labels = n0                                              # (H,W) hard nearest-palette label
+    trans = np.zeros((H, W), bool)
+    ud = labels[:-1, :] != labels[1:, :]
+    trans[:-1, :] |= ud; trans[1:, :] |= ud
+    lr = labels[:, :-1] != labels[:, 1:]
+    trans[:, :-1] |= lr; trans[:, 1:] |= lr
+    band = ndimage.binary_dilation(trans, iterations=BAND_REACH)  # AA-boundary candidates
+    interior = ~band
+
     L = np.zeros((H, W, K), float)
-    # interior: clearly one color (nearest is much closer than runner-up) -> one-hot
-    interior = d0 < 0.5 * d1                                # nearest dominates
     np.put_along_axis(L, n0[..., None], np.where(interior, 1.0, 0.0)[..., None], 2)
 
     # boundary band (not interior): unmix the two locally-dominant colors
-    band = ~interior
     if band.any():
         by, bx = np.where(band)
         ca = palette[n0[by, bx]]; cb = palette[n1[by, bx]]

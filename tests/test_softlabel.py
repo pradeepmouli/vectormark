@@ -78,3 +78,24 @@ def test_shared_seam_is_point_identical():
     # along the shared seam column band, cov_b == 1 - cov_a (φ_B = −φ_A exactly)
     seam = slice(28, 32)
     assert np.allclose(cov_b[:, seam], 1.0 - cov_a[:, seam], atol=1e-9)
+
+
+def test_solid_region_with_palette_twin_stays_interior():
+    # Two near-identical dark blues in the palette + a solid block of the first one,
+    # spatially far from any pixel of the twin. The block's interior must stay one-hot
+    # (coverage ~1), NOT be misread as an antialiasing band.
+    import numpy as np
+    from vectormark.softlabel import soft_label_field, region_coverage
+    H, W = 40, 80
+    img = np.full((H, W, 3), 255.0)                 # white bg
+    img[10:30, 5:25] = (1, 75, 172)                 # solid #014BAC block (label A)
+    img[10:30, 55:75] = (1, 61, 151)               # solid #013D97 block (twin, far away)
+    palette = np.array([(255, 255, 255), (1, 75, 172), (1, 61, 151)], float)
+    L = soft_label_field(img, palette)
+    # interior of block A (away from its own edges) is one-hot to label 1
+    interior_A = L[15:25, 10:20, :]
+    assert interior_A[..., 1].min() > 0.99, "solid twin-color block interior must stay one-hot"
+    # and its region coverage is ~1 on the mask interior (was ~0.5 before the fix)
+    maskA = np.zeros((H, W), bool); maskA[10:30, 5:25] = True
+    cov = region_coverage(L, 1, maskA)
+    assert cov[maskA].mean() > 0.9
