@@ -7,6 +7,8 @@ from __future__ import annotations
 
 import numpy as np
 
+from .color import srgb_to_oklab
+
 
 def alpha_unmix(rgb: np.ndarray, c_a: np.ndarray, c_b: np.ndarray) -> np.ndarray:
     """Coverage of color A in a two-color blend V = α·c_a + (1−α)·c_b.
@@ -16,3 +18,52 @@ def alpha_unmix(rgb: np.ndarray, c_a: np.ndarray, c_b: np.ndarray) -> np.ndarray
     d = c_a - c_b
     denom = float(d @ d) or 1.0
     return np.clip(((rgb - c_b) @ d) / denom, 0.0, 1.0)
+
+
+def _oklab_dist(rgb: np.ndarray, palette: np.ndarray) -> np.ndarray:
+    """(H,W,K) OKLab distance from each pixel to each palette color."""
+    px = srgb_to_oklab(rgb / 255.0)                        # (H,W,3)
+    pal = srgb_to_oklab(np.asarray(palette, float) / 255.0)  # (K,3)
+    return np.linalg.norm(px[:, :, None, :] - pal[None, None, :, :], axis=3)
+
+
+def soft_label_field(rgb: np.ndarray, palette: np.ndarray) -> np.ndarray:
+    """Per-pixel partition-of-unity membership in each palette color (background included
+    as a row). Interior one-hot (anchors thin features); two-color band alpha-unmixed;
+    >=3-color junction band normalized-inverse-ΔE. Deterministic (value-ordered ties)."""
+    rgb = np.asarray(rgb, float)
+    palette = np.asarray(palette, float)
+    H, W, _ = rgb.shape
+    K = len(palette)
+    dist = _oklab_dist(rgb, palette)                       # (H,W,K)
+    # rank the two nearest labels per pixel; value-ordered ties via a tiny index bias
+    order = np.argsort(dist + np.arange(K) * 1e-12, axis=2)  # (H,W,K) ascending
+    n0 = order[..., 0]; n1 = order[..., 1]
+    d0 = np.take_along_axis(dist, n0[..., None], 2)[..., 0]
+    d1 = np.take_along_axis(dist, n1[..., None], 2)[..., 0]
+
+    L = np.zeros((H, W, K), float)
+    # interior: clearly one color (nearest is much closer than runner-up) -> one-hot
+    interior = d0 < 0.5 * d1                                # nearest dominates
+    np.put_along_axis(L, n0[..., None], np.where(interior, 1.0, 0.0)[..., None], 2)
+
+    # boundary band (not interior): unmix the two locally-dominant colors
+    band = ~interior
+    if band.any():
+        by, bx = np.where(band)
+        ca = palette[n0[by, bx]]; cb = palette[n1[by, bx]]
+        a = np.empty(len(by))
+        for i in range(len(by)):
+            a[i] = alpha_unmix(rgb[by[i], bx[i]], ca[i], cb[i])
+        L[by, bx, n0[by, bx]] = a
+        L[by, bx, n1[by, bx]] = 1.0 - a
+
+    # junction band: a pixel with >=3 comparably-near labels is ill-posed for unmix;
+    # detect (3rd-nearest within 1.3x of nearest) and overwrite with inverse-ΔE membership.
+    d2 = np.take_along_axis(dist, order[..., 2][..., None], 2)[..., 0] if K >= 3 else np.full((H, W), np.inf)
+    junction = band & (d2 < 1.3 * np.maximum(d0, 1e-9))
+    if junction.any():
+        inv = 1.0 / (dist[junction] + 1e-6)
+        L[junction] = inv / inv.sum(axis=1, keepdims=True)
+
+    return L
