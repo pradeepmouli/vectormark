@@ -13,7 +13,10 @@ import numpy as np
 
 from .candidate import Candidate, FlatFill
 from .contour import significant_contours
-from .fit import Shape, fit_path, recognize_polygon, recognize_primitive, MAX_POLY_VERTICES
+from .fit import (
+    Shape, fit_path, recognize_polygon, recognize_primitive,
+    _build_corner_path, MAX_POLY_VERTICES, MAX_PATH_SEGMENTS,
+)
 from .refine import (
     half_ellipse_cap_fit, rounded_trapezoid_fit, symmetric_fit, symmetric_polygon_fit,
 )
@@ -90,14 +93,21 @@ def generate_geometry_candidates(
                 d = " ".join(s.params["d"] for s in halves)
                 return [GeomCandidate(HOLED_SYM, Shape("path", {"d": d, "fill_rule": "evenodd"}))]
         # No clean symmetric construction: faithful per-contour fit (even-odd).
-        # Guard each fit_path call — if any contour is over budget, skip this candidate
-        # (the NOFIT fallback covers the region).
+        # Guard: only emit a HOLED_PATH when every contour fits within budget at
+        # the initial tolerances (no coarsening needed).  For holed shapes, heavy
+        # coarsening risks the outer contour crossing the inner one, producing an
+        # invalid/misleading ring — NOFIT on the outer contour is safer.
+        # (fit_path is budget-not-veto for the non-holed fallback; here we keep
+        # the pre-coarsening gate so the two-loop HOLED_PATH stays trustworthy.)
         path_parts: list[str] = []
         for c in contours:
-            gp = fit_path(c, epsilon=opt.epsilon, max_error=opt.max_error)
-            if gp is None:
+            pts = np.asarray(c, float)
+            ring = pts[:-1] if np.allclose(pts[0], pts[-1]) else pts
+            _, ncut, nseg = _build_corner_path(ring, opt.epsilon, opt.max_error)
+            if ncut > MAX_POLY_VERTICES or nseg > MAX_PATH_SEGMENTS:
                 path_parts = []
                 break
+            gp = fit_path(c, epsilon=opt.epsilon, max_error=opt.max_error)
             path_parts.append(gp.params["d"])
         if path_parts:
             d = " ".join(path_parts)
