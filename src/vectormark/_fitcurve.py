@@ -90,3 +90,109 @@ def _compute_max_error(pts, ctrl, u):
     errs = np.array([np.hypot(*(qbezier(ctrl, uu) - p)) ** 2 for p, uu in zip(pts, u)])
     split = int(errs.argmax())
     return float(errs[split]), max(1, min(split, len(pts) - 2))
+
+
+def cbezier(ctrl, t):
+    """Cubic Bézier point(s) at parameter t."""
+    mt = 1 - t
+    return (mt**3 * ctrl[0] + 3*mt**2*t * ctrl[1] + 3*mt*t**2 * ctrl[2] + t**3 * ctrl[3])
+
+
+def _cross(u, v):
+    return u[..., 0] * v[..., 1] - u[..., 1] * v[..., 0]
+
+
+def cubic_inflects(ctrl: np.ndarray) -> bool:
+    """True iff the planar cubic changes curvature sign in (0,1) — an inflection / S-curve.
+    Sampled sign-change of cross(B'(t), B''(t)); threshold scaled by chord² filters
+    FP noise on near-linear cubics where |B''| ≈ 0."""
+    ctrl = np.asarray(ctrl, float)
+    a, b, c = ctrl[1] - ctrl[0], ctrl[2] - ctrl[1], ctrl[3] - ctrl[2]   # first differences
+    t = np.linspace(0.02, 0.98, 64)[:, None]
+    d1 = 3 * ((1 - t)**2 * a + 2 * (1 - t) * t * b + t**2 * c)          # B'(t)
+    d2 = 6 * ((1 - t) * (b - a) + t * (c - b))                          # B''(t)
+    cross = _cross(d1, d2)
+    # threshold by chord² — FP noise on near-linear cubics is O(ε·chord²), real
+    # inflection cross products are O(chord²), so 1e-6 cleanly separates them
+    chord_sq = max(float(np.dot(ctrl[-1] - ctrl[0], ctrl[-1] - ctrl[0])), 1.0)
+    tol = chord_sq * 1e-6
+    s = np.sign(cross[np.abs(cross) > tol]); s = s[s != 0]
+    return bool(np.any(np.diff(s) != 0))
+
+
+def _unit(v):
+    n = float(np.hypot(v[0], v[1]))
+    return v / n if n > 1e-12 else np.array([0.0, 0.0])
+
+
+def _generate_cubic(pts, u, t0, t3):
+    """Schneider least-squares: endpoints pinned, end tangents fixed; solve the two tangent
+    magnitudes a0,a3 (Graphics Gems 1990). P1 = P0 + a0*t0, P2 = P3 + a3*t3."""
+    P0, P3 = pts[0], pts[-1]
+    b0 = (1 - u)**3; b1 = 3*(1 - u)**2*u; b2 = 3*(1 - u)*u**2; b3 = u**3
+    A1 = t0[None, :] * b1[:, None]; A2 = t3[None, :] * b2[:, None]
+    f = pts - (P0 * (b0 + b1)[:, None] + P3 * (b2 + b3)[:, None])
+    c11 = float((A1 * A1).sum()); c12 = float((A1 * A2).sum()); c22 = float((A2 * A2).sum())
+    x1 = float((f * A1).sum()); x2 = float((f * A2).sum())
+    det = c11 * c22 - c12 * c12
+    chord = float(np.hypot(*(P3 - P0)))
+    if abs(det) < 1e-12:
+        a0 = a3 = chord / 3.0
+    else:
+        a0 = (x1 * c22 - x2 * c12) / det
+        a3 = (c11 * x2 - c12 * x1) / det
+    # keep control points on the tangent rays (no negative/backward magnitudes)
+    lo = chord * 1e-2
+    a0 = a0 if a0 > lo else chord / 3.0
+    a3 = a3 if a3 > lo else chord / 3.0
+    return np.array([P0, P0 + a0 * t0, P3 + a3 * t3, P3])
+
+
+def _max_error_cubic(pts, ctrl, u):
+    dev = np.linalg.norm(cbezier(ctrl, u[:, None]) - pts, axis=1)
+    i = int(np.argmax(dev))
+    return float(dev[i]), i
+
+
+def fit_cubic_beziers(points: np.ndarray, max_error: float) -> list[np.ndarray]:
+    pts = np.asarray(points, float)
+    if len(pts) < 2:
+        return []
+    t0 = _unit(pts[1] - pts[0]); t3 = _unit(pts[-2] - pts[-1])
+    return _fit_cubic(pts, max_error, t0, t3)
+
+
+def _fit_cubic(pts, error, t0, t3):
+    if len(pts) == 2:
+        P0, P3 = pts[0], pts[1]
+        d = (P3 - P0) / 3.0
+        return [np.array([P0, P0 + d, P3 - d, P3])]
+    u = _chord_length_parameterize(pts)
+    ctrl = _generate_cubic(pts, u, t0, t3)
+    max_err, split = _max_error_cubic(pts, ctrl, u)
+    if max_err < error and not cubic_inflects(ctrl):
+        return [ctrl]
+    if max_err < error * error and not cubic_inflects(ctrl):
+        # Newton reparameterize a few times before giving up (error close)
+        for _ in range(8):
+            u = np.array([_newton_cubic(p, uu, ctrl) for p, uu in zip(pts, u)])
+            ctrl = _generate_cubic(pts, u, t0, t3)
+            max_err, split = _max_error_cubic(pts, ctrl, u)
+            if max_err < error and not cubic_inflects(ctrl):
+                return [ctrl]
+    if split <= 0 or split >= len(pts) - 1:
+        split = len(pts) // 2
+    # interior tangent at the split (centered difference) shared by both halves
+    tm = _unit(pts[split + 1] - pts[split - 1])
+    left = _fit_cubic(pts[: split + 1], error, t0, -tm)
+    right = _fit_cubic(pts[split:], error, tm, t3)
+    return left + right
+
+
+def _newton_cubic(p, u, ctrl):
+    mt = 1 - u
+    d = cbezier(ctrl, u) - p
+    q1 = 3*mt**2*(ctrl[1]-ctrl[0]) + 6*mt*u*(ctrl[2]-ctrl[1]) + 3*u**2*(ctrl[3]-ctrl[2])
+    q2 = 6*mt*(ctrl[2]-2*ctrl[1]+ctrl[0]) + 6*u*(ctrl[3]-2*ctrl[2]+ctrl[1])
+    denom = q1 @ q1 + d @ q2
+    return u if denom == 0 else u - (d @ q1) / denom
