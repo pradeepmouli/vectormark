@@ -50,9 +50,51 @@ class Options:
     selection: SelectionPolicy | None = None  # manual candidate selection (slice 4b)
 
 
+COVERAGE_HOLE_TOL = 0.05   # if >5% of a region's eroded interior would fall below the 0.5
+                           # contour level, the K-way soft field disagrees with the mask
+                           # (a gradient surface drifting toward a similar palette color) —
+                           # keep the binary mask there instead of punching holes.
+
+
 def _hex_to_rgb(hx: str) -> tuple[int, int, int]:
     """Parse a '#RRGGBB' string to an (R, G, B) int tuple."""
     return (int(hx[1:3], 16), int(hx[3:5], 16), int(hx[5:7], 16))
+
+
+def attach_coverage_field(regions: list[Region], rgb: np.ndarray, max_colors: int) -> None:
+    """Attach `region.coverage` from ONE shared soft label field, computed over the given
+    regions' colors + background, evaluated on each region's CURRENT mask — so merged and
+    reconstructed regions are covered, not just freshly-segmented ones. A region whose field
+    coverage would hole its interior (gradient surface) keeps coverage=None (mask contour).
+
+    The soft field is built from ALL image palette colors (not just region colors) so
+    gradient-adjacent colors compete as labels — enabling the hole-guard to fire even when
+    the competing color belongs to a merged-away region or a non-segmented image area."""
+    from .softlabel import soft_label_field, region_coverage
+    from .segment import _background_color
+    if not regions:
+        return
+    palette_cols = extract_palette(rgb, max_colors=max_colors)
+    q = quantize(rgb, palette_cols)
+    bg = _background_color(q)
+    # Use ALL image palette colors + background as rows so gradient-competing colors are
+    # represented in the field even when they're not (or no longer) separate regions.
+    rows: list[tuple[int, int, int]] = [tuple(int(c) for c in col) for col in palette_cols]
+    if bg not in rows:
+        rows = rows + [bg]
+    row_hex = ["#{:02X}{:02X}{:02X}".format(r[0], r[1], r[2]) for r in rows]
+    L = soft_label_field(rgb.astype(float), np.array(rows, np.uint8))
+    hex_to_idx = {hx: i for i, hx in enumerate(row_hex)}
+    for r in regions:
+        idx = hex_to_idx.get(r.color_hex)
+        if idx is None:
+            r.coverage = None
+            continue
+        cov = region_coverage(L, idx, r.mask)
+        interior = ndi.binary_erosion(r.mask, iterations=3)
+        if not interior.any():
+            interior = r.mask
+        r.coverage = None if (cov[interior] < 0.5).mean() > COVERAGE_HOLE_TOL else cov
 
 
 def _segment_image(arr: np.ndarray, opt: Options) -> tuple[int, int, list[Region]]:
@@ -63,8 +105,6 @@ def _segment_image(arr: np.ndarray, opt: Options) -> tuple[int, int, list[Region
     mark's scale), not the canvas, so it is resolution-independent: padding the
     image or feeding a higher-res copy does not change which regions survive. A
     small absolute floor first removes single-pixel quantization noise."""
-    from .softlabel import soft_label_field, region_coverage
-    from .segment import _background_color
     h, w, _ = arr.shape
     palette = extract_palette(arr, max_colors=opt.max_colors)
     q = quantize(arr, palette)
@@ -72,16 +112,7 @@ def _segment_image(arr: np.ndarray, opt: Options) -> tuple[int, int, list[Region
     if regions:
         cut = opt.min_region_fraction * max(r.area for r in regions)
         regions = [r for r in regions if r.area >= cut]
-    if regions:
-        bg = _background_color(q)
-        # stable-ordered unique region colors + background appended so it competes as a label
-        colors = list({r.color_hex: None for r in regions}.keys())
-        rows = [tuple(int(c) for c in _hex_to_rgb(hx)) for hx in colors] + [bg]
-        pal = np.array(rows, np.uint8)
-        hex_to_idx = {hx: i for i, hx in enumerate(colors)}
-        L = soft_label_field(arr.astype(float), pal)
-        for r in regions:
-            r.coverage = region_coverage(L, hex_to_idx[r.color_hex], r.mask)
+    attach_coverage_field(regions, arr, opt.max_colors)
     return w, h, regions
 
 
@@ -218,6 +249,7 @@ def _render_body(
             flat_filled = [(r, FlatFill(r.color_hex)) for r in comp]
             merged = merge_surfaces(flat_filled, rgb)
             comp = [r for r, _ in merged]
+            attach_coverage_field(comp, rgb, opt.max_colors)
             fills = {r.label: fit_fill(r.mask, rgb, flat_hex=r.color_hex) for r, _ in merged}
         else:
             fills = {}
