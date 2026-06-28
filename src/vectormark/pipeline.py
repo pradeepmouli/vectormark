@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 import types
 from collections.abc import Mapping
 from dataclasses import dataclass
@@ -366,6 +367,13 @@ def _condition_input(arr: np.ndarray, working_max_dim: int | None) -> np.ndarray
     return np.asarray(img, dtype=np.uint8)
 
 
+def _set_svg_output_size(svg: str, width: int, height: int) -> str:
+    """Rewrite the <svg> element's width/height attributes to the original input size,
+    leaving viewBox (working space) intact — a pure display scale (SVG is resolution-free)."""
+    return re.sub(r'(<svg\b[^>]*?)\bwidth="\d+"\s+height="\d+"',
+                  rf'\1width="{width}" height="{height}"', svg, count=1)
+
+
 def _flatten_on_white(im: Image.Image) -> np.ndarray:
     """RGB (H,W,3) uint8 with any alpha composited onto WHITE (a transparent surround is
     background, not a mark). PIL's plain `convert("RGB")` instead DROPS alpha, keeping each
@@ -390,6 +398,8 @@ def idealize(image, *, options: Options | None = None, report: bool = False) -> 
         arr = np.asarray(image, dtype=np.uint8)
         if arr.ndim == 3 and arr.shape[2] == 4:            # RGBA array -> composite on white
             arr = _flatten_on_white(Image.fromarray(arr, "RGBA"))
+    orig_h, orig_w = arr.shape[:2]
+    arr = _condition_input(arr, opt.working_max_dim)
     h0, w0 = arr.shape[:2]
 
     w, h, regions = _segment_image(arr, opt)
@@ -410,4 +420,6 @@ def idealize(image, *, options: Options | None = None, report: bool = False) -> 
             body, defs, cands, axes = _render_body(w, h, regions, opt, rgb=arr)
             svg = render_svg_doc(w, h, body, defs)
 
+    if (arr.shape[1], arr.shape[0]) != (orig_w, orig_h):
+        svg = _set_svg_output_size(svg, orig_w, orig_h)
     return (svg, _build_report(cands, axes)) if report else svg
