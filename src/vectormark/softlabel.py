@@ -6,6 +6,7 @@ Pure numpy; no pipeline imports."""
 from __future__ import annotations
 
 import numpy as np
+from scipy import ndimage
 
 from .color import srgb_to_oklab
 
@@ -67,3 +68,16 @@ def soft_label_field(rgb: np.ndarray, palette: np.ndarray) -> np.ndarray:
         L[junction] = inv / inv.sum(axis=1, keepdims=True)
 
     return L
+
+
+def region_coverage(L: np.ndarray, k: int, region_mask: np.ndarray, *, reach: int = 2) -> np.ndarray:
+    """Region k's coverage field from the shared global L: cov = (φ+1)/2 with
+    φ = L[...,k] − max_{j≠k} L[...,j] (boundary at 0.5), zeroed outside a `reach`-px
+    dilation of `region_mask` so only this component's boundary is traced. Derived from
+    the SAME L for every region ⇒ φ_B = −φ_A on shared seams (gap-free)."""
+    others = np.delete(L, k, axis=2).max(axis=2)
+    phi = L[..., k] - others
+    cov = (phi + 1.0) / 2.0
+    near = ndimage.binary_dilation(region_mask, iterations=reach)
+    cov = np.where(near, cov, 0.0)
+    return cov

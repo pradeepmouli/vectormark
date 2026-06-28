@@ -1,5 +1,7 @@
 import numpy as np
-from vectormark.softlabel import alpha_unmix, soft_label_field
+from scipy import ndimage
+from vectormark.softlabel import alpha_unmix, soft_label_field, region_coverage
+from vectormark.contour import outer_contour
 
 
 def test_pure_colors_give_0_and_1():
@@ -54,3 +56,25 @@ def test_seam_band_crosses_half():
     row = L[20, :, 0]
     assert row[0] > 0.9 and row[-1] < 0.1
     assert np.any(np.abs(row - 0.5) < 0.1)                   # a 0.5 crossing exists
+
+
+def test_region_coverage_boundary_at_half():
+    img, pal = _two_color_ramp(H=40, W=60)
+    L = soft_label_field(img, pal)
+    mask_a = np.zeros((40, 60), bool); mask_a[:, :30] = True
+    cov = region_coverage(L, 0, mask_a)
+    assert np.all(cov[:, 0] > 0.9) and np.all(cov[:, -1] < 0.1)   # 1 inside A, 0 outside
+
+
+def test_shared_seam_is_point_identical():
+    # THE SPINE: region A (color 0) and region B (color 1) share the seam; the sub-arcs
+    # along the seam must be identical (φ_B = −φ_A) → no gap, no overlap.
+    img, pal = _two_color_ramp(H=40, W=60)
+    L = soft_label_field(img, pal)
+    mask_a = np.zeros((40, 60), bool); mask_a[:, :30] = True
+    mask_b = np.zeros((40, 60), bool); mask_b[:, 30:] = True
+    cov_a = region_coverage(L, 0, mask_a)
+    cov_b = region_coverage(L, 1, mask_b)
+    # along the shared seam column band, cov_b == 1 - cov_a (φ_B = −φ_A exactly)
+    seam = slice(28, 32)
+    assert np.allclose(cov_b[:, seam], 1.0 - cov_a[:, seam], atol=1e-9)
