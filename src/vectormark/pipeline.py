@@ -33,7 +33,7 @@ from .surface_merge import merge_surfaces
 from .segment import segment
 from .selection import SelectionPolicy
 from .selector import select_geometry
-from .symmetry import classify_regions, detect_axis, detect_symmetry_rotation
+from .symmetry import detect_axis, detect_symmetry_groups, detect_symmetry_rotation, Axis2D
 from .types import Axis, Region
 
 
@@ -243,12 +243,62 @@ def _render_body(
     cands: list[Candidate] = []
     frame_axes: list[AxisLine] = []
     sym_diags: list = []
+
     for comp in components:
         silhouette = np.any([r.mask for r in comp], axis=0)
-        axis = None if opt.no_symmetry else detect_axis(silhouette, tol=opt.sym_tol)
-        if axis is not None:
-            ys = np.nonzero(silhouette)[0]
-            frame_axes.append(AxisLine(float(axis.x), float(ys.min()), float(axis.x), float(ys.max())))
+
+        # Per-component region-level symmetry detection.  Calling detect_symmetry_groups
+        # on comp (rather than all regions) avoids the cross-component bias where equal-
+        # height regions in DIFFERENT components form a dominant horizontal axis that
+        # outweighs the vertical pair axis within a single component.
+        # For single-component images (e.g. a full-bleed radish+wordmark) this is
+        # identical to a global call, so the radish body's vertical axis still wins.
+        _comp_groups = [] if opt.no_symmetry else detect_symmetry_groups(comp)
+        _comp_region_axis: dict[int, Axis2D | None] = {}
+        _comp_region_role: dict[int, str] = {}
+        _comp_pair_partner: dict[int, int] = {}
+        _SEG = 50.0
+        _comp_ys = np.nonzero(silhouette)[0]
+        _gy_min = float(_comp_ys.min()) if _comp_ys.size else 0.0
+        _gy_max = float(_comp_ys.max()) if _comp_ys.size else float(h - 1)
+        for _g in _comp_groups:
+            _primary: Axis2D | None = _g.axes[0] if _g.axes else None
+            for _r in _g.straddlers:
+                _comp_region_axis[_r.label] = _primary
+                _comp_region_role[_r.label] = "straddler"
+            for _a, _b in _g.pairs:
+                _comp_region_axis[_a.label] = _primary
+                _comp_region_axis[_b.label] = _primary
+                _comp_region_role[_a.label] = "pair"
+                _comp_region_role[_b.label] = "pair"
+                _comp_pair_partner[_a.label] = _b.label
+                _comp_pair_partner[_b.label] = _a.label
+            for _r in _g.loners:
+                _comp_region_role[_r.label] = "loner"
+            # Emit one AxisLine per group (primary axis only).  A disk is symmetric
+            # about 12 candidate axes; only the first (highest-weight) is meaningful
+            # for display and is what the report consumer expects.
+            if _primary is not None:
+                if abs(_primary.theta - np.pi / 2) < 0.05:
+                    frame_axes.append(AxisLine(float(_primary.cx), _gy_min, float(_primary.cx), _gy_max))
+                else:
+                    _dxax, _dyax = np.cos(_primary.theta), np.sin(_primary.theta)
+                    frame_axes.append(AxisLine(
+                        _primary.cx - _SEG * _dxax, _primary.cy - _SEG * _dyax,
+                        _primary.cx + _SEG * _dxax, _primary.cy + _SEG * _dyax,
+                    ))
+
+        # Derive vertical axis for reconstruct_scene (vertical-only today).
+        # Use the first comp region that belongs to a near-vertical group primary.
+        _comp_primary_ax: Axis2D | None = next(
+            (_comp_region_axis[r.label] for r in comp
+             if r.label in _comp_region_axis and _comp_region_axis[r.label] is not None),
+            None,
+        )
+        if _comp_primary_ax is not None and abs(_comp_primary_ax.theta - np.pi / 2) < 0.05:
+            axis: Axis | None = Axis(x=_comp_primary_ax.cx)
+        else:
+            axis = None
         reconstructed, comp = reconstruct_scene(comp, axis, (h, w))
 
         # Seam-merge adjacent regions into surfaces, then fit fill per merged surface.
@@ -268,15 +318,22 @@ def _render_body(
         else:
             fills = {}
 
-        if axis is not None:
-            straddlers, pairs, loners = classify_regions(
-                comp, axis,
-                straddle_iou=opt.straddle_iou,
-                pair_iou=opt.pair_iou,
-                diagnostics=sym_diags,
-            )
-        else:
-            straddlers, pairs, loners = list(comp), [], []
+        # Straddlers/pairs/loners from per-component lookup.
+        straddlers = [r for r in comp if _comp_region_role.get(r.label) == "straddler"]
+        _comp_labels = {r.label for r in comp}
+        _pair_by_lbl = {r.label: r for r in comp if _comp_region_role.get(r.label) == "pair"}
+        _seen_pairs: set[int] = set()
+        pairs = []
+        for _lbl in sorted(_pair_by_lbl):
+            if _lbl in _seen_pairs:
+                continue
+            _partner = _comp_pair_partner.get(_lbl)
+            if _partner is not None and _partner in _comp_labels and _partner in _pair_by_lbl:
+                pairs.append((_pair_by_lbl[_lbl], _pair_by_lbl[_partner]))
+                _seen_pairs |= {_lbl, _partner}
+        loners = [r for r in comp if _comp_region_role.get(r.label, "loner") not in ("straddler", "pair")]
+        for r in comp:
+            sym_diags.append((r.label, 0.0, _comp_region_role.get(r.label, "loner")))
 
         cands += build_candidates(
             reconstructed, straddlers, pairs, loners, fills, opt, axis, rgb,

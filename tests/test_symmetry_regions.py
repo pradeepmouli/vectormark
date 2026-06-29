@@ -1,10 +1,12 @@
 import numpy as np
+from PIL import Image
 from vectormark.symmetry import Axis2D, _perimeter, reflection_off_count
 from vectormark.symmetry import region_is_self_symmetric, regions_mirror_pair, K_BAND
 from vectormark.symmetry import propose_axes
 from vectormark.symmetry import cluster_axes, AxisProposal
 from vectormark.symmetry import detect_symmetry_groups
 from vectormark.types import Region
+from vectormark.pipeline import idealize, Options
 from scipy import ndimage as ndi
 
 def _disk(h, w, cy, cx, r):
@@ -113,3 +115,19 @@ def test_determinism_repeated_runs_identical():
     b = detect_symmetry_groups([_region(m)])
     assert [(g.axes, [r.label for r in g.straddlers]) for g in a] == \
            [(g.axes, [r.label for r in g.straddlers]) for g in b]
+
+
+# --- Task 6: end-to-end daikonic integration ---
+
+def _sym_iou_of_largest_body(svg, axis_x):
+    from tests._symhelp import sym_iou_largest
+    return sym_iou_largest(svg, axis_x)
+
+
+def test_daikonic_body_is_exactly_symmetric_end_to_end():
+    arr = np.asarray(Image.open("tests/fixtures/daikonic/source.png").convert("RGBA"))
+    bg = Image.new("RGB", (arr.shape[1], arr.shape[0]), (255, 255, 255))
+    im = Image.fromarray(arr); bg.paste(im, mask=im.split()[3])
+    svg, rep = idealize(np.asarray(bg.convert("RGB"), np.uint8), options=Options(), report=True)
+    assert rep.axes, "an axis must now be detected for the radish"
+    assert _sym_iou_of_largest_body(svg, rep.axes[0].x1) >= 0.999
