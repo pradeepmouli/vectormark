@@ -466,7 +466,12 @@ def _render_body(
                     + sum(a.area + b.area for a, b in g.pairs))
 
         _dominant_group = max(
-            (_g for _g in _comp_groups if _sym_area(_g) > 0),
+            (
+                _g for _g in _comp_groups
+                if _sym_area(_g) > 0
+                and _g.axes
+                and abs(_g.axes[0].theta - np.pi / 2) < 0.05
+            ),
             key=_sym_area,
             default=None,
         )
