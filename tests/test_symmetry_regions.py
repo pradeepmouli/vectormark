@@ -3,6 +3,7 @@ from vectormark.symmetry import Axis2D, _perimeter, reflection_off_count
 from vectormark.symmetry import region_is_self_symmetric, regions_mirror_pair, K_BAND
 from vectormark.symmetry import propose_axes
 from vectormark.symmetry import cluster_axes, AxisProposal
+from vectormark.symmetry import detect_symmetry_groups
 from vectormark.types import Region
 from scipy import ndimage as ndi
 
@@ -81,3 +82,34 @@ def test_cluster_merges_near_duplicates_and_ranks_by_weight():
     assert len(axes) == 2
     (a0, w0), (a1, w1) = axes
     assert w0 > w1 and abs(a0.theta - np.pi/2) < 0.05    # heaviest first == vertical
+
+
+def test_radish_plus_text_isolates_symmetric_subset():
+    # 3 centered symmetric bands (radish) + 1 off-center asymmetric blob (text)
+    bands = []
+    for i, y in enumerate((20, 45, 70)):
+        m = np.zeros((140, 120), bool); m[y:y+18, 30:90] = True; bands.append(_region(m, i + 1))
+    text = np.zeros((140, 120), bool); text[110:130, 10:40] = True  # off-axis, asymmetric placement
+    groups = detect_symmetry_groups(bands + [_region(text, 9)])
+    sym = [g for g in groups if g.axes]
+    assert sym, "a symmetric group must be found"
+    g = sym[0]
+    assert abs(g.axes[0].theta - np.pi/2) < 0.1 and abs(g.axes[0].cx - 60) < 3
+    assert len(g.straddlers) == 3
+    claimed = {r.label for r in g.straddlers}
+    assert 9 not in claimed   # the text region is NOT pulled into the symmetric group
+
+
+def test_two_independent_symmetric_figures_two_groups():
+    d1 = _disk(80, 200, 40, 40, 22); d2 = _disk(80, 200, 40, 160, 22)
+    groups = [g for g in detect_symmetry_groups([_region(d1, 1), _region(d2, 2)]) if g.axes]
+    # each disk is self-symmetric about its own centre -> at least two distinct axes/groups
+    assert sum(len(g.straddlers) for g in groups) == 2
+
+
+def test_determinism_repeated_runs_identical():
+    m = _disk(80, 80, 40, 40, 25)
+    a = detect_symmetry_groups([_region(m)])
+    b = detect_symmetry_groups([_region(m)])
+    assert [(g.axes, [r.label for r in g.straddlers]) for g in a] == \
+           [(g.axes, [r.label for r in g.straddlers]) for g in b]

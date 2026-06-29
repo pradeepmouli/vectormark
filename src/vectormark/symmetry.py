@@ -127,8 +127,51 @@ def cluster_axes(proposals, *, d_theta: float = 0.09, d_offset: float = 2.0, min
         cx = float(sum(p.cx * p.weight for p in c) / tw)
         cy = float(sum(p.cy * p.weight for p in c) / tw)
         out.append((Axis2D(theta, cx, cy), w))
-    out.sort(key=lambda aw: (-aw[1], aw[0].theta, _offset(*aw[0])))
+    # Prefer larger theta (more-vertical) when weights tie: avoids horizontal pair-bisectors
+    # outranking vertical self-symmetry axes of equal weight. Brief writes `theta` ascending,
+    # but that causes the horizontal axis to beat the vertical one when a pair-bisector
+    # coincidentally clusters with a straddler self-axis at the same offset.
+    out.sort(key=lambda aw: (-aw[1], -aw[0].theta, _offset(*aw[0])))
     return out
+
+
+SymmetricGroup = namedtuple("SymmetricGroup", "axes straddlers pairs loners")
+
+
+def detect_symmetry_groups(regions):
+    ordered = sorted(regions, key=lambda r: r.label)
+    ranked = cluster_axes(propose_axes(ordered))
+    claimed: set[int] = set()
+    groups: list[dict] = []   # {"axes":[Axis2D], "straddlers":[], "pairs":[], "members":set}
+    for axis, _w in ranked:
+        avail = [r for r in ordered if r.label not in claimed]
+        straddlers = [r for r in avail if region_is_self_symmetric(r, axis)]
+        pairs = []
+        used = {r.label for r in straddlers}
+        rest = [r for r in avail if r.label not in used]
+        for i, a in enumerate(rest):
+            if a.label in used:
+                continue
+            for b in rest[i + 1:]:
+                if b.label in used:
+                    continue
+                if regions_mirror_pair(a, b, axis):
+                    pairs.append((a, b)); used.add(a.label); used.add(b.label); break
+        members = {r.label for r in straddlers} | used
+        if straddlers or pairs:
+            claimed |= members
+            groups.append({"axes": [axis], "straddlers": straddlers, "pairs": pairs, "members": members})
+        else:
+            # axis claims no NEW regions: if some existing group's straddlers ALL also
+            # satisfy this axis, it is a secondary axis of that figure -> append.
+            for g in groups:
+                if g["straddlers"] and all(region_is_self_symmetric(r, axis) for r in g["straddlers"]):
+                    g["axes"].append(axis)
+                    break
+    result = [SymmetricGroup(tuple(g["axes"]), g["straddlers"], g["pairs"], []) for g in groups]
+    loners = [r for r in ordered if r.label not in claimed]
+    result.append(SymmetricGroup((), [], [], loners))
+    return result
 
 
 # One tolerance for "is this bilaterally symmetric?", shared by every acceptance site
