@@ -61,6 +61,46 @@ def regions_mirror_pair(a, b, axis: Axis2D) -> bool:
     return off <= K_BAND * _perimeter(a.mask)
 
 
+AxisProposal = namedtuple("AxisProposal", "theta cx cy weight")
+
+
+def _centroid(mask):
+    ys, xs = np.nonzero(mask)
+    return float(xs.mean()), float(ys.mean())
+
+
+def propose_axes(regions, *, theta_steps: int = 12):
+    props: list[AxisProposal] = []
+    ordered = sorted(regions, key=lambda r: r.label)
+    # self-axes
+    for r in ordered:
+        if not r.mask.any():
+            continue
+        cx, cy = _centroid(r.mask)
+        area = int(r.mask.sum())
+        for theta in np.linspace(0.0, np.pi, theta_steps, endpoint=False):
+            if region_is_self_symmetric(r, Axis2D(float(theta), cx, cy)):
+                props.append(AxisProposal(float(theta), cx, cy, area))
+    # pair-bisectors
+    h, w = ordered[0].mask.shape if ordered else (1, 1)
+    diag = float(np.hypot(h, w))
+    cents = {r.label: _centroid(r.mask) for r in ordered}
+    areas = {r.label: int(r.mask.sum()) for r in ordered}
+    for i, a in enumerate(ordered):
+        for b in ordered[i + 1:]:
+            aa, ab = areas[a.label], areas[b.label]
+            if aa == 0 or ab == 0 or min(aa, ab) / max(aa, ab) < 0.9:
+                continue
+            (ax, ay), (bx, by) = cents[a.label], cents[b.label]
+            if np.hypot(bx - ax, by - ay) > 0.5 * diag:
+                continue
+            theta = (np.arctan2(by - ay, bx - ax) + np.pi / 2) % np.pi
+            mx, my = (ax + bx) / 2.0, (ay + by) / 2.0
+            if regions_mirror_pair(a, b, Axis2D(float(theta), mx, my)):
+                props.append(AxisProposal(float(theta), mx, my, aa + ab))
+    return props
+
+
 # One tolerance for "is this bilaterally symmetric?", shared by every acceptance site
 # so they cannot disagree. It is a reflection *mismatch* fraction: a shape counts as
 # symmetric about an axis when at most SYM_TOL of it fails to overlap its reflection

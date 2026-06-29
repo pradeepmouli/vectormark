@@ -1,6 +1,7 @@
 import numpy as np
 from vectormark.symmetry import Axis2D, _perimeter, reflection_off_count
 from vectormark.symmetry import region_is_self_symmetric, regions_mirror_pair, K_BAND
+from vectormark.symmetry import propose_axes
 from vectormark.types import Region
 from scipy import ndimage as ndi
 
@@ -54,3 +55,17 @@ def test_mirror_pair_detected_and_size_guarded():
     assert regions_mirror_pair(_region(left, 1), _region(right, 2), axis)
     big = np.zeros((80, 80), bool); big[20:60, 50:70] = True        # bigger -> not a pair
     assert not regions_mirror_pair(_region(left, 1), _region(big, 3), axis)
+
+
+def test_propose_axes_finds_vertical_for_centered_symmetric_region():
+    m = _disk(100, 120, 50, 60, 30)                    # centered disk
+    props = propose_axes([_region(m)])
+    # a disk proposes many self-axes through its center; at least one ~vertical
+    assert any(abs(p.theta - np.pi / 2) < 0.3 and abs(p.cx - 60) < 2 for p in props)
+
+
+def test_propose_axes_finds_pair_bisector():
+    left = np.zeros((80, 120), bool); left[30:50, 20:35] = True
+    right = np.zeros((80, 120), bool); right[30:50, 85:100] = True   # mirror about x=60
+    props = propose_axes([_region(left, 1), _region(right, 2)])
+    assert any(abs(p.theta - np.pi / 2) < 0.2 and abs(p.cx - 60) < 3 for p in props)
