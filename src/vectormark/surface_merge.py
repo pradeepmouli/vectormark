@@ -115,9 +115,11 @@ def merge_surfaces(filled: list[tuple[Region, Fill]], rgb: np.ndarray, *,
     surfaces = list(filled)
     merged = True
     # Cache per-region-pair seam_is_soft results for path A. Key: unordered label pair
-    # (min, max). A merge consumes both labels and creates a new-label union; entries for
-    # consumed labels are never looked up again, so no explicit eviction is needed. Cache
-    # is local to this call (masks differ across merge_surfaces invocations).
+    # (min, max). On a merge, the surviving rep.label is REUSED for the union region whose
+    # mask has changed (expanded), so all cache entries referencing either consumed label
+    # are stale and must be evicted. Entries for pairs among unaffected surviving regions
+    # are still valid and are kept — that cross-pass reuse is the cache's only payoff.
+    # Cache is local to this call (masks differ across merge_surfaces invocations).
     seam_cache: dict[tuple[int, int], bool] = {}
     while merged:
         merged = False
@@ -143,6 +145,11 @@ def merge_surfaces(filled: list[tuple[Region, Fill]], rgb: np.ndarray, *,
                 new_region = Region(label=rep.label, mask=union, color_hex=rep.color_hex)
                 surfaces = ([s for k, s in enumerate(surfaces) if k not in (i, j)]
                             + [(new_region, new_fill)])
+                # Evict stale entries: rep.label is reused with an expanded mask, so any
+                # cached pair involving ri.label or rj.label is now wrong.
+                stale = {ri.label, rj.label}
+                for ck in [ck for ck in seam_cache if ck[0] in stale or ck[1] in stale]:
+                    del seam_cache[ck]
                 merged = True
                 break
             if merged:
