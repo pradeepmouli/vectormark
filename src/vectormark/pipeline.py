@@ -43,6 +43,9 @@ class Options:
     max_error: float = 1.0        # Bézier fit tolerance (px)
     cubic_paths: bool = False     # fit curved runs with cubic (vs quadratic) Béziers;
                                   # off by default — cubics chase raster-staircase noise.
+    aa_contours: bool = False     # trace geometry from the sub-pixel coverage field instead
+                                  # of the binary mask; off by default — coverage isn't
+                                  # left-right symmetric, so it drifts flat symmetric regions.
     max_colors: int = 16
     min_region_fraction: float = 0.02  # drop regions smaller than this × largest region
     flatten: bool = False
@@ -114,7 +117,8 @@ def _segment_image(arr: np.ndarray, opt: Options) -> tuple[int, int, list[Region
     if regions:
         cut = opt.min_region_fraction * max(r.area for r in regions)
         regions = [r for r in regions if r.area >= cut]
-    attach_coverage_field(regions, arr, opt.max_colors)
+    if opt.aa_contours:
+        attach_coverage_field(regions, arr, opt.max_colors)
     return w, h, regions
 
 
