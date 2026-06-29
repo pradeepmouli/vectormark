@@ -1,6 +1,7 @@
 """Top-level orchestration: raster path/array -> structured SVG string."""
 from __future__ import annotations
 
+import dataclasses
 import re
 import types
 from collections.abc import Mapping
@@ -134,6 +135,70 @@ class AxisLine:
     y2: float
 
 
+def _to_json_safe(v):
+    """Recursively convert any value to a JSON-serializable form.
+    Dataclasses are expanded to dicts; sets are sorted lists; all else -> repr."""
+    if isinstance(v, (bool, int, float, str, type(None))):
+        return v
+    if isinstance(v, (list, tuple)):
+        return [_to_json_safe(x) for x in v]
+    if isinstance(v, dict):
+        return {k: _to_json_safe(vv) for k, vv in v.items()}
+    if isinstance(v, set):
+        return sorted(_to_json_safe(x) for x in v)
+    if dataclasses.is_dataclass(v):
+        return {f.name: _to_json_safe(getattr(v, f.name)) for f in dataclasses.fields(v)}
+    return repr(v)
+
+
+def _fill_kind(fill: Fill) -> str:
+    """Canonical fill-type label for diagnostics schema."""
+    if isinstance(fill, FlatFill):
+        return "flat"
+    if isinstance(fill, LinearGradientFill):
+        return "linear_gradient"
+    if isinstance(fill, RadialGradientFill):
+        return "radial_gradient"
+    if isinstance(fill, RasterFill):
+        return "raster"
+    return "unknown"
+
+
+class ReportDiag:
+    """Structured JSON-ready diagnostics for one idealize() run.
+
+    Call `.to_dict()` to get the schema dict.  The schema is stable across
+    non-breaking pipeline changes and is designed for downstream tooling
+    (visualisers, regression dashboards, agent post-processing).
+
+    Schema shape (top level)::
+
+        {
+            "options": { ...all Options fields... },
+            "stats":   { "regions": N, "components": M, "elements": K,
+                         "gradients": G, "axes": A },
+            "axes":    [ { "theta": f, "cx": f, "cy": f,
+                           "weight": f, "primary": bool }, ... ],
+            "regions": [ { "id": label, "area": px, "color_hex": "#..",
+                           "bbox": [x0,y0,x1,y1], "options": {...},
+                           "symmetry": { "role": "straddler|pair|loner",
+                                         "axis": {theta,cx,cy}|null,
+                                         "off_ratio": float,
+                                         "partner": label|null },
+                           "strategies": {
+                               "geom": { "<strategy>": {"chosen": bool} },
+                               "fill": { "<kind>": {"chosen": bool} } }
+                         }, ... ]
+        }
+    """
+
+    def __init__(self, data: dict) -> None:
+        self._data = data
+
+    def to_dict(self) -> dict:
+        return self._data
+
+
 @dataclass(frozen=True)
 class IdealizeReport:
     """What the pipeline actually emitted for one idealize() run: the histogram of
@@ -147,6 +212,7 @@ class IdealizeReport:
     elements: int
     axes: tuple[AxisLine, ...]
     symmetry: tuple  # per-region (label, self_iou, decision) entries from classify_regions
+    diagnostics: "ReportDiag | None" = None  # structured JSON-ready diagnostics; None when not built
 
     @staticmethod
     def empty() -> "IdealizeReport":
@@ -159,7 +225,15 @@ def _map_axis(a: AxisLine, affine: Affine) -> AxisLine:
     return AxisLine(x1, y1, x2, y2)
 
 
-def _build_report(cands: list[Candidate], axes: list[AxisLine], sym_diags: list | None = None) -> IdealizeReport:
+def _build_report(
+    cands: list[Candidate],
+    axes: list[AxisLine],
+    sym_diags: list | None = None,
+    *,
+    opt: Options | None = None,
+    regions: list[Region] | None = None,
+    diag_extra: dict | None = None,
+) -> IdealizeReport:
     strategies: dict[str, int] = {}
     gradients = 0
     for c in cands:
@@ -167,13 +241,120 @@ def _build_report(cands: list[Candidate], axes: list[AxisLine], sym_diags: list 
             gradients += 1
         if c.strategy is not None:                 # None for occlusion / lens
             strategies[c.strategy] = strategies.get(c.strategy, 0) + 1
+    diag = _build_diag(cands, axes, sym_diags or [], opt, regions, diag_extra)
     return IdealizeReport(
         types.MappingProxyType(dict(strategies)),
         gradients,
         len(cands),
         tuple(axes),
         tuple(sym_diags) if sym_diags is not None else (),
+        diag,
     )
+
+
+def _build_diag(
+    cands: list[Candidate],
+    axes: list[AxisLine],
+    sym_diags: list,
+    opt: Options | None,
+    regions: list[Region] | None,
+    diag_extra: dict | None,
+) -> "ReportDiag | None":
+    """Build the structured ReportDiag from pipeline outputs.
+
+    Returns None when opt/regions/diag_extra are not supplied (e.g. from legacy
+    call sites). The per-region ``strategies.geom`` dict contains only the chosen
+    strategy for a first cut; non-chosen alternatives are a TODO for slice 4c+."""
+    if opt is None or regions is None or not diag_extra:
+        return None
+
+    # options: every Options field, complex values serialised to JSON-safe form.
+    opt_dict = _to_json_safe(opt)
+
+    # stats
+    n_components = diag_extra.get("n_components", 0)
+    n_gradients = sum(
+        1 for c in cands if isinstance(c.fill, (LinearGradientFill, RadialGradientFill))
+    )
+    stats: dict = {
+        "regions": len(regions),
+        "components": n_components,
+        "elements": len(cands),
+        "gradients": n_gradients,
+        "axes": len(axes),
+    }
+
+    # per-candidate lookup by region_label (first encountered = chosen winner)
+    cand_by_label: dict[int, Candidate] = {}
+    for c in cands:
+        if c.source == "region" and c.region_label is not None:
+            cand_by_label.setdefault(c.region_label, c)
+
+    # sym_diags lookup
+    role_by_label: dict[int, str] = {}
+    off_by_label: dict[int, float] = {}
+    for lbl, off, role in sym_diags:
+        role_by_label[int(lbl)] = str(role)
+        off_by_label[int(lbl)] = float(off)
+
+    region_axis_map: dict[int, Axis2D | None] = diag_extra.get("region_axis", {})
+    region_partner_map: dict[int, int | None] = diag_extra.get("region_partner", {})
+
+    # per-region dicts
+    region_dicts: list[dict] = []
+    for r in regions:
+        lbl = r.label
+        ys, xs = np.nonzero(r.mask)
+        bbox = (
+            [int(xs.min()), int(ys.min()), int(xs.max()) + 1, int(ys.max()) + 1]
+            if xs.size else [0, 0, 0, 0]
+        )
+
+        role = role_by_label.get(lbl, "loner")
+        off_ratio = off_by_label.get(lbl, 0.0)
+        ax: Axis2D | None = region_axis_map.get(lbl)
+        partner: int | None = region_partner_map.get(lbl)
+
+        ax_dict = (
+            {"theta": float(ax.theta), "cx": float(ax.cx), "cy": float(ax.cy)}
+            if ax is not None else None
+        )
+
+        # strategies — first cut: chosen only; TODO: include non-chosen alternatives
+        chosen_cand = cand_by_label.get(lbl)
+        geom_strats: dict = {}
+        fill_strats: dict = {}
+        if chosen_cand is not None:
+            geom_k = chosen_cand.strategy or "unknown"
+            geom_strats[geom_k] = {"chosen": True}  # TODO(slice-4c): add non-chosen with chosen=False
+            fill_k = _fill_kind(chosen_cand.fill)
+            fill_strats[fill_k] = {"chosen": True}
+
+        region_dicts.append({
+            "id": lbl,
+            "area": int(r.area),
+            "color_hex": r.color_hex,
+            "bbox": bbox,
+            "options": opt_dict,
+            "symmetry": {
+                "role": role,
+                "axis": ax_dict,
+                "off_ratio": off_ratio,
+                "partner": partner,
+            },
+            "strategies": {
+                "geom": geom_strats,
+                "fill": fill_strats,
+            },
+        })
+
+    data: dict = {
+        "options": opt_dict,
+        "stats": stats,
+        "axes": diag_extra.get("axis_info", []),
+        "regions": region_dicts,
+    }
+    return ReportDiag(data)
 
 
 def build_candidates(
@@ -220,7 +401,8 @@ def build_candidates(
             continue
         fill = fills.get(region.label, FlatFill(region.color_hex))
         cands.append(Candidate(shape, fill, "region",
-                               mirror=axis if is_pair else None, strategy=strategy))
+                               mirror=axis if is_pair else None, strategy=strategy,
+                               region_label=region.label))
 
     return cands
 
@@ -228,7 +410,7 @@ def build_candidates(
 def _render_body(
     w: int, h: int, regions: list[Region], opt: Options, *,
     bake: Affine | None = None, rgb: np.ndarray | None = None,
-) -> tuple[list[str], list[str], list[Candidate], list[AxisLine], list]:
+) -> tuple[list[str], list[str], list[Candidate], list[AxisLine], list, dict]:
     """Decompose regions into gutter-separated components, then per component detect
     symmetry, reconstruct occlusion, and fit regions — accumulating candidates that the
     single emit loop renders in z-order with globally continuous sN ids. Operates
@@ -237,12 +419,21 @@ def _render_body(
 
     When `bake` is given (only in flatten mode), the inverse transform is applied
     directly to each path's coordinates instead — flatten emits pure baked geometry
-    with no wrapping `<g transform>`."""
+    with no wrapping `<g transform>`.
+
+    Returns a 6-tuple: ``(body, defs, cands, frame_axes, sym_diags, diag_extra)``
+    where ``diag_extra`` is a dict carrying structured diagnostics data
+    (``n_components``, ``axis_info``, ``region_axis``, ``region_partner``)
+    for use by ``_build_report``."""
     components = decompose_components(regions, (h, w))
     defs: list[str] = []
     cands: list[Candidate] = []
     frame_axes: list[AxisLine] = []
     sym_diags: list = []
+    # Diagnostics extras — populated per component then merged into one dict.
+    _diag_axis_info: list[dict] = []       # one entry per detected group primary axis
+    _diag_region_axis: dict[int, Axis2D | None] = {}   # label -> primary Axis2D
+    _diag_region_partner: dict[int, int | None] = {}   # label -> mirror partner label
 
     for comp in components:
         silhouette = np.any([r.mask for r in comp], axis=0)
@@ -287,6 +478,31 @@ def _render_body(
                         _primary.cx - _SEG * _dxax, _primary.cy - _SEG * _dyax,
                         _primary.cx + _SEG * _dxax, _primary.cy + _SEG * _dyax,
                     ))
+                # Approx weight = total pixel area of all group members.
+                _group_weight = (
+                    sum(r.area for r in _g.straddlers)
+                    + sum(a.area + b.area for a, b in _g.pairs)
+                    + sum(r.area for r in _g.loners)
+                )
+                _diag_axis_info.append({
+                    "theta": float(_primary.theta),
+                    "cx": float(_primary.cx),
+                    "cy": float(_primary.cy),
+                    "weight": float(_group_weight),
+                    "primary": True,
+                })
+            # Accumulate per-region axis + partner for structured diagnostics.
+            for _r in _g.straddlers:
+                _diag_region_axis[_r.label] = _primary
+                _diag_region_partner[_r.label] = None
+            for _a, _b in _g.pairs:
+                _diag_region_axis[_a.label] = _primary
+                _diag_region_axis[_b.label] = _primary
+                _diag_region_partner[_a.label] = _b.label
+                _diag_region_partner[_b.label] = _a.label
+            for _r in _g.loners:
+                _diag_region_axis[_r.label] = None
+                _diag_region_partner[_r.label] = None
 
         # Derive vertical axis for reconstruct_scene (vertical-only today).
         # Use the first comp region that belongs to a near-vertical group primary.
@@ -379,7 +595,13 @@ def _render_body(
                 body.append(mirror_use(elem_id, cand.mirror))
         eid += 1
 
-    return body, defs, cands, frame_axes, sym_diags
+    diag_extra = {
+        "n_components": len(components),
+        "axis_info": _diag_axis_info,
+        "region_axis": _diag_region_axis,
+        "region_partner": _diag_region_partner,
+    }
+    return body, defs, cands, frame_axes, sym_diags, diag_extra
 
 
 def _rectify_affine(rho: float, w0: int, h0: int, rw: int, rh: int) -> Affine:
@@ -406,23 +628,23 @@ def _bake_gradient_geometry(geom: dict, kind: str, bake: Affine) -> dict:
     return {"cx": cx, "cy": cy, "r": geom["r"]}
 
 
-def _idealize_rectified(arr: np.ndarray, opt: Options, rho: float, w0: int, h0: int) -> tuple[str | None, list[Candidate], list[AxisLine], list]:
+def _idealize_rectified(arr: np.ndarray, opt: Options, rho: float, w0: int, h0: int) -> tuple[str | None, list[Candidate], list[AxisLine], list, dict]:
     """Rotate the image so the tilted mirror axis is vertical and idealize there.
     Non-flatten output keeps the symmetry (`<use>` mirror about the vertical axis)
     and is wrapped in one inverse-rotation `<g>`; flatten output bakes that same
-    rotation into the path coordinates so no transform survives. Returns (None, [], [], [])
+    rotation into the path coordinates so no transform survives. Returns (None, [], [], [], {})
     (so the caller falls back to upright) if the rectified frame yields no usable
     regions or its vertical symmetry no longer registers."""
     rot = ndi.rotate(arr.astype(float), -rho, reshape=True, order=1, cval=255.0)
     rot = np.clip(rot, 0.0, 255.0).astype(np.uint8)
     rw, rh, regions = _segment_image(rot, opt)
     if not regions:
-        return None, [], [], []
+        return None, [], [], [], {}
     if detect_axis(np.any([r.mask for r in regions], axis=0), tol=opt.sym_tol) is None:
-        return None, [], [], []
+        return None, [], [], [], {}
     affine = _rectify_affine(rho, w0, h0, rw, rh)
     bake = affine if opt.flatten else None
-    body, defs, cands, frame_axes, sym_diags = _render_body(rw, rh, regions, opt, bake=bake, rgb=rot)
+    body, defs, cands, frame_axes, sym_diags, diag_extra = _render_body(rw, rh, regions, opt, bake=bake, rgb=rot)
     # Bail unless the rectified frame actually exploited mirror symmetry (some region
     # classified as a straddler or pair). A tilted silhouette can register a vertical
     # axis yet have every region fall below the straddle gate (e.g. telegram's lone
@@ -430,7 +652,7 @@ def _idealize_rectified(arr: np.ndarray, opt: Options, rho: float, w0: int, h0: 
     # adds resampling churn versus the upright idealization, so fall back to upright
     # instead of committing a distorted result.
     if not any(decision in ("straddler", "pair") for _, _, decision in sym_diags):
-        return None, [], [], []
+        return None, [], [], [], {}
     if opt.flatten:
         doc = render_svg_doc(w0, h0, body, defs)
     else:
@@ -438,7 +660,7 @@ def _idealize_rectified(arr: np.ndarray, opt: Options, rho: float, w0: int, h0: 
                 f'rotate({_fmt(round(-rho, 3))}) translate({_fmt(-rw / 2)} {_fmt(-rh / 2)})">')
         doc = render_svg_doc(w0, h0, [wrap, *body, "</g>"], defs)
     axes = [_map_axis(a, affine) for a in frame_axes]
-    return doc, cands, axes, sym_diags
+    return doc, cands, axes, sym_diags, diag_extra
 
 
 def _flatten_on_white(im: Image.Image) -> np.ndarray:
@@ -493,22 +715,25 @@ def idealize(image, *, options: Options | None = None, report: bool = False) -> 
 
     w, h, regions = _segment_image(arr, opt)
     if not regions:
-        svg, cands, axes, sym_diags = render_svg_doc(w, h, []), [], [], []
+        svg, cands, axes, sym_diags, diag_extra = render_svg_doc(w, h, []), [], [], [], {}
     else:
-        svg, cands, axes, sym_diags = None, [], [], []
+        svg, cands, axes, sym_diags, diag_extra = None, [], [], [], {}
         # Any-axis symmetry: rectify a tilted mirror upright, idealize there, wrap back.
         if not opt.no_symmetry:
             silhouette = np.any([r.mask for r in regions], axis=0)
             if detect_axis(silhouette, tol=opt.sym_tol) is None:
                 rho = detect_symmetry_rotation(silhouette, tol=opt.sym_tol)
                 if rho is not None:
-                    rectified, rcands, raxes, rsym_diags = _idealize_rectified(arr, opt, rho, w0, h0)
+                    rectified, rcands, raxes, rsym_diags, rdiag_extra = _idealize_rectified(arr, opt, rho, w0, h0)
                     if rectified is not None:
-                        svg, cands, axes, sym_diags = rectified, rcands, raxes, rsym_diags
+                        svg, cands, axes, sym_diags, diag_extra = rectified, rcands, raxes, rsym_diags, rdiag_extra
         if svg is None:
-            body, defs, cands, axes, sym_diags = _render_body(w, h, regions, opt, rgb=arr)
+            body, defs, cands, axes, sym_diags, diag_extra = _render_body(w, h, regions, opt, rgb=arr)
             svg = render_svg_doc(w, h, body, defs)
 
     if (arr.shape[1], arr.shape[0]) != (orig_w, orig_h):
         svg = _set_svg_output_size(svg, orig_w, orig_h)
-    return (svg, _build_report(cands, axes, sym_diags)) if report else svg
+    return (
+        svg,
+        _build_report(cands, axes, sym_diags, opt=opt, regions=regions, diag_extra=diag_extra),
+    ) if report else svg
