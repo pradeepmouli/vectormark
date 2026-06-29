@@ -46,3 +46,23 @@ Verification
 
 Result
 - Task 3 is implemented and verified in the requested focused optimizer tests.
+
+Fix after review
+- Locked the budget contract in tests with an explicit `assert BUDGET == 0.02`.
+- Tightened the default gate contract by asserting a mismatched square is rejected at the default budget and accepted when the budget is raised just above its measured residual.
+- Added a deterministic polygon-with-hole case:
+  - builds a square ring with an interior square hole
+  - asserts `rasterize()` subtracts the hole from the filled exterior
+  - asserts `coverage_residual(...) == 0.0`
+  - asserts the default gate accepts the matching mask
+- Added a deterministic `MultiPolygon` case:
+  - builds two disjoint squares
+  - asserts `rasterize()` fills both components
+  - asserts `coverage_residual(...) == 0.0`
+  - asserts the default gate accepts the matching mask
+
+Final verification
+- Focused test command:
+  - `PYTHONPATH=src ./.venv/bin/python -m pytest tests/optimizer/test_gate.py -q`
+- Result:
+  - `....                                                                     [100%]`
