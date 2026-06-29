@@ -15,8 +15,9 @@ import numpy as np
 class Region:
     """One connected, single-colour area of the quantised image."""
     label: int
-    mask: np.ndarray          # bool (H, W)
+    mask: np.ndarray          # bool (H, W) — all non-contour consumers use this
     color_hex: str
+    coverage: np.ndarray | None = None   # float (H,W), region's α field, boundary at 0.5
 
     @property
     def area(self) -> int:

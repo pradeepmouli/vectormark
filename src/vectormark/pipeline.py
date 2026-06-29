@@ -57,6 +57,48 @@ class Options:
                                        # (LANCZOS) before segmentation; None disables.
 
 
+COVERAGE_HOLE_TOL = 0.05   # if >5% of a region's eroded interior would fall below the 0.5
+                           # contour level, the K-way soft field disagrees with the mask
+                           # (a gradient surface drifting toward a similar palette color) —
+                           # keep the binary mask there instead of punching holes.
+
+
+def attach_coverage_field(regions: list[Region], rgb: np.ndarray, max_colors: int) -> None:
+    """Attach `region.coverage` from ONE shared soft label field, computed over the given
+    regions' colors + background, evaluated on each region's CURRENT mask — so merged and
+    reconstructed regions are covered, not just freshly-segmented ones. A region whose field
+    coverage would hole its interior (gradient surface) keeps coverage=None (mask contour).
+
+    The soft field is built from ALL image palette colors (not just region colors) so
+    gradient-adjacent colors compete as labels — enabling the hole-guard to fire even when
+    the competing color belongs to a merged-away region or a non-segmented image area."""
+    from .softlabel import soft_label_field, region_coverage
+    from .segment import _background_color
+    if not regions:
+        return
+    palette_cols = extract_palette(rgb, max_colors=max_colors)
+    q = quantize(rgb, palette_cols)
+    bg = _background_color(q)
+    # Use ALL image palette colors + background as rows so gradient-competing colors are
+    # represented in the field even when they're not (or no longer) separate regions.
+    rows: list[tuple[int, int, int]] = [tuple(int(c) for c in col) for col in palette_cols]
+    if bg not in rows:
+        rows = rows + [bg]
+    row_hex = ["#{:02X}{:02X}{:02X}".format(r[0], r[1], r[2]) for r in rows]
+    L = soft_label_field(rgb.astype(float), np.array(rows, np.uint8))
+    hex_to_idx = {hx: i for i, hx in enumerate(row_hex)}
+    for r in regions:
+        idx = hex_to_idx.get(r.color_hex)
+        if idx is None:
+            r.coverage = None
+            continue
+        cov = region_coverage(L, idx, r.mask)
+        interior = ndi.binary_erosion(r.mask, iterations=3)
+        if not interior.any():
+            interior = r.mask
+        r.coverage = None if (cov[interior] < 0.5).mean() > COVERAGE_HOLE_TOL else cov
+
+
 def _segment_image(arr: np.ndarray, opt: Options) -> tuple[int, int, list[Region]]:
     """Quantize + segment an RGB array into flat-color regions, dropping ones too
     small to be intentional.
@@ -72,6 +114,7 @@ def _segment_image(arr: np.ndarray, opt: Options) -> tuple[int, int, list[Region
     if regions:
         cut = opt.min_region_fraction * max(r.area for r in regions)
         regions = [r for r in regions if r.area >= cut]
+    attach_coverage_field(regions, arr, opt.max_colors)
     return w, h, regions
 
 
@@ -166,7 +209,7 @@ def build_candidates(
         # (base = candidates from prior components, so per-component lookups address sN).
         eid = f"s{base + len(cands)}"
         element = opt.selection.for_id(eid) if opt.selection is not None else None
-        cr = opt.corner_radius if opt.corner_radius is not None else region_corner_radius(region.mask)
+        cr = opt.corner_radius if opt.corner_radius is not None else region_corner_radius(region.mask, coverage=region.coverage)
         shape, strategy = select_geometry(region, opt, fit_axis, cr, source_rgb,
                                           element=element, eid=eid)
         if shape is None:
