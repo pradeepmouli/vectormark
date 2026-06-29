@@ -48,6 +48,23 @@ def _matched_original(
     return None
 
 
+def _gate_mask(
+    proposal_ids: tuple[int, ...],
+    originals: dict[int, OptObject],
+    current_masks: dict[int, np.ndarray],
+    replacement: OptObject,
+    union_mask: np.ndarray,
+) -> np.ndarray | None:
+    original = _matched_original(proposal_ids, originals, replacement)
+    if original is None:
+        if len(proposal_ids) == 1:
+            return current_masks[proposal_ids[0]]
+        return union_mask
+    if not _geometry_changed(original, replacement):
+        return None
+    return current_masks[original.id]
+
+
 def optimize(
     objects: list[OptObject],
     masks: dict[int, np.ndarray],
@@ -73,12 +90,19 @@ def optimize(
             if any(obj_id not in original_by_id or obj_id not in current_masks for obj_id in proposal_ids):
                 continue
 
+            union_mask = _union_masks(current_masks, proposal_ids)
             gates_ok = True
             for replacement in proposal.new_objects:
-                original = _matched_original(proposal_ids, original_by_id, replacement)
-                if original is None or not _geometry_changed(original, replacement):
+                gate_mask = _gate_mask(
+                    proposal_ids,
+                    original_by_id,
+                    current_masks,
+                    replacement,
+                    union_mask,
+                )
+                if gate_mask is None:
                     continue
-                if coverage_residual(replacement.flat, current_masks[original.id]) > budget:
+                if coverage_residual(replacement.flat, gate_mask) > budget:
                     gates_ok = False
                     break
 
@@ -89,7 +113,6 @@ def optimize(
                 obj_id: np.asarray(current_masks[obj_id], dtype=bool).copy()
                 for obj_id in proposal_ids
             }
-            union_mask = _union_masks(current_masks, proposal_ids)
             consumed_in_pass.update(proposal_ids)
 
             insert_at = min(
