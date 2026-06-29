@@ -114,6 +114,11 @@ def merge_surfaces(filled: list[tuple[Region, Fill]], rgb: np.ndarray, *,
     never merges; two distinct flats whose union is not a gradient never merge."""
     surfaces = list(filled)
     merged = True
+    # Cache per-region-pair seam_is_soft results for path A. Key: unordered label pair
+    # (min, max). A merge consumes both labels and creates a new-label union; entries for
+    # consumed labels are never looked up again, so no explicit eviction is needed. Cache
+    # is local to this call (masks differ across merge_surfaces invocations).
+    seam_cache: dict[tuple[int, int], bool] = {}
     while merged:
         merged = False
         surfaces.sort(key=lambda rf: rf[0].mask.sum(), reverse=True)
@@ -124,7 +129,10 @@ def merge_surfaces(filled: list[tuple[Region, Fill]], rgb: np.ndarray, *,
                 if isinstance(fi, _GRADIENT) and isinstance(fj, _GRADIENT):
                     ok = gradients_continuous(fi, ri.mask, fj, rj.mask, seam_de=seam_de)  # B
                 else:
-                    ok = seam_is_soft(ri.mask, rj.mask, rgb, edge_de=edge_de)             # A
+                    key = (min(ri.label, rj.label), max(ri.label, rj.label))
+                    if key not in seam_cache:
+                        seam_cache[key] = seam_is_soft(ri.mask, rj.mask, rgb, edge_de=edge_de)
+                    ok = seam_cache[key]                                                   # A
                 if not ok:
                     continue
                 union = ri.mask | rj.mask
