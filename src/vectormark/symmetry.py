@@ -34,6 +34,33 @@ def reflection_off_count(fg_xy, axis: Axis2D, dist: np.ndarray, *, tol_px: float
     ci = np.clip(np.rint(rx).astype(int), 0, w - 1)
     return int((dist[ri, ci] > tol_px).sum())
 
+
+K_BAND = 1.5   # absolute boundary-band factor: off-area <= K_BAND * perimeter (~1.5px band)
+
+
+def _fg_xy(mask):
+    ys, xs = np.nonzero(mask)
+    return xs, ys
+
+
+def region_is_self_symmetric(region, axis: Axis2D) -> bool:
+    mask = region.mask
+    if not mask.any():
+        return False
+    dist = ndi.distance_transform_edt(~mask)
+    off = reflection_off_count(_fg_xy(mask), axis, dist)
+    return off <= K_BAND * _perimeter(mask)
+
+
+def regions_mirror_pair(a, b, axis: Axis2D) -> bool:
+    aa, ab = int(a.mask.sum()), int(b.mask.sum())
+    if aa == 0 or ab == 0 or min(aa, ab) / max(aa, ab) < 0.9:
+        return False
+    dist_b = ndi.distance_transform_edt(~b.mask)
+    off = reflection_off_count(_fg_xy(a.mask), axis, dist_b)
+    return off <= K_BAND * _perimeter(a.mask)
+
+
 # One tolerance for "is this bilaterally symmetric?", shared by every acceptance site
 # so they cannot disagree. It is a reflection *mismatch* fraction: a shape counts as
 # symmetric about an axis when at most SYM_TOL of it fails to overlap its reflection
