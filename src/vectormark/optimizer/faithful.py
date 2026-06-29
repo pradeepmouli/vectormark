@@ -13,30 +13,12 @@ from ..types import Region
 from .optobject import OptObject
 
 
-def _contour_area(contour: np.ndarray) -> float:
-    if len(contour) < 3:
-        return 0.0
-    x = contour[:, 0]
-    y = contour[:, 1]
-    return float(abs(np.dot(x, np.roll(y, 1)) - np.dot(y, np.roll(x, 1))) / 2.0)
-
-
-def _significant_contours(region: Region, opt: Options) -> list[np.ndarray]:
-    contours = [c for c in region_contours(region.mask, coverage=region.coverage) if len(c) >= 3]
-    if len(contours) <= 1:
-        return contours
-
-    largest = _contour_area(contours[0])
-    if largest <= 0.0:
-        return contours[:1]
-
-    min_area = max(1.0, largest * opt.min_region_fraction)
-    kept = [c for c in contours if _contour_area(c) >= min_area]
-    return kept or contours[:1]
+def _region_path_contours(region: Region) -> list[np.ndarray]:
+    return [c for c in region_contours(region.mask, coverage=region.coverage) if len(c) >= 3]
 
 
 def _faithful_shape(region: Region, opt: Options) -> Shape | None:
-    contours = _significant_contours(region, opt)
+    contours = _region_path_contours(region)
     if not contours:
         return None
 

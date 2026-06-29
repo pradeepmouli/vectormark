@@ -47,3 +47,27 @@ Notes
 
 Result
 - Task 2 is implemented and verified in focused optimizer tests.
+
+Fix follow-up
+- What changed
+  - Removed the Stage 1 contour significance filter from `src/vectormark/optimizer/faithful.py` so faithful path generation preserves every contour returned by `region_contours()`, including real inner holes.
+  - Strengthened `tests/optimizer/test_faithful.py` with a regression for a small but meaningful hole that the old `largest * opt.min_region_fraction` cutoff dropped.
+  - Reworked the gradient merge test to first prove `_segment_image()` produces at least two adjacent non-background regions, then assert `faithful_objects()` merges them into one gradient-filled object.
+- RED/GREEN evidence for the new and strengthened tests
+  - RED: old contour-threshold behavior on the small-hole case dropped the hole entirely:
+    - Command:
+      - `PYTHONPATH=src ./.venv/bin/python - <<'PY' ... emulate old contour cutoff on the small-hole case ... PY`
+    - Output:
+      - `{'contours': 2, 'kept_by_old_threshold': 1, 'min_area': 127.21, 'hole_polygon_area': 80.5, 'fill_rule': None, 'flat_area': 6374.22, 'mask_area': 6280}`
+  - RED: the original gradient-strip setup with `max_colors=2` did not prove merging because segmentation produced only one non-background region before `faithful_objects()` ran:
+    - Command:
+      - `PYTHONPATH=src ./.venv/bin/python - <<'PY' ... compare max_colors=2 vs max_colors=3 for the strip case ... PY`
+    - Output:
+      - `{'max_colors': 2, 'premerge_regions': 1, 'adjacent_pair': False, 'output_objects': 1, 'fill_type': 'RadialGradientFill'}`
+      - `{'max_colors': 3, 'premerge_regions': 2, 'adjacent_pair': True, 'output_objects': 1, 'fill_type': 'RadialGradientFill'}`
+  - GREEN: the focused Task 2 pytest file now passes with the hole regression and strengthened merge proof in place.
+- Final focused test run
+  - Command:
+    - `PYTHONPATH=src ./.venv/bin/python -m pytest tests/optimizer/test_faithful.py -q`
+  - Output:
+    - `...                                                                      [100%]`

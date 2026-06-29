@@ -2,12 +2,21 @@ import numpy as np
 
 from vectormark.candidate import LinearGradientFill, RadialGradientFill
 from vectormark.optimizer.faithful import faithful_objects
-from vectormark.pipeline import Options
+from vectormark.pipeline import Options, _segment_image
 
 
 def _disk(h, w, cy, cx, r):
     yy, xx = np.ogrid[:h, :w]
     return ((yy - cy) ** 2 + (xx - cx) ** 2) <= r * r
+
+
+def _touches(mask_a, mask_b):
+    return bool(
+        (mask_a[1:, :] & mask_b[:-1, :]).any()
+        or (mask_a[:-1, :] & mask_b[1:, :]).any()
+        or (mask_a[:, 1:] & mask_b[:, :-1]).any()
+        or (mask_a[:, :-1] & mask_b[:, 1:]).any()
+    )
 
 
 def test_faithful_single_disk_one_object_path():
@@ -23,7 +32,32 @@ def test_faithful_single_disk_one_object_path():
     assert abs(o.flat.area - np.pi * 40**2) / (np.pi * 40**2) < 0.1
 
 
-def test_faithful_gradient_strip_merges_to_one_gradient_object():
+def test_faithful_small_hole_preserves_evenodd_path_and_area():
+    h = w = 160
+    img = np.full((h, w, 3), 255, np.uint8)
+    outer_radius = 45
+    hole_radius = 5
+    outer = _disk(h, w, 80, 80, outer_radius)
+    hole = _disk(h, w, 80, 80, hole_radius)
+    img[outer] = (200, 30, 30)
+    img[hole] = (255, 255, 255)
+
+    objs, masks = faithful_objects(img, Options())
+
+    assert len(objs) == 1
+    obj = objs[0]
+    mask_area = int(masks[obj.id].sum())
+    outer_area = int(outer.sum())
+    expected_hole_area = int(hole.sum())
+
+    assert obj.exact.kind == "path"
+    assert obj.exact.params.get("fill_rule") == "evenodd"
+    assert mask_area == outer_area - expected_hole_area
+    assert abs(obj.flat.area - mask_area) < expected_hole_area
+    assert outer_area - obj.flat.area > expected_hole_area * 0.5
+
+
+def test_faithful_gradient_strip_merges_adjacent_regions_to_one_gradient_object():
     h, w = 80, 120
     img = np.full((h, w, 3), 255, np.uint8)
     xs = np.linspace(0.0, 1.0, 80)
@@ -32,7 +66,18 @@ def test_faithful_gradient_strip_merges_to_one_gradient_object():
     strip = np.round(left[None, :] * (1.0 - xs[:, None]) + right[None, :] * xs[:, None]).astype(np.uint8)
     img[20:60, 20:100] = strip[None, :, :]
 
-    objs, masks = faithful_objects(img, Options(max_colors=2))
+    opt = Options(max_colors=3)
+    _, _, regions = _segment_image(img, opt)
+    non_background_regions = [region for region in regions if region.mask.sum() > 0]
+
+    assert len(non_background_regions) >= 2
+    assert any(
+        _touches(left.mask, right.mask)
+        for i, left in enumerate(non_background_regions)
+        for right in non_background_regions[i + 1:]
+    )
+
+    objs, masks = faithful_objects(img, opt)
 
     assert len(objs) == 1
     assert isinstance(objs[0].fill, (LinearGradientFill, RadialGradientFill))
