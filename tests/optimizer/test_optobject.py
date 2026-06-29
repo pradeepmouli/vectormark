@@ -3,6 +3,7 @@ from shapely.geometry import Polygon
 
 from vectormark.candidate import FlatFill
 from vectormark.fit import Shape
+from vectormark.occlusion import intersection_lens_d
 from vectormark.optimizer.optobject import OptObject, flatten_points, to_polygon
 
 
@@ -16,6 +17,27 @@ def test_to_polygon_path_with_hole():
     d = "M0 0 L40 0 L40 40 L0 40 Z M10 10 L30 10 L30 30 L10 30 Z"
     poly = to_polygon(Shape("path", {"d": d}))
     assert abs(poly.area - (40 * 40 - 20 * 20)) < 4
+
+
+def test_flatten_points_returns_outer_boundary_only_for_multi_subpath_shape():
+    d = "M0 0 L40 0 L40 40 L0 40 Z M10 10 L30 10 L30 30 L10 30 Z"
+    pts = flatten_points(Shape("path", {"d": d}))
+    assert pts == [(0.0, 0.0), (40.0, 0.0), (40.0, 40.0), (0.0, 40.0)]
+
+
+def test_to_polygon_supports_absolute_arc_paths_from_intersection_lens():
+    a = {"cx": 40.0, "cy": 50.0, "r": 24.0}
+    b = {"cx": 60.0, "cy": 50.0, "r": 24.0}
+    d = intersection_lens_d(a, b)
+    assert d is not None
+
+    poly = to_polygon(Shape("path", {"d": d}), samples=64)
+
+    r = a["r"]
+    dist = b["cx"] - a["cx"]
+    theta = 2.0 * np.arccos(dist / (2.0 * r))
+    expected = r * r * (theta - np.sin(theta))
+    assert abs(poly.area - expected) / expected < 0.02
 
 
 def test_optobject_with_exact_refreshes_flat():

@@ -31,3 +31,29 @@ Notes:
 - The implementation follows the exact Task 1 scope and stays additive.
 - No pipeline integration was added.
 - Unrelated untracked workspace files were left untouched.
+
+## Fix after review
+
+What changed:
+- Updated `flatten_points()` to parse absolute SVG subpaths, sample each subpath independently, and return only the outer ring by choosing the sampled ring with the largest polygon area.
+- Added absolute `A` arc sampling support to the optimizer path flattener so existing repo-emitted lens paths can be converted into dense point rings and shapely polygons.
+- Added focused regression tests for outer-boundary-only flattening on a multi-subpath even-odd path and for `A`-arc path polygonization using `intersection_lens_d()`.
+
+RED/GREEN evidence for added failing cases:
+- RED command:
+  - `PYTHONPATH=src ./.venv/bin/python -m pytest tests/optimizer/test_optobject.py -q`
+- RED output:
+  - `..FF.`
+  - `FAILED tests/optimizer/test_optobject.py::test_flatten_points_returns_outer_boundary_only_for_multi_subpath_shape`
+  - `FAILED tests/optimizer/test_optobject.py::test_to_polygon_supports_absolute_arc_paths_from_intersection_lens`
+- GREEN command:
+  - `PYTHONPATH=src ./.venv/bin/python -m pytest tests/optimizer/test_optobject.py -q`
+- GREEN output:
+  - `.....`
+  - `5 passed`
+
+Final focused test run:
+- Command:
+  - `PYTHONPATH=src ./.venv/bin/python -m pytest tests/optimizer/test_optobject.py -q`
+- Output:
+  - `.....                                                                    [100%]`
