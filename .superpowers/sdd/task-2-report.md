@@ -71,3 +71,9 @@ Fix follow-up
     - `PYTHONPATH=src ./.venv/bin/python -m pytest tests/optimizer/test_faithful.py -q`
   - Output:
     - `...                                                                      [100%]`
+
+Review fix
+- Tightened `test_faithful_gradient_strip_merges_adjacent_regions_to_one_gradient_object` so the pre-merge proof only counts segmented regions that overlap the known strip ROI and are not `#FFFFFF` background.
+- The test now explicitly proves there are at least two adjacent non-background strip regions before `faithful_objects()` runs, then keeps the existing assertion that Stage 1 merges them into one gradient-filled object.
+- Final focused test output:
+  - `...                                                                      [100%]`

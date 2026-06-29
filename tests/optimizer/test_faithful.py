@@ -60,21 +60,29 @@ def test_faithful_small_hole_preserves_evenodd_path_and_area():
 def test_faithful_gradient_strip_merges_adjacent_regions_to_one_gradient_object():
     h, w = 80, 120
     img = np.full((h, w, 3), 255, np.uint8)
+    strip_y0, strip_y1 = 20, 60
+    strip_x0, strip_x1 = 20, 100
     xs = np.linspace(0.0, 1.0, 80)
     left = np.array([220.0, 40.0, 40.0])
     right = np.array([40.0, 40.0, 220.0])
     strip = np.round(left[None, :] * (1.0 - xs[:, None]) + right[None, :] * xs[:, None]).astype(np.uint8)
-    img[20:60, 20:100] = strip[None, :, :]
+    img[strip_y0:strip_y1, strip_x0:strip_x1] = strip[None, :, :]
 
     opt = Options(max_colors=3)
     _, _, regions = _segment_image(img, opt)
-    non_background_regions = [region for region in regions if region.mask.sum() > 0]
+    strip_mask = np.zeros((h, w), dtype=bool)
+    strip_mask[strip_y0:strip_y1, strip_x0:strip_x1] = True
+    strip_regions = [
+        region
+        for region in regions
+        if region.color_hex != "#FFFFFF" and (region.mask & strip_mask).any()
+    ]
 
-    assert len(non_background_regions) >= 2
+    assert len(strip_regions) >= 2
     assert any(
         _touches(left.mask, right.mask)
-        for i, left in enumerate(non_background_regions)
-        for right in non_background_regions[i + 1:]
+        for i, left in enumerate(strip_regions)
+        for right in strip_regions[i + 1:]
     )
 
     objs, masks = faithful_objects(img, opt)
