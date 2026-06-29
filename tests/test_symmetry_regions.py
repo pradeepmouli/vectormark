@@ -2,6 +2,7 @@ import numpy as np
 from vectormark.symmetry import Axis2D, _perimeter, reflection_off_count
 from vectormark.symmetry import region_is_self_symmetric, regions_mirror_pair, K_BAND
 from vectormark.symmetry import propose_axes
+from vectormark.symmetry import cluster_axes, AxisProposal
 from vectormark.types import Region
 from scipy import ndimage as ndi
 
@@ -69,3 +70,14 @@ def test_propose_axes_finds_pair_bisector():
     right = np.zeros((80, 120), bool); right[30:50, 85:100] = True   # mirror about x=60
     props = propose_axes([_region(left, 1), _region(right, 2)])
     assert any(abs(p.theta - np.pi / 2) < 0.2 and abs(p.cx - 60) < 3 for p in props)
+
+
+def test_cluster_merges_near_duplicates_and_ranks_by_weight():
+    props = [
+        AxisProposal(np.pi/2, 60, 50, 100), AxisProposal(np.pi/2 + 0.02, 61, 50, 100),  # vertical, heavy
+        AxisProposal(0.0, 60, 50, 30),                                                   # horizontal, light
+    ]
+    axes = cluster_axes(props)
+    assert len(axes) == 2
+    (a0, w0), (a1, w1) = axes
+    assert w0 > w1 and abs(a0.theta - np.pi/2) < 0.05    # heaviest first == vertical

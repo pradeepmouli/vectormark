@@ -101,6 +101,36 @@ def propose_axes(regions, *, theta_steps: int = 12):
     return props
 
 
+def _offset(theta, cx, cy):
+    return cx * np.sin(theta) - cy * np.cos(theta)
+
+
+def cluster_axes(proposals, *, d_theta: float = 0.09, d_offset: float = 2.0, min_weight: int = 1):
+    items = sorted(proposals, key=lambda p: (p.theta, _offset(p.theta, p.cx, p.cy)))
+    clusters: list[list[AxisProposal]] = []
+    for p in items:
+        po = _offset(p.theta, p.cx, p.cy)
+        for c in clusters:
+            q = c[0]
+            if abs(p.theta - q.theta) <= d_theta and abs(po - _offset(q.theta, q.cx, q.cy)) <= d_offset:
+                c.append(p)
+                break
+        else:
+            clusters.append([p])
+    out = []
+    for c in clusters:
+        w = float(sum(p.weight for p in c))
+        if w < min_weight:
+            continue
+        tw = sum(p.weight for p in c)
+        theta = float(sum(p.theta * p.weight for p in c) / tw)
+        cx = float(sum(p.cx * p.weight for p in c) / tw)
+        cy = float(sum(p.cy * p.weight for p in c) / tw)
+        out.append((Axis2D(theta, cx, cy), w))
+    out.sort(key=lambda aw: (-aw[1], aw[0].theta, _offset(*aw[0])))
+    return out
+
+
 # One tolerance for "is this bilaterally symmetric?", shared by every acceptance site
 # so they cannot disagree. It is a reflection *mismatch* fraction: a shape counts as
 # symmetric about an axis when at most SYM_TOL of it fails to overlap its reflection
