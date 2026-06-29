@@ -452,55 +452,81 @@ def _render_body(
         _comp_ys = np.nonzero(silhouette)[0]
         _gy_min = float(_comp_ys.min()) if _comp_ys.size else 0.0
         _gy_max = float(_comp_ys.max()) if _comp_ys.size else float(h - 1)
-        for _g in _comp_groups:
-            _primary: Axis2D | None = _g.axes[0] if _g.axes else None
-            for _r in _g.straddlers:
+        # Pick the dominant symmetric group: the group with the largest total pixel area
+        # of its straddlers + pair members.  Only this group drives reconstruct_scene —
+        # folding ALL detected groups about one axis mixes per-component axes and
+        # mangles secondary shapes (e.g. text glyphs folded about the radish body axis).
+        # Regions belonging to non-dominant groups are treated as loners and fit
+        # faithfully.  Groups whose straddlers+pairs are empty (all-loner groups)
+        # are excluded from contention.
+        def _sym_area(g) -> int:
+            return (sum(r.area for r in g.straddlers)
+                    + sum(a.area + b.area for a, b in g.pairs))
+
+        _dominant_group = max(
+            (_g for _g in _comp_groups if _sym_area(_g) > 0),
+            key=_sym_area,
+            default=None,
+        )
+        _primary: Axis2D | None = (
+            _dominant_group.axes[0]
+            if _dominant_group is not None and _dominant_group.axes
+            else None
+        )
+
+        # Populate role/axis lookups from dominant group only.
+        # Regions not in the dominant group implicitly stay as loners
+        # (absent from _comp_region_role → fallback "loner" later).
+        if _dominant_group is not None:
+            for _r in _dominant_group.straddlers:
                 _comp_region_axis[_r.label] = _primary
                 _comp_region_role[_r.label] = "straddler"
-            for _a, _b in _g.pairs:
+            for _a, _b in _dominant_group.pairs:
                 _comp_region_axis[_a.label] = _primary
                 _comp_region_axis[_b.label] = _primary
                 _comp_region_role[_a.label] = "pair"
                 _comp_region_role[_b.label] = "pair"
                 _comp_pair_partner[_a.label] = _b.label
                 _comp_pair_partner[_b.label] = _a.label
-            for _r in _g.loners:
+            for _r in _dominant_group.loners:
                 _comp_region_role[_r.label] = "loner"
-            # Emit one AxisLine per group (primary axis only).  A disk is symmetric
-            # about 12 candidate axes; only the first (highest-weight) is meaningful
-            # for display and is what the report consumer expects.
-            if _primary is not None:
-                if abs(_primary.theta - np.pi / 2) < 0.05:
-                    frame_axes.append(AxisLine(float(_primary.cx), _gy_min, float(_primary.cx), _gy_max))
-                else:
-                    _dxax, _dyax = np.cos(_primary.theta), np.sin(_primary.theta)
-                    frame_axes.append(AxisLine(
-                        _primary.cx - _SEG * _dxax, _primary.cy - _SEG * _dyax,
-                        _primary.cx + _SEG * _dxax, _primary.cy + _SEG * _dyax,
-                    ))
-                # Approx weight = total pixel area of all group members.
-                _group_weight = (
-                    sum(r.area for r in _g.straddlers)
-                    + sum(a.area + b.area for a, b in _g.pairs)
-                    + sum(r.area for r in _g.loners)
-                )
-                _diag_axis_info.append({
-                    "theta": float(_primary.theta),
-                    "cx": float(_primary.cx),
-                    "cy": float(_primary.cy),
-                    "weight": float(_group_weight),
-                    "primary": True,
-                })
-            # Accumulate per-region axis + partner for structured diagnostics.
-            for _r in _g.straddlers:
+
+        # Emit one AxisLine per component (dominant group primary only).
+        # A disk has 12 candidate axes; only the highest-weight primary is meaningful.
+        if _primary is not None:
+            if abs(_primary.theta - np.pi / 2) < 0.05:
+                frame_axes.append(AxisLine(float(_primary.cx), _gy_min, float(_primary.cx), _gy_max))
+            else:
+                _dxax, _dyax = np.cos(_primary.theta), np.sin(_primary.theta)
+                frame_axes.append(AxisLine(
+                    _primary.cx - _SEG * _dxax, _primary.cy - _SEG * _dyax,
+                    _primary.cx + _SEG * _dxax, _primary.cy + _SEG * _dyax,
+                ))
+            # Approx weight = total pixel area of dominant group members.
+            _group_weight = float(
+                sum(r.area for r in _dominant_group.straddlers)
+                + sum(a.area + b.area for a, b in _dominant_group.pairs)
+                + sum(r.area for r in _dominant_group.loners)
+            )
+            _diag_axis_info.append({
+                "theta": float(_primary.theta),
+                "cx": float(_primary.cx),
+                "cy": float(_primary.cy),
+                "weight": _group_weight,
+                "primary": True,
+            })
+
+        # Diagnostics: axis/partner for dominant group members; non-dominant → None.
+        if _dominant_group is not None:
+            for _r in _dominant_group.straddlers:
                 _diag_region_axis[_r.label] = _primary
                 _diag_region_partner[_r.label] = None
-            for _a, _b in _g.pairs:
+            for _a, _b in _dominant_group.pairs:
                 _diag_region_axis[_a.label] = _primary
                 _diag_region_axis[_b.label] = _primary
                 _diag_region_partner[_a.label] = _b.label
                 _diag_region_partner[_b.label] = _a.label
-            for _r in _g.loners:
+            for _r in _dominant_group.loners:
                 _diag_region_axis[_r.label] = None
                 _diag_region_partner[_r.label] = None
 
