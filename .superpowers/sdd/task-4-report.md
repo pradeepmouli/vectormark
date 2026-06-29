@@ -57,3 +57,13 @@ Final verification
 
 Concern status
 - Previous concern resolved: multi-id proposals can no longer introduce brand-new geometry without a coverage gate.
+
+Task 4 aliasing fix
+- Tightened replacement matching so an emitted id is only treated as a matched original when that id is part of the proposal's consumed `obj_ids`.
+- Rejected proposals before mutation when any replacement id aliases a live object id that is still present in `current_objects` but is not consumed by that proposal.
+- Added a regression with starting ids `1, 2, 3` that proposes `Proposal((1, 2), [replacement_with_id_3])` and verifies a later pass still sees unchanged ids and masks for `1`, `2`, and `3`.
+
+Final test output
+- `PYTHONPATH=src ./.venv/bin/python -m pytest tests/optimizer/test_framework.py -q`
+  - Result:
+    `.....                                                                    [100%]`

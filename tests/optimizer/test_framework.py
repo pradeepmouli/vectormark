@@ -99,3 +99,35 @@ def test_framework_accepts_multi_id_new_id_with_union_coverage():
 
     assert [obj.id for obj in out] == [9]
     assert out[0].exact.params["w"] == 19.0
+
+
+def test_framework_rejects_replacement_id_aliasing_live_object():
+    objs = [
+        _rect_obj(1, 10, 10, x=0, y=0),
+        _rect_obj(2, 10, 10, x=10, y=0),
+        _rect_obj(3, 5, 5, x=0, y=10),
+    ]
+    masks = {
+        1: np.zeros((20, 20), bool),
+        2: np.zeros((20, 20), bool),
+        3: np.zeros((20, 20), bool),
+    }
+    masks[1][0:10, 0:10] = True
+    masks[2][0:10, 10:20] = True
+    masks[3][10:15, 0:5] = True
+    original_masks = {obj_id: mask.copy() for obj_id, mask in masks.items()}
+
+    def bad_pass(os, ms):
+        return [Proposal((1, 2), [_rect_obj(3, 20, 10, x=0, y=0)])]
+
+    def verify_unchanged(os, ms):
+        assert [obj.id for obj in os] == [1, 2, 3]
+        for obj_id in (1, 2, 3):
+            assert np.array_equal(ms[obj_id], original_masks[obj_id])
+        return []
+
+    out = optimize(objs, masks, [bad_pass, verify_unchanged])
+
+    assert [obj.id for obj in out] == [1, 2, 3]
+    for obj_id in (1, 2, 3):
+        assert np.array_equal(masks[obj_id], original_masks[obj_id])

@@ -41,7 +41,7 @@ def _matched_original(
     originals: dict[int, OptObject],
     replacement: OptObject,
 ) -> OptObject | None:
-    if replacement.id in originals:
+    if replacement.id in proposal_ids and replacement.id in originals:
         return originals[replacement.id]
     if len(proposal_ids) == 1:
         return originals[proposal_ids[0]]
@@ -88,6 +88,11 @@ def optimize(
 
             original_by_id = {obj.id: obj for obj in current_objects}
             if any(obj_id not in original_by_id or obj_id not in current_masks for obj_id in proposal_ids):
+                continue
+            if any(
+                replacement.id in original_by_id and replacement.id not in proposal_ids
+                for replacement in proposal.new_objects
+            ):
                 continue
 
             union_mask = _union_masks(current_masks, proposal_ids)
