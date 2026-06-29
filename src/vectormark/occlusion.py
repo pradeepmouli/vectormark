@@ -48,9 +48,13 @@ def label_boundary(
     contour = contours[contour_index]
     if not others:
         return contour, np.zeros(len(contour), bool)
-    near = np.zeros_like(region.mask)
+    # Union all other masks first, then dilate once: dilation distributes over union
+    # (Minkowski sum identity), so (dil A | dil B) == dil(A | B) — identical bits,
+    # one morphology pass instead of len(others).
+    others_union = np.zeros_like(region.mask)
     for o in others:
-        near |= binary_dilation(o.mask, iterations=reach)
+        others_union |= o.mask
+    near = binary_dilation(others_union, iterations=reach)
     h, w = region.mask.shape
     xs = np.clip(np.rint(contour[:, 0]).astype(int), 0, w - 1)
     ys = np.clip(np.rint(contour[:, 1]).astype(int), 0, h - 1)
@@ -228,14 +232,19 @@ def complete_primitive(
 def complete_annulus(
     region: Region, others: list[Region], *, max_residual: float, min_arc_deg: float,
     concentric_tol: float,
+    outer_boundary: tuple[np.ndarray, np.ndarray] | None = None,
 ) -> dict | None:
     """Fit an annulus (two concentric circles) from a ring fragment's outer and inner
     own arcs. Returns {"kind":"annulus","params":{cx,cy,r_outer,r_inner}} or None when
     the region has no hole, either circle can't be fit, the radii don't nest, or the
-    centres aren't concentric within `concentric_tol`."""
+    centres aren't concentric within `concentric_tol`.
+
+    `outer_boundary` optionally supplies an already-computed (contour, seam) for
+    contour_index=0 so it isn't recomputed when the caller already holds it."""
     if len(region_contours(region.mask)) < 2:
         return None                                       # no hole -> not a ring
-    outer_c, outer_seam = label_boundary(region, others, contour_index=0)
+    outer_c, outer_seam = (outer_boundary if outer_boundary is not None
+                           else label_boundary(region, others, contour_index=0))
     inner_c, inner_seam = label_boundary(region, others, contour_index=1)
     outer = _fit_circle(outer_c, outer_seam, max_residual=max_residual, min_arc_deg=min_arc_deg)
     inner = _fit_circle(inner_c, inner_seam, max_residual=max_residual, min_arc_deg=min_arc_deg)
@@ -339,12 +348,16 @@ def complete_polygon(
 def _complete_member(region: Region, others: list[Region]) -> dict | None:
     """Complete a group member: annulus if it has a hole, else circle/ellipse, else a
     convex polygon. The curved fitters run first (they reject straight edges), so only
-    genuinely polygonal fragments reach complete_polygon."""
+    genuinely polygonal fragments reach complete_polygon.
+
+    The outer boundary (contour_index=0) is computed once and forwarded to both
+    complete_annulus and complete_polygon so label_boundary isn't called twice."""
+    contour, seam = label_boundary(region, others)        # outer boundary (contour_index=0)
     ann = complete_annulus(region, others, max_residual=_MAX_RESIDUAL,
-                           min_arc_deg=_MIN_ARC_DEG, concentric_tol=_CONCENTRIC_TOL)
+                           min_arc_deg=_MIN_ARC_DEG, concentric_tol=_CONCENTRIC_TOL,
+                           outer_boundary=(contour, seam))
     if ann is not None:
         return ann
-    contour, seam = label_boundary(region, others)
     prim = complete_primitive(contour, seam, max_residual=_MAX_RESIDUAL, min_arc_deg=_MIN_ARC_DEG)
     if prim is not None:
         return prim
