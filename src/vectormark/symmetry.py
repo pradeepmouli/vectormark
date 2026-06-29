@@ -15,6 +15,12 @@ from .types import Axis, Region
 # about an axis their apex misses, splitting the apex into a fork.
 SYM_TOL = 0.10
 
+# False straddlers (icloud ~0.904, telegram ~0.917) sit well below this threshold;
+# genuine self-symmetric marks (gdrive ~0.995, appstore ~0.966) sit at or above it.
+# Half-mirroring a SINGLE region erases its real asymmetry, so the straddle gate needs
+# a stricter bar than the pair gate (which matches two genuine mirror twins).
+STRADDLE_MIN_IOU = 0.96
+
 
 def _reflect_cols(mask: np.ndarray, axis_x: float) -> np.ndarray:
     """Reflect a boolean mask across the vertical line x = axis_x (nearest col)."""
@@ -119,7 +125,8 @@ def _iou(a: np.ndarray, b: np.ndarray) -> float:
 
 def classify_regions(
     regions: list[Region], axis: Axis, *, pair_iou: float = 1.0 - SYM_TOL,
-    straddle_iou: float = 1.0 - SYM_TOL,
+    straddle_iou: float = STRADDLE_MIN_IOU,
+    diagnostics: list | None = None,
 ) -> tuple[list[Region], list[tuple[Region, Region]], list[Region]]:
     """Split regions into self-symmetric straddlers, mirror pairs, and lone
     asymmetric leftovers.
@@ -129,13 +136,13 @@ def classify_regions(
     `<use>`-mirrored, and a loner is fit as-is with no symmetry (forcing the
     half-outline mirror onto a genuinely asymmetric region would distort it).
 
-    Both the straddle gate and the pair gate use the SAME symmetry bar `detect_axis`
-    uses (reflection IoU >= 1 - SYM_TOL). Loosening either admits coincidental
-    matches: a near-symmetric pointed region forks under half-mirror, and two
-    merely-similar regions (e.g. a "B" and an "R") get `<use>`-mirrored — substituting
-    one with the mirror of the other. Below the bar, both fall through to loners
-    (fit as-is) instead. (Corpus check: genuine mirror-twin pairs score IoU >= 0.96;
-    false pairs sit at <= 0.74, so the bar cleanly separates them.)"""
+    The straddle gate uses a STRICTER bar (STRADDLE_MIN_IOU = 0.96) than the pair
+    gate (1 - SYM_TOL = 0.90). Half-mirroring a single region erases its real
+    asymmetry; false straddlers (icloud ~0.90, telegram ~0.917) fall below 0.96.
+    The pair gate is looser because misclassifying a pair just shows the wrong
+    region mirrored, which is less destructive than erasing asymmetry. Below either
+    bar, regions fall through to loners (fit as-is). (Corpus check: genuine
+    mirror-twin pairs score IoU >= 0.96; false pairs sit at <= 0.74.)"""
     straddlers: list[Region] = []
     pairs: list[tuple[Region, Region]] = []
     loners: list[Region] = []
@@ -144,9 +151,12 @@ def classify_regions(
         if r.label in used:
             continue
         self_refl = _reflect_cols(r.mask, axis.x)
-        if _iou(r.mask, self_refl) >= straddle_iou:
+        self_iou = _iou(r.mask, self_refl)
+        if self_iou >= straddle_iou:
             straddlers.append(r)
             used.add(r.label)
+            if diagnostics is not None:
+                diagnostics.append((r.label, round(float(self_iou), 4), "straddler"))
             continue
         # find a partner whose mask matches r's reflection
         partner = None
@@ -163,7 +173,13 @@ def classify_regions(
                 canon, mirror = partner, r
             pairs.append((canon, mirror))
             used.update({r.label, partner.label})
+            if diagnostics is not None:
+                diagnostics.append((r.label, round(float(self_iou), 4), "pair"))
+                partner_refl = _reflect_cols(partner.mask, axis.x)
+                diagnostics.append((partner.label, round(float(_iou(partner.mask, partner_refl)), 4), "pair"))
         else:
             loners.append(r)  # asymmetric and unpaired: fit as-is, no forced mirror
             used.add(r.label)
+            if diagnostics is not None:
+                diagnostics.append((r.label, round(float(self_iou), 4), "loner"))
     return straddlers, pairs, loners

@@ -48,6 +48,9 @@ class Options:
     corner_radius: float | None = None  # shared fillet radius; None = auto from geometry
     fidelity_tol: float = 0.06        # selector's render-ΔE gate (slice 4a)
     selection: SelectionPolicy | None = None  # manual candidate selection (slice 4b)
+    sym_tol: float = 0.10        # mirror-axis detection tolerance (reflection mismatch)
+    straddle_iou: float = 0.96   # min self-reflection IoU to force a SINGLE region symmetric
+    pair_iou: float = 0.90       # min IoU to treat two regions as a mirror pair
 
 
 def _segment_image(arr: np.ndarray, opt: Options) -> tuple[int, int, list[Region]]:
@@ -84,17 +87,19 @@ class AxisLine:
 class IdealizeReport:
     """What the pipeline actually emitted for one idealize() run: the histogram of
     fitter strategies the scorer chose per region, the gradient-fill count, the total
-    emitted element count, and the detected mirror axes (one segment per component
-    with a vertical mirror, in output-frame coords). Diagnostic annotation."""
+    emitted element count, the detected mirror axes (one segment per component
+    with a vertical mirror, in output-frame coords), and per-region symmetry
+    diagnostics. Diagnostic annotation."""
 
     strategies: Mapping[str, int]
     gradients: int
     elements: int
     axes: tuple[AxisLine, ...]
+    symmetry: tuple  # per-region (label, self_iou, decision) entries from classify_regions
 
     @staticmethod
     def empty() -> "IdealizeReport":
-        return IdealizeReport(types.MappingProxyType({}), 0, 0, ())
+        return IdealizeReport(types.MappingProxyType({}), 0, 0, (), ())
 
 
 def _map_axis(a: AxisLine, affine: Affine) -> AxisLine:
@@ -103,7 +108,7 @@ def _map_axis(a: AxisLine, affine: Affine) -> AxisLine:
     return AxisLine(x1, y1, x2, y2)
 
 
-def _build_report(cands: list[Candidate], axes: list[AxisLine]) -> IdealizeReport:
+def _build_report(cands: list[Candidate], axes: list[AxisLine], sym_diags: list | None = None) -> IdealizeReport:
     strategies: dict[str, int] = {}
     gradients = 0
     for c in cands:
@@ -111,7 +116,13 @@ def _build_report(cands: list[Candidate], axes: list[AxisLine]) -> IdealizeRepor
             gradients += 1
         if c.strategy is not None:                 # None for occlusion / lens
             strategies[c.strategy] = strategies.get(c.strategy, 0) + 1
-    return IdealizeReport(types.MappingProxyType(dict(strategies)), gradients, len(cands), tuple(axes))
+    return IdealizeReport(
+        types.MappingProxyType(dict(strategies)),
+        gradients,
+        len(cands),
+        tuple(axes),
+        tuple(sym_diags) if sym_diags is not None else (),
+    )
 
 
 def build_candidates(
@@ -166,7 +177,7 @@ def build_candidates(
 def _render_body(
     w: int, h: int, regions: list[Region], opt: Options, *,
     bake: Affine | None = None, rgb: np.ndarray | None = None,
-) -> tuple[list[str], list[str], list[Candidate], list[AxisLine]]:
+) -> tuple[list[str], list[str], list[Candidate], list[AxisLine], list]:
     """Decompose regions into gutter-separated components, then per component detect
     symmetry, reconstruct occlusion, and fit regions — accumulating candidates that the
     single emit loop renders in z-order with globally continuous sN ids. Operates
@@ -180,9 +191,10 @@ def _render_body(
     defs: list[str] = []
     cands: list[Candidate] = []
     frame_axes: list[AxisLine] = []
+    sym_diags: list = []
     for comp in components:
         silhouette = np.any([r.mask for r in comp], axis=0)
-        axis = None if opt.no_symmetry else detect_axis(silhouette)
+        axis = None if opt.no_symmetry else detect_axis(silhouette, tol=opt.sym_tol)
         if axis is not None:
             ys = np.nonzero(silhouette)[0]
             frame_axes.append(AxisLine(float(axis.x), float(ys.min()), float(axis.x), float(ys.max())))
@@ -206,7 +218,12 @@ def _render_body(
             fills = {}
 
         if axis is not None:
-            straddlers, pairs, loners = classify_regions(comp, axis)
+            straddlers, pairs, loners = classify_regions(
+                comp, axis,
+                straddle_iou=opt.straddle_iou,
+                pair_iou=opt.pair_iou,
+                diagnostics=sym_diags,
+            )
         else:
             straddlers, pairs, loners = list(comp), [], []
 
@@ -249,7 +266,7 @@ def _render_body(
                 body.append(mirror_use(elem_id, cand.mirror))
         eid += 1
 
-    return body, defs, cands, frame_axes
+    return body, defs, cands, frame_axes, sym_diags
 
 
 def _rectify_affine(rho: float, w0: int, h0: int, rw: int, rh: int) -> Affine:
@@ -276,31 +293,39 @@ def _bake_gradient_geometry(geom: dict, kind: str, bake: Affine) -> dict:
     return {"cx": cx, "cy": cy, "r": geom["r"]}
 
 
-def _idealize_rectified(arr: np.ndarray, opt: Options, rho: float, w0: int, h0: int) -> tuple[str | None, list[Candidate], list[AxisLine]]:
+def _idealize_rectified(arr: np.ndarray, opt: Options, rho: float, w0: int, h0: int) -> tuple[str | None, list[Candidate], list[AxisLine], list]:
     """Rotate the image so the tilted mirror axis is vertical and idealize there.
     Non-flatten output keeps the symmetry (`<use>` mirror about the vertical axis)
     and is wrapped in one inverse-rotation `<g>`; flatten output bakes that same
-    rotation into the path coordinates so no transform survives. Returns (None, [], [])
+    rotation into the path coordinates so no transform survives. Returns (None, [], [], [])
     (so the caller falls back to upright) if the rectified frame yields no usable
     regions or its vertical symmetry no longer registers."""
     rot = ndi.rotate(arr.astype(float), -rho, reshape=True, order=1, cval=255.0)
     rot = np.clip(rot, 0.0, 255.0).astype(np.uint8)
     rw, rh, regions = _segment_image(rot, opt)
     if not regions:
-        return None, [], []
-    if detect_axis(np.any([r.mask for r in regions], axis=0)) is None:
-        return None, [], []
+        return None, [], [], []
+    if detect_axis(np.any([r.mask for r in regions], axis=0), tol=opt.sym_tol) is None:
+        return None, [], [], []
     affine = _rectify_affine(rho, w0, h0, rw, rh)
+    bake = affine if opt.flatten else None
+    body, defs, cands, frame_axes, sym_diags = _render_body(rw, rh, regions, opt, bake=bake, rgb=rot)
+    # Bail unless the rectified frame actually exploited mirror symmetry (some region
+    # classified as a straddler or pair). A tilted silhouette can register a vertical
+    # axis yet have every region fall below the straddle gate (e.g. telegram's lone
+    # paper-plane at IoU 0.917 < 0.96, classified a loner): then the rotated re-fit only
+    # adds resampling churn versus the upright idealization, so fall back to upright
+    # instead of committing a distorted result.
+    if not any(decision in ("straddler", "pair") for _, _, decision in sym_diags):
+        return None, [], [], []
     if opt.flatten:
-        body, defs, cands, frame_axes = _render_body(rw, rh, regions, opt, bake=affine, rgb=rot)
         doc = render_svg_doc(w0, h0, body, defs)
     else:
-        body, defs, cands, frame_axes = _render_body(rw, rh, regions, opt, rgb=rot)
         wrap = (f'<g transform="translate({_fmt(w0 / 2)} {_fmt(h0 / 2)}) '
                 f'rotate({_fmt(round(-rho, 3))}) translate({_fmt(-rw / 2)} {_fmt(-rh / 2)})">')
         doc = render_svg_doc(w0, h0, [wrap, *body, "</g>"], defs)
     axes = [_map_axis(a, affine) for a in frame_axes]
-    return doc, cands, axes
+    return doc, cands, axes, sym_diags
 
 
 def _flatten_on_white(im: Image.Image) -> np.ndarray:
@@ -331,20 +356,20 @@ def idealize(image, *, options: Options | None = None, report: bool = False) -> 
 
     w, h, regions = _segment_image(arr, opt)
     if not regions:
-        svg, cands, axes = render_svg_doc(w, h, []), [], []
+        svg, cands, axes, sym_diags = render_svg_doc(w, h, []), [], [], []
     else:
-        svg, cands, axes = None, [], []
+        svg, cands, axes, sym_diags = None, [], [], []
         # Any-axis symmetry: rectify a tilted mirror upright, idealize there, wrap back.
         if not opt.no_symmetry:
             silhouette = np.any([r.mask for r in regions], axis=0)
-            if detect_axis(silhouette) is None:
-                rho = detect_symmetry_rotation(silhouette)
+            if detect_axis(silhouette, tol=opt.sym_tol) is None:
+                rho = detect_symmetry_rotation(silhouette, tol=opt.sym_tol)
                 if rho is not None:
-                    rectified, rcands, raxes = _idealize_rectified(arr, opt, rho, w0, h0)
+                    rectified, rcands, raxes, rsym_diags = _idealize_rectified(arr, opt, rho, w0, h0)
                     if rectified is not None:
-                        svg, cands, axes = rectified, rcands, raxes
+                        svg, cands, axes, sym_diags = rectified, rcands, raxes, rsym_diags
         if svg is None:
-            body, defs, cands, axes = _render_body(w, h, regions, opt, rgb=arr)
+            body, defs, cands, axes, sym_diags = _render_body(w, h, regions, opt, rgb=arr)
             svg = render_svg_doc(w, h, body, defs)
 
-    return (svg, _build_report(cands, axes)) if report else svg
+    return (svg, _build_report(cands, axes, sym_diags)) if report else svg
