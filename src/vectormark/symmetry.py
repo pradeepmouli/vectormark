@@ -127,11 +127,8 @@ def cluster_axes(proposals, *, d_theta: float = 0.09, d_offset: float = 2.0, min
         cx = float(sum(p.cx * p.weight for p in c) / tw)
         cy = float(sum(p.cy * p.weight for p in c) / tw)
         out.append((Axis2D(theta, cx, cy), w))
-    # Prefer larger theta (more-vertical) when weights tie: avoids horizontal pair-bisectors
-    # outranking vertical self-symmetry axes of equal weight. Brief writes `theta` ascending,
-    # but that causes the horizontal axis to beat the vertical one when a pair-bisector
-    # coincidentally clusters with a straddler self-axis at the same offset.
-    out.sort(key=lambda aw: (-aw[1], -aw[0].theta, _offset(*aw[0])))
+    # equal support -> prefer the axis closest to vertical (canonical primary), then deterministic
+    out.sort(key=lambda aw: (-aw[1], abs(aw[0].theta - np.pi / 2), aw[0].theta, _offset(*aw[0])))
     return out
 
 
