@@ -2,10 +2,37 @@
 
 from __future__ import annotations
 
+from collections import namedtuple
+
 import numpy as np
 from scipy import ndimage as ndi
 
 from .types import Axis, Region
+
+Axis2D = namedtuple("Axis2D", "theta cx cy")
+
+
+def _perimeter(mask: np.ndarray) -> int:
+    """Boundary-pixel count: the one-pixel ring of `mask` minus its erosion."""
+    if not mask.any():
+        return 0
+    return int((mask & ~ndi.binary_erosion(mask)).sum())
+
+
+def reflection_off_count(fg_xy, axis: Axis2D, dist: np.ndarray, *, tol_px: float = 1.5) -> int:
+    """Count foreground points whose reflection across `axis` lands farther than
+    `tol_px` outside the shape (background distance transform `dist`). Resampling
+    free: reflects coordinates, looks up the distance transform — no raster rotate."""
+    xs, ys = fg_xy
+    dx, dy = np.cos(axis.theta), np.sin(axis.theta)
+    vx, vy = xs - axis.cx, ys - axis.cy
+    t = vx * dx + vy * dy
+    rx = axis.cx + (2.0 * t * dx - vx)
+    ry = axis.cy + (2.0 * t * dy - vy)
+    h, w = dist.shape
+    ri = np.clip(np.rint(ry).astype(int), 0, h - 1)
+    ci = np.clip(np.rint(rx).astype(int), 0, w - 1)
+    return int((dist[ri, ci] > tol_px).sum())
 
 # One tolerance for "is this bilaterally symmetric?", shared by every acceptance site
 # so they cannot disagree. It is a reflection *mismatch* fraction: a shape counts as
