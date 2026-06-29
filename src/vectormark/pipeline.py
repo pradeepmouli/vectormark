@@ -57,8 +57,10 @@ class Options:
     sym_tol: float = 0.10        # mirror-axis detection tolerance (reflection mismatch)
     straddle_iou: float = 0.96   # min self-reflection IoU to force a SINGLE region symmetric
     pair_iou: float = 0.90       # min IoU to treat two regions as a mirror pair
-    working_max_dim: int | None = 768  # downscale inputs whose longest side exceeds this
-                                       # (LANCZOS) before segmentation; None disables.
+    working_max_dim: int | None = None  # downscale inputs whose longest side exceeds this
+                                        # (LANCZOS) before segmentation; None = off (default).
+                                        # Set e.g. working_max_dim=768 for noisy AI-raster inputs
+                                        # where high resolution amplifies quantization noise.
 
 
 COVERAGE_HOLE_TOL = 0.05   # if >5% of a region's eroded interior would fall below the 0.5

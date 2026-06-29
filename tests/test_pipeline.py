@@ -250,6 +250,24 @@ def test_multicomponent_selection_addresses_global_sn():
         idealize(img, options=Options(selection=policy))
 
 
+def test_conditioning_default_off_large_input_full_res():
+    """With working_max_dim=None (new default), a >768 image is vectorized at full resolution."""
+    arr = np.full((200, 1000, 3), 255, dtype=np.uint8)
+    arr[50:150, 100:900] = (30, 100, 220)               # blue rect on white
+    svg = idealize(arr)                                  # Options() → working_max_dim=None
+    assert 'viewBox="0 0 1000 200"' in svg, "large input must use full-res viewBox by default"
+
+
+def test_conditioning_applies_when_explicitly_set():
+    """With working_max_dim explicitly set, a >threshold image is downscaled for vectorization."""
+    arr = np.full((200, 1000, 3), 255, dtype=np.uint8)
+    arr[50:150, 100:900] = (30, 100, 220)
+    svg = idealize(arr, options=Options(working_max_dim=512))
+    # width/height rewritten to original; viewBox reflects conditioned resolution
+    assert 'width="1000" height="200"' in svg
+    assert 'viewBox="0 0 1000 200"' not in svg, "conditioned input must NOT use original viewBox"
+
+
 def test_rgba_file_input_composites_on_white(tmp_path):
     # A semi-transparent block: composited on WHITE, 50%-alpha red becomes pink. PIL's
     # convert("RGB") instead DROPS alpha (keeps the stored RGB), yielding over-saturated
