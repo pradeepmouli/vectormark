@@ -41,6 +41,8 @@ from .types import Axis, Region
 class Options:
     epsilon: float = 1.5          # primitive/polygon recognition tolerance (px)
     max_error: float = 1.0        # Bézier fit tolerance (px)
+    cubic_paths: bool = False     # fit curved runs with cubic (vs quadratic) Béziers;
+                                  # off by default — cubics chase raster-staircase noise.
     max_colors: int = 16
     min_region_fraction: float = 0.02  # drop regions smaller than this × largest region
     flatten: bool = False

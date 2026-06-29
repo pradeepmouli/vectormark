@@ -80,5 +80,8 @@ def test_fit_path_of_dome_uses_curve():
     dome = (((xx - 40) ** 2 / 900 + (yy - 55) ** 2 / 1600) <= 1) & (yy <= 55)
     c = outer_contour(dome)
     shape = fit_path(c, epsilon=1.0, max_error=0.8)
-    # curved top -> inflection-free quadratic arcs (Q), never cubic (C)
+    # curved top -> inflection-free quadratic arcs (Q), never cubic (C) by default
     assert shape.kind == "path" and "Q" in shape.params["d"] and "C" not in shape.params["d"]
+    # opt-in cubic flag flips emission to cubics (C), no quadratics
+    cshape = fit_path(c, epsilon=1.0, max_error=0.8, cubic=True)
+    assert cshape.kind == "path" and "C" in cshape.params["d"] and "Q" not in cshape.params["d"]

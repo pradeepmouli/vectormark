@@ -72,7 +72,7 @@ def generate_geometry_candidates(
                 return [GeomCandidate(HOLED_SYM, Shape("path", {"d": d, "fill_rule": "evenodd"}))]
         # No clean symmetric construction: faithful per-contour fit (even-odd).
         d = " ".join(
-            fit_path(c, epsilon=opt.epsilon, max_error=opt.max_error).params["d"]
+            fit_path(c, epsilon=opt.epsilon, max_error=opt.max_error, cubic=opt.cubic_paths).params["d"]
             for c in contours
         )
         return [GeomCandidate(HOLED_PATH, Shape("path", {"d": d, "fill_rule": "evenodd"}))]
@@ -113,7 +113,7 @@ def generate_geometry_candidates(
         gpoly = recognize_polygon(contour, epsilon=opt.epsilon)
         if gpoly is not None:
             cands.append(GeomCandidate(POLYGON, gpoly))
-        cands.append(GeomCandidate(PATH, fit_path(contour, epsilon=opt.epsilon, max_error=opt.max_error)))
+        cands.append(GeomCandidate(PATH, fit_path(contour, epsilon=opt.epsilon, max_error=opt.max_error, cubic=opt.cubic_paths)))
 
     return cands
 

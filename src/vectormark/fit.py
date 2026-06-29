@@ -8,8 +8,17 @@ import numpy as np
 from shapely.geometry import Polygon
 from skimage.measure import CircleModel, EllipseModel
 
-from ._fitcurve import fit_quadratic_beziers
+from ._fitcurve import fit_cubic_beziers, fit_quadratic_beziers
 from .contour import corner_indices, rdp
+
+# Curved runs are fit with quadratic Béziers by default: a parabola cannot
+# inflect, so it averages the quantization staircase into smooth convex arcs.
+# Cubics (opt-in, see fit_path's `cubic` flag) carry an extra DOF that better
+# represents genuinely complex contours, but on a staircased raster that DOF
+# just chases the noise (rippled/fragmented edges) — they are a complexity
+# tool, not a denoiser. When cubics ARE requested, RDP-denoise each run first
+# at sub-pixel tolerance to collapse the staircase before fitting.
+PATH_DENOISE_EPS = 0.5
 
 
 @dataclass
@@ -109,8 +118,13 @@ def _fmt(v: float) -> str:
     return f"{v:.2f}".rstrip("0").rstrip(".")
 
 
-def fit_path(contour: np.ndarray, *, epsilon: float, max_error: float) -> Shape:
-    """Corner-split the contour; emit lines for straight runs, Béziers otherwise."""
+def fit_path(contour: np.ndarray, *, epsilon: float, max_error: float, cubic: bool = False) -> Shape:
+    """Corner-split the contour; emit lines for straight runs, Béziers otherwise.
+
+    ``cubic=False`` (default) fits each curved run with inflection-free
+    quadratics — robust against the quantization staircase. ``cubic=True``
+    fits denoised cubics instead (for complex contours); see PATH_DENOISE_EPS.
+    """
     pts = np.asarray(contour, dtype=float)
     closed = np.allclose(pts[0], pts[-1])
     ring = pts[:-1] if closed else pts
@@ -131,6 +145,13 @@ def fit_path(contour: np.ndarray, *, epsilon: float, max_error: float) -> Shape:
             continue
         if _segment_is_straight(seg, epsilon):
             d += f"L{_fmt(seg[-1][0])} {_fmt(seg[-1][1])} "
+        elif cubic:
+            run = rdp(seg, PATH_DENOISE_EPS) if len(seg) > 2 else seg
+            for b in fit_cubic_beziers(run, max_error):
+                d += (
+                    f"C{_fmt(b[1][0])} {_fmt(b[1][1])} {_fmt(b[2][0])} {_fmt(b[2][1])} "
+                    f"{_fmt(b[3][0])} {_fmt(b[3][1])} "
+                )
         else:
             for b in fit_quadratic_beziers(seg, max_error):
                 d += f"Q{_fmt(b[1][0])} {_fmt(b[1][1])} {_fmt(b[2][0])} {_fmt(b[2][1])} "

@@ -90,3 +90,155 @@ def _compute_max_error(pts, ctrl, u):
     errs = np.array([np.hypot(*(qbezier(ctrl, uu) - p)) ** 2 for p, uu in zip(pts, u)])
     split = int(errs.argmax())
     return float(errs[split]), max(1, min(split, len(pts) - 2))
+
+
+# --- Inflection-guarded cubic fitting ----------------------------------------
+# A cubic Bézier has up to two interior inflection points (curvature sign
+# changes). We fit each curved run with Schneider's full cubic least-squares,
+# then guard: if the fitted cubic inflects inside (0,1) we split the run at the
+# inflection and refit each half, so every emitted arc stays inflection-free
+# (no S-curve wobble) while still carrying the extra degree of freedom a
+# quadratic lacks on a convex run.
+
+cbezier = lambda ctrl, t: (  # noqa: E731 - cubic Bézier point at t
+    (1 - t) ** 3 * ctrl[0]
+    + 3 * (1 - t) ** 2 * t * ctrl[1]
+    + 3 * (1 - t) * t ** 2 * ctrl[2]
+    + t ** 3 * ctrl[3]
+)
+
+
+def _unit(v):
+    n = float(np.hypot(v[0], v[1]))
+    return v / n if n else np.asarray(v, dtype=float)
+
+
+def _cross(u, v):
+    return float(u[0] * v[1] - u[1] * v[0])
+
+
+def cubic_inflects(ctrl) -> list[float]:
+    """Parameter values t in (0,1) where a planar cubic's curvature changes sign.
+
+    cross(B'(t), B''(t)) is a quadratic in t (the cubic leading term cancels);
+    its real roots in the open interval are the inflection points. At most two.
+    """
+    p0, p1, p2, p3 = (np.asarray(c, dtype=float) for c in ctrl)
+    a, b, c = p1 - p0, p2 - p1, p3 - p2          # first differences of control net
+    # B'(t) ∝ A0 + A1 t + A2 t^2 ; B''(t) ∝ B0 + B1 t  (B1 == A2)
+    a0, a1, a2 = a, 2 * (b - a), a - 2 * b + c
+    b0 = b - a
+    c2 = _cross(a1, a2) + _cross(a2, b0)
+    c1 = _cross(a0, a2) + _cross(a1, b0)
+    c0 = _cross(a0, b0)
+    roots: list[float] = []
+    if abs(c2) < 1e-12:
+        if abs(c1) > 1e-12:
+            t = -c0 / c1
+            if 0.0 < t < 1.0:
+                roots.append(t)
+    else:
+        disc = c1 * c1 - 4 * c2 * c0
+        if disc >= 0:
+            s = disc ** 0.5
+            for t in ((-c1 - s) / (2 * c2), (-c1 + s) / (2 * c2)):
+                if 0.0 < t < 1.0:
+                    roots.append(float(t))
+    return sorted(roots)
+
+
+def fit_cubic_beziers(points: np.ndarray, max_error: float) -> list[np.ndarray]:
+    pts = np.asarray(points, dtype=float)
+    if len(pts) < 2:
+        return []
+    return _fit_cubic(pts, max_error)
+
+
+def _endpoint_tangents(pts):
+    """Robust inward unit tangents at the two endpoints.
+
+    A single-point baseline (``pts[1]-pts[0]``) is fragile on quantization
+    staircases: the first step is often an axis-aligned tread perpendicular to
+    the true edge direction, throwing the control point sideways. Estimate each
+    tangent over a short multi-point baseline instead, which averages the
+    staircase tread out toward the run's true direction.
+    """
+    k = min(3, len(pts) - 1)
+    return _unit(pts[k] - pts[0]), _unit(pts[-1 - k] - pts[-1])
+
+
+def _fit_cubic(pts, error):
+    if len(pts) == 2:
+        d = (pts[1] - pts[0]) / 3.0
+        return [np.array([pts[0], pts[0] + d, pts[1] - d, pts[1]])]
+    t_hat1, t_hat2 = _endpoint_tangents(pts)
+    u = _chord_length_parameterize(pts)
+    ctrl = _generate_cubic(pts, u, t_hat1, t_hat2)
+    max_err, split = _compute_max_error_cubic(pts, ctrl, u)
+    inflects = cubic_inflects(ctrl)
+    if max_err < error and not inflects:
+        return [ctrl]
+    if not inflects and max_err < error * error:
+        for _ in range(20):
+            u = _reparameterize_cubic(pts, u, ctrl)
+            ctrl = _generate_cubic(pts, u, t_hat1, t_hat2)
+            max_err, split = _compute_max_error_cubic(pts, ctrl, u)
+            if max_err < error and not cubic_inflects(ctrl):
+                return [ctrl]
+    if inflects and max_err < error:
+        split = int(np.argmin(np.abs(u - inflects[0])))  # split at the inflection
+    split = max(1, min(split, len(pts) - 2))
+    return _fit_cubic(pts[: split + 1], error) + _fit_cubic(pts[split:], error)
+
+
+def _generate_cubic(pts, u, t_hat1, t_hat2):
+    """Schneider least-squares: solve the two interior control points along the
+    endpoint tangents (Graphics Gems, 1990). Falls back to the Wu/Barsky
+    thirds heuristic when the normal equations are singular or yield a
+    non-positive tangent magnitude."""
+    first, last = pts[0], pts[-1]
+    a1 = (3 * (1 - u) ** 2 * u)[:, None] * t_hat1
+    a2 = (3 * (1 - u) * u ** 2)[:, None] * t_hat2
+    c00 = float((a1 * a1).sum())
+    c01 = float((a1 * a2).sum())
+    c11 = float((a2 * a2).sum())
+    b0 = ((1 - u) ** 3)[:, None] * first
+    b1 = (3 * (1 - u) ** 2 * u)[:, None] * first
+    b2 = (3 * (1 - u) * u ** 2)[:, None] * last
+    b3 = (u ** 3)[:, None] * last
+    tmp = pts - (b0 + b1 + b2 + b3)
+    x0 = float((a1 * tmp).sum())
+    x1 = float((a2 * tmp).sum())
+    det = c00 * c11 - c01 * c01
+    seg_len = float(np.hypot(*(last - first)))
+    eps = 1e-6 * seg_len
+    if abs(det) < 1e-12:
+        alpha_l = alpha_r = seg_len / 3.0
+    else:
+        alpha_l = (x0 * c11 - x1 * c01) / det
+        alpha_r = (c00 * x1 - c01 * x0) / det
+    if alpha_l < eps or alpha_r < eps:
+        alpha_l = alpha_r = seg_len / 3.0
+    return np.array([first, first + t_hat1 * alpha_l, last + t_hat2 * alpha_r, last])
+
+
+def _reparameterize_cubic(pts, u, ctrl):
+    return np.array([_newton_cubic(p, uu, ctrl) for p, uu in zip(pts, u)])
+
+
+def _newton_cubic(p, u, ctrl):
+    d = cbezier(ctrl, u) - p
+    q1 = 3 * (
+        (1 - u) ** 2 * (ctrl[1] - ctrl[0])
+        + 2 * (1 - u) * u * (ctrl[2] - ctrl[1])
+        + u ** 2 * (ctrl[3] - ctrl[2])
+    )
+    q2 = 6 * ((1 - u) * (ctrl[2] - 2 * ctrl[1] + ctrl[0]) + u * (ctrl[3] - 2 * ctrl[2] + ctrl[1]))
+    denom = q1 @ q1 + d @ q2
+    return u if denom == 0 else u - (d @ q1) / denom
+
+
+def _compute_max_error_cubic(pts, ctrl, u):
+    errs = np.array([np.hypot(*(cbezier(ctrl, uu) - p)) ** 2 for p, uu in zip(pts, u)])
+    split = int(errs.argmax())
+    return float(errs[split]), max(1, min(split, len(pts) - 2))
