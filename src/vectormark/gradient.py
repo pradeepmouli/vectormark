@@ -184,21 +184,27 @@ def _fit_linear(pts: np.ndarray, oklab: np.ndarray, rgb: np.ndarray) -> dict | N
     return _linear_model_from_axis(u, pts, rgb)
 
 
-def _model_mean_de_on_points(model: dict, pts: np.ndarray, rgb: np.ndarray) -> float:
-    """Mean OKLab ΔE of a model's rendered colour vs `rgb` at `pts` (footprint pixels)."""
+def _model_mean_de_on_points(model: dict, pts: np.ndarray, rgb: np.ndarray, *,
+                             truth_oklab: np.ndarray | None = None) -> float:
+    """Mean OKLab ΔE of a model's rendered colour vs `rgb` at `pts` (footprint pixels).
+
+    `truth_oklab` optionally supplies the pre-computed `srgb_to_oklab(rgb / 255.0)` so
+    the caller can hoist the invariant transform out of a search loop (bit-identical: same
+    input array, same function). When absent the transform is computed here as before."""
     rendered = _interp_stops_rgb(_model_t(model, pts), model["stops"])
-    return float(np.linalg.norm(srgb_to_oklab(rendered / 255.0) - srgb_to_oklab(rgb / 255.0),
-                                axis=1).mean())
+    truth = truth_oklab if truth_oklab is not None else srgb_to_oklab(rgb / 255.0)
+    return float(np.linalg.norm(srgb_to_oklab(rendered / 255.0) - truth, axis=1).mean())
 
 
-def _search_centers(centers, pts: np.ndarray, rgb: np.ndarray):
+def _search_centers(centers, pts: np.ndarray, rgb: np.ndarray, *,
+                    truth_oklab: np.ndarray | None = None):
     """Lowest-mean-ΔE radial model over candidate centres. Returns (de, model, cx, cy) or None."""
     best = None
     for cx, cy in centers:
         model = _radial_model_from_center(np.array([cx, cy]), pts, rgb)
         if model is None:
             continue
-        de = _model_mean_de_on_points(model, pts, rgb)
+        de = _model_mean_de_on_points(model, pts, rgb, truth_oklab=truth_oklab)
         if best is None or de < best[0]:
             best = (de, model, cx, cy)
     return best
@@ -207,30 +213,31 @@ def _search_centers(centers, pts: np.ndarray, rgb: np.ndarray):
 def _fit_radial_searched(pts: np.ndarray, oklab: np.ndarray, rgb: np.ndarray) -> dict | None:
     """Radial fit via a deterministic centre search (coarse grid over the bbox extended
     +/-50%, then a finer local grid around the best). Beats the principal-axis-extreme
-    heuristic for corner-anchored / clipped fields. `oklab` is unused (kept for a uniform
-    fit signature)."""
+    heuristic for corner-anchored / clipped fields. `oklab` is the pre-computed truth OKLab
+    threaded in from `_best_parametric` to avoid recomputing it on every model eval."""
     xs, ys = pts[:, 0], pts[:, 1]
     x0, x1 = float(xs.min()), float(xs.max())
     y0, y1 = float(ys.min()), float(ys.max())
     gx = np.linspace(x0 - (x1 - x0) * 0.5, x1 + (x1 - x0) * 0.5, 13)
     gy = np.linspace(y0 - (y1 - y0) * 0.5, y1 + (y1 - y0) * 0.5, 13)
-    coarse = _search_centers([(cx, cy) for cx in gx for cy in gy], pts, rgb)
+    coarse = _search_centers([(cx, cy) for cx in gx for cy in gy], pts, rgb, truth_oklab=oklab)
     if coarse is None:
         return None
     _, _, bcx, bcy = coarse
     sx, sy = gx[1] - gx[0], gy[1] - gy[0]               # one coarse step
     rx = np.linspace(bcx - sx, bcx + sx, 7)
     ry = np.linspace(bcy - sy, bcy + sy, 7)
-    fine = _search_centers([(cx, cy) for cx in rx for cy in ry], pts, rgb)
+    fine = _search_centers([(cx, cy) for cx in rx for cy in ry], pts, rgb, truth_oklab=oklab)
     return (fine or coarse)[1]
 
 
 def _fit_linear_searched(pts: np.ndarray, oklab: np.ndarray, rgb: np.ndarray) -> dict | None:
     """Linear fit via an axis-angle search (5° coarse steps, then a finer local sweep).
-    `oklab` is unused (kept for a uniform fit signature)."""
+    `oklab` is the pre-computed truth OKLab from `_best_parametric`, threaded through to
+    avoid recomputing it on every model eval inside the angle search."""
     def at(ang):
         m = _linear_model_from_axis(np.array([np.cos(ang), np.sin(ang)]), pts, rgb)
-        return None if m is None else (_model_mean_de_on_points(m, pts, rgb), m, ang)
+        return None if m is None else (_model_mean_de_on_points(m, pts, rgb, truth_oklab=oklab), m, ang)
     best = None
     for ang in np.linspace(0.0, np.pi, 36, endpoint=False):
         r = at(ang)
@@ -261,7 +268,7 @@ def _best_parametric(mask: np.ndarray, rgb_image: np.ndarray) -> tuple[dict, flo
         model = fit(pts, oklab, rgb)
         if model is None or _stop_span(model["stops"]) < _MIN_STOP_SPAN:
             continue
-        pde = _per_pixel_delta_e(model, ys, xs, rgb_image)
+        pde = _per_pixel_delta_e(model, ys, xs, rgb_image, truth_oklab=oklab)
         mean_de, median_de = float(pde.mean()), float(np.median(pde))
         if best is None or mean_de < best[1]:
             best = (model, mean_de, median_de)
@@ -284,12 +291,16 @@ def _model_t(model: dict, pts: np.ndarray) -> np.ndarray:
     return r.clip(0, 1)
 
 
-def _per_pixel_delta_e(model: dict, ys: np.ndarray, xs: np.ndarray, rgb_image: np.ndarray) -> np.ndarray:
-    """Per-pixel OKLab ΔE between the model's rendered colour and the actual pixel at (ys, xs)."""
+def _per_pixel_delta_e(model: dict, ys: np.ndarray, xs: np.ndarray, rgb_image: np.ndarray, *,
+                       truth_oklab: np.ndarray | None = None) -> np.ndarray:
+    """Per-pixel OKLab ΔE between the model's rendered colour and the actual pixel at (ys, xs).
+
+    `truth_oklab` optionally supplies the pre-computed `srgb_to_oklab(pixels / 255.0)` so
+    the caller can avoid recomputing the invariant transform (bit-identical)."""
     pts = np.column_stack([xs, ys]).astype(float)
     rendered = _interp_stops_rgb(_model_t(model, pts), model["stops"])
-    truth = rgb_image[ys, xs].astype(float)
-    return np.linalg.norm(srgb_to_oklab(rendered / 255.0) - srgb_to_oklab(truth / 255.0), axis=1)
+    truth = truth_oklab if truth_oklab is not None else srgb_to_oklab(rgb_image[ys, xs].astype(float) / 255.0)
+    return np.linalg.norm(srgb_to_oklab(rendered / 255.0) - truth, axis=1)
 
 
 def _agreement_delta_e(model: dict, mask: np.ndarray, rgb_image: np.ndarray) -> float:
