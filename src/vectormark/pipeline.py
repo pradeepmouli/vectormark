@@ -1,7 +1,7 @@
 """Top-level orchestration: raster path/array -> structured SVG string."""
-
 from __future__ import annotations
 
+import re
 import types
 from collections.abc import Mapping
 from dataclasses import dataclass
@@ -51,6 +51,8 @@ class Options:
     sym_tol: float = 0.10        # mirror-axis detection tolerance (reflection mismatch)
     straddle_iou: float = 0.96   # min self-reflection IoU to force a SINGLE region symmetric
     pair_iou: float = 0.90       # min IoU to treat two regions as a mirror pair
+    working_max_dim: int | None = 768  # downscale inputs whose longest side exceeds this
+                                       # (LANCZOS) before segmentation; None disables.
 
 
 def _segment_image(arr: np.ndarray, opt: Options) -> tuple[int, int, list[Region]]:
@@ -341,6 +343,28 @@ def _flatten_on_white(im: Image.Image) -> np.ndarray:
     return np.asarray(im.convert("RGB"), dtype=np.uint8)
 
 
+def _condition_input(arr: np.ndarray, working_max_dim: int | None) -> np.ndarray:
+    """Downscale an oversized RGB array to a working resolution before segmentation, so
+    input noise stops fragmenting at high pixel counts. Longest side -> working_max_dim,
+    aspect-preserving, LANCZOS. Returns arr unchanged when disabled or already small.
+    Downscale only — never upscale, never denoise."""
+    if working_max_dim is None:
+        return arr
+    h, w = arr.shape[:2]
+    if max(h, w) <= working_max_dim:
+        return arr
+    scale = working_max_dim / max(h, w)
+    img = Image.fromarray(arr).resize((round(w * scale), round(h * scale)), Image.LANCZOS)
+    return np.asarray(img, dtype=np.uint8)
+
+
+def _set_svg_output_size(svg: str, width: int, height: int) -> str:
+    """Rewrite the <svg> width/height to the original input size, leaving viewBox (working
+    space) intact — a pure display scale (SVG is resolution-free)."""
+    return re.sub(r'(<svg\b[^>]*?)\bwidth="\d+"\s+height="\d+"',
+                  rf'\1width="{width}" height="{height}"', svg, count=1)
+
+
 def idealize(image, *, options: Options | None = None, report: bool = False) -> str | tuple[str, IdealizeReport]:
     """Idealize a raster mark into SVG. With `report=True`, returns
     `(svg, IdealizeReport)`; otherwise returns the SVG string (back-compatible)."""
@@ -352,6 +376,8 @@ def idealize(image, *, options: Options | None = None, report: bool = False) -> 
         arr = np.asarray(image, dtype=np.uint8)
         if arr.ndim == 3 and arr.shape[2] == 4:            # RGBA array -> composite on white
             arr = _flatten_on_white(Image.fromarray(arr, "RGBA"))
+    orig_h, orig_w = arr.shape[:2]
+    arr = _condition_input(arr, opt.working_max_dim)
     h0, w0 = arr.shape[:2]
 
     w, h, regions = _segment_image(arr, opt)
@@ -372,4 +398,6 @@ def idealize(image, *, options: Options | None = None, report: bool = False) -> 
             body, defs, cands, axes, sym_diags = _render_body(w, h, regions, opt, rgb=arr)
             svg = render_svg_doc(w, h, body, defs)
 
+    if (arr.shape[1], arr.shape[0]) != (orig_w, orig_h):
+        svg = _set_svg_output_size(svg, orig_w, orig_h)
     return (svg, _build_report(cands, axes, sym_diags)) if report else svg
