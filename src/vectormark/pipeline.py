@@ -33,7 +33,7 @@ from .surface_merge import merge_surfaces
 from .segment import segment
 from .selection import SelectionPolicy
 from .selector import select_geometry
-from .symmetry import detect_axis, detect_symmetry_groups, detect_symmetry_rotation, Axis2D
+from .symmetry import detect_axis, detect_symmetry_groups, detect_symmetry_rotation, sym_off_ratio, Axis2D
 from .types import Axis, Region
 
 
@@ -333,7 +333,12 @@ def _render_body(
                 _seen_pairs |= {_lbl, _partner}
         loners = [r for r in comp if _comp_region_role.get(r.label, "loner") not in ("straddler", "pair")]
         for r in comp:
-            sym_diags.append((r.label, 0.0, _comp_region_role.get(r.label, "loner")))
+            _role = _comp_region_role.get(r.label, "loner")
+            # Record the actual off/peri ratio so over-fires are visible in diagnostics.
+            # For loners there is no assigned axis so we fall back to 0.0.
+            _ax4diag = _comp_region_axis.get(r.label)
+            _score = sym_off_ratio(r.mask, _ax4diag) if _ax4diag is not None else 0.0
+            sym_diags.append((r.label, _score, _role))
 
         cands += build_candidates(
             reconstructed, straddlers, pairs, loners, fills, opt, axis, rgb,

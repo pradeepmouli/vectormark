@@ -4,7 +4,7 @@ from vectormark.symmetry import Axis2D, _perimeter, reflection_off_count
 from vectormark.symmetry import region_is_self_symmetric, regions_mirror_pair, K_BAND
 from vectormark.symmetry import propose_axes
 from vectormark.symmetry import cluster_axes, AxisProposal
-from vectormark.symmetry import detect_symmetry_groups
+from vectormark.symmetry import detect_symmetry_groups, sym_off_ratio
 from vectormark.types import Region
 from vectormark.pipeline import idealize, Options
 from scipy import ndimage as ndi
@@ -131,3 +131,32 @@ def test_daikonic_body_is_exactly_symmetric_end_to_end():
     svg, rep = idealize(np.asarray(bg.convert("RGB"), np.uint8), options=Options(), report=True)
     assert rep.axes, "an axis must now be detected for the radish"
     assert _sym_iou_of_largest_body(svg, rep.axes[0].x1) >= 0.999
+
+
+# --- Task 6b: K_BAND floor regression ---
+
+def test_k_band_floor_rejects_near_symmetric_and_accepts_rasterization_perfect():
+    """K_BAND=0.3 must pass off/peri=0.0 (rasterization-perfect shapes) and reject
+    off/peri>0.4 (the near-symmetric-but-not class that includes icloud's cloud body
+    at ~0.78 and pokeball's outer circle at ~0.58)."""
+    h, w = 60, 80
+
+    # Rasterization-perfect: centred rectangle → off/peri = 0.0
+    rect = np.zeros((h, w), bool)
+    rect[10:50, 20:60] = True   # 40 px wide, vertical axis at x=40
+    axis_rect = Axis2D(np.pi / 2, 40.0, 30.0)
+    ratio_perfect = sym_off_ratio(rect, axis_rect)
+    assert ratio_perfect == 0.0, f"perfect rect must have off/peri=0.0, got {ratio_perfect}"
+    assert ratio_perfect <= K_BAND
+    assert region_is_self_symmetric(_region(rect), axis_rect)
+
+    # Near-symmetric-but-not: L-shape (off/peri >> K_BAND, typically ~2.7)
+    lshape = np.zeros((h, w), bool)
+    lshape[10:50, 5:35] = True   # vertical bar on left
+    lshape[30:50, 35:65] = True  # bottom-right extension
+    fg_ys, fg_xs = np.nonzero(lshape)
+    axis_l = Axis2D(np.pi / 2, float(fg_xs.mean()), float(fg_ys.mean()))
+    ratio_l = sym_off_ratio(lshape, axis_l)
+    assert ratio_l > K_BAND, f"L-shape off/peri={ratio_l:.3f} must exceed K_BAND={K_BAND}"
+    assert ratio_l >= 0.4, f"expected L-shape off/peri >= 0.4, got {ratio_l:.3f}"
+    assert not region_is_self_symmetric(_region(lshape), axis_l)

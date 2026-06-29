@@ -35,7 +35,10 @@ def reflection_off_count(fg_xy, axis: Axis2D, dist: np.ndarray, *, tol_px: float
     return int((dist[ri, ci] > tol_px).sum())
 
 
-K_BAND = 1.5   # absolute boundary-band factor: off-area <= K_BAND * perimeter (~1.5px band)
+K_BAND = 0.3   # off-count / perimeter floor: off <= 30 % of the boundary length.
+               # Genuine symmetric regions: 0.00 (flat bands) – 0.27 (asana petals).
+               # False over-fires rejected here: icloud cloud ~0.78, pokeball outer ~0.58.
+               # Set tight enough to block those while safely above the genuine cluster.
 
 
 def _fg_xy(mask):
@@ -43,13 +46,22 @@ def _fg_xy(mask):
     return xs, ys
 
 
-def region_is_self_symmetric(region, axis: Axis2D) -> bool:
-    mask = region.mask
+def sym_off_ratio(mask: np.ndarray, axis: Axis2D) -> float:
+    """Self-reflection off-count / perimeter of `mask` across `axis`.
+
+    Returns 0.0 for an empty mask.  Used in `region_is_self_symmetric` and surfaced
+    in pipeline sym_diags so over-fires are visible without re-running detection.
+    """
     if not mask.any():
-        return False
+        return 0.0
     dist = ndi.distance_transform_edt(~mask)
     off = reflection_off_count(_fg_xy(mask), axis, dist)
-    return off <= K_BAND * _perimeter(mask)
+    peri = _perimeter(mask)
+    return off / peri if peri > 0 else (0.0 if off == 0 else float("inf"))
+
+
+def region_is_self_symmetric(region, axis: Axis2D) -> bool:
+    return sym_off_ratio(region.mask, axis) <= K_BAND
 
 
 def regions_mirror_pair(a, b, axis: Axis2D) -> bool:
@@ -58,7 +70,9 @@ def regions_mirror_pair(a, b, axis: Axis2D) -> bool:
         return False
     dist_b = ndi.distance_transform_edt(~b.mask)
     off = reflection_off_count(_fg_xy(a.mask), axis, dist_b)
-    return off <= K_BAND * _perimeter(a.mask)
+    peri_a = _perimeter(a.mask)
+    ratio = off / peri_a if peri_a > 0 else (0.0 if off == 0 else float("inf"))
+    return ratio <= K_BAND
 
 
 AxisProposal = namedtuple("AxisProposal", "theta cx cy weight")
