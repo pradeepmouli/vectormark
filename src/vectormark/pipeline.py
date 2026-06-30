@@ -816,22 +816,21 @@ def _idealize_optimizer(arr: np.ndarray, opt: Options, width: int, height: int) 
     from .optimizer.faithful import faithful_objects
     from .optimizer.framework import optimize
 
+    baseline_svg = idealize(arr, options=dataclasses.replace(opt, optimizer=False), report=False)
     objects, masks = faithful_objects(arr, opt)
     optimized = optimize(
         objects,
         masks,
         _optimizer_passes(opt),
     )
-    faithful_body, faithful_defs = _render_optimizer_body(objects, flatten=opt.flatten)
-    faithful_svg = render_svg_doc(width, height, faithful_body, faithful_defs)
     optimized_body, optimized_defs = _render_optimizer_body(optimized, flatten=opt.flatten)
     optimized_svg = render_svg_doc(width, height, optimized_body, optimized_defs)
-    if _prefer_optimizer_svg(faithful_svg, optimized_svg):
+    if _prefer_optimizer_svg(baseline_svg, optimized_svg):
         return optimized_svg, _optimizer_report(optimized, opt)
-    return faithful_svg, _optimizer_report(
+    return baseline_svg, _optimizer_report(
         objects,
         opt,
-        fallback_reason="optimized output is structurally larger than faithful baseline",
+        fallback_reason="optimized output is structurally larger than current baseline",
     )
 
 

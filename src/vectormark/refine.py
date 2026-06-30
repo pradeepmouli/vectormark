@@ -215,7 +215,7 @@ def rounded_trapezoid_fit(
     # least-squares right edge as x = m*y + b
     A = np.column_stack([edge[:, 1], np.ones(len(edge))])
     (m, b), *_ = np.linalg.lstsq(A, edge[:, 0], rcond=None)
-    if np.abs(edge[:, 0] - (m * edge[:, 1] + b)).max() > max_error * 1.6:
+    if np.sqrt(np.mean((edge[:, 0] - (m * edge[:, 1] + b)) ** 2)) > max_error * 1.6:
         return None                                  # side isn't a clean straight line
 
     hw_top = (m * y_top + b) - axis_x
@@ -323,7 +323,7 @@ def half_ellipse_cap_fit(
     sol = least_squares(resid, [rx0, ry0], bounds=([1.0, 1.0], [np.inf, np.inf]))
     rx, ry = float(sol.x[0]), float(sol.x[1])
     # convert the algebraic residual to an approximate pixel distance
-    if np.abs(resid(sol.x)).max() * min(rx, ry) > max_error * 2.0:
+    if np.sqrt(np.mean(resid(sol.x) ** 2)) * min(rx, ry) > max_error * 2.0:
         return None
     return Shape("path", {"d": _half_ellipse_cap_d(axis_x, y_bot, rx, ry, corner_radius)})
 

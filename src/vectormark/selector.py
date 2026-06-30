@@ -12,15 +12,15 @@ from dataclasses import dataclass
 import numpy as np
 
 from .candidate import Candidate, FlatFill
-from .contour import region_contours
-from .fit import Shape, fit_path, recognize_polygon, recognize_primitive
+from .contour import significant_contours
+from .fit import Shape, fit_path, recognize_polygon, recognize_primitive, MAX_POLY_VERTICES
 from .refine import (
     half_ellipse_cap_fit, rounded_trapezoid_fit, symmetric_fit, symmetric_polygon_fit,
 )
 from .score import rank_candidates
 from .selection import (
     PRIMITIVE, TRAPEZOID, SYM_POLYGON, CAP, SYMMETRIC, POLYGON, PATH,
-    HOLED_SYM, HOLED_PATH,
+    HOLED_SYM, HOLED_PATH, NOFIT,
     ElementSelection, validate_strategies,
 )
 from .types import Axis, Region
@@ -31,6 +31,25 @@ class GeomCandidate:
     """A generated geometry paired with the fitter (strategy) that produced it."""
     strategy: str
     shape: Shape
+
+
+def _loose_bounded_polygon(contour: np.ndarray, max_vertices: int, epsilon: float) -> Shape:
+    """A guaranteed ≤ max_vertices polygon by increasing rdp tolerance until it fits.
+    The no-fit floor: clean but approximate, never frayed."""
+    from .contour import rdp
+    eps = max(epsilon, 0.5)
+    pts = np.asarray(contour, float)
+    for _ in range(20):
+        simp = rdp(pts, eps)
+        if np.allclose(simp[0], simp[-1]):
+            simp = simp[:-1]
+        if 3 <= len(simp) <= max_vertices:
+            return Shape("polygon", {"points": [(float(x), float(y)) for x, y in simp]})
+        eps *= 1.6
+    simp = simp[:max_vertices] if len(simp) > max_vertices else simp
+    if len(simp) < 3:
+        simp = np.asarray(contour, float)[:3]
+    return Shape("polygon", {"points": [(float(x), float(y)) for x, y in simp]})
 
 
 def _snap_to_axis(shape: Shape, axis: Axis) -> Shape:
@@ -53,9 +72,10 @@ def generate_geometry_candidates(
     fit_path) are added ONLY when nothing symmetry-preserving was produced — i.e.
     neither a refine fit (`sym`) NOR an axis-snapped primitive — so the scorer can
     never pick a cheaper non-symmetric geometry over a valid symmetric one."""
-    contours = [c for c in region_contours(region.mask, coverage=region.coverage) if len(c) >= 3]
+    contours = significant_contours(region.mask, coverage=region.coverage)
     if not contours:
         return []
+    cubic_paths = getattr(opt, "cubic_paths", False)
 
     if len(contours) > 1:                       # holed / counter
         # When every contour straddles cleanly, the symmetric half-mirror is the ONLY
@@ -71,11 +91,22 @@ def generate_geometry_candidates(
                 d = " ".join(s.params["d"] for s in halves)
                 return [GeomCandidate(HOLED_SYM, Shape("path", {"d": d, "fill_rule": "evenodd"}))]
         # No clean symmetric construction: faithful per-contour fit (even-odd).
-        d = " ".join(
-            fit_path(c, epsilon=opt.epsilon, max_error=opt.max_error, cubic=opt.cubic_paths).params["d"]
-            for c in contours
-        )
-        return [GeomCandidate(HOLED_PATH, Shape("path", {"d": d, "fill_rule": "evenodd"}))]
+        # Guard each fit_path call — if any contour is over budget, skip this candidate
+        # (the NOFIT fallback covers the region).
+        path_parts: list[str] = []
+        for c in contours:
+            gp = fit_path(c, epsilon=opt.epsilon, max_error=opt.max_error, cubic=cubic_paths)
+            if gp is None:
+                path_parts = []
+                break
+            path_parts.append(gp.params["d"])
+        if path_parts:
+            d = " ".join(path_parts)
+            return [GeomCandidate(HOLED_PATH, Shape("path", {"d": d, "fill_rule": "evenodd"}))]
+        # All holed candidates exhausted — fall through to NOFIT using the outer contour.
+        contour = contours[0]
+        return [GeomCandidate(
+            NOFIT, _loose_bounded_polygon(contour, MAX_POLY_VERTICES, opt.epsilon))]
 
     contour = contours[0]
     cands: list[GeomCandidate] = []
@@ -113,7 +144,13 @@ def generate_geometry_candidates(
         gpoly = recognize_polygon(contour, epsilon=opt.epsilon)
         if gpoly is not None:
             cands.append(GeomCandidate(POLYGON, gpoly))
-        cands.append(GeomCandidate(PATH, fit_path(contour, epsilon=opt.epsilon, max_error=opt.max_error, cubic=opt.cubic_paths)))
+        gpath = fit_path(contour, epsilon=opt.epsilon, max_error=opt.max_error, cubic=cubic_paths)
+        if gpath is not None:
+            cands.append(GeomCandidate(PATH, gpath))
+
+    if not cands:
+        cands.append(GeomCandidate(
+            NOFIT, _loose_bounded_polygon(contour, MAX_POLY_VERTICES, opt.epsilon)))
 
     return cands
 

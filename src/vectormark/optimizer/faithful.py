@@ -6,7 +6,7 @@ from ..candidate import FlatFill
 from ..components import decompose_components
 from ..contour import region_contours
 from ..fill_fit import fit_fill
-from ..fit import Shape, fit_path
+from ..fit import Shape, _fmt, fit_path
 from ..pipeline import Options, _segment_image
 from ..surface_merge import merge_surfaces
 from ..types import Region
@@ -17,20 +17,30 @@ def _region_path_contours(region: Region) -> list[np.ndarray]:
     return [c for c in region_contours(region.mask, coverage=region.coverage) if len(c) >= 3]
 
 
+def _contour_line_path(contour: np.ndarray) -> str:
+    pts = np.asarray(contour, dtype=float)
+    if len(pts) == 0:
+        return ""
+    d = f"M{_fmt(pts[0][0])} {_fmt(pts[0][1])} "
+    for x, y in pts[1:]:
+        d += f"L{_fmt(x)} {_fmt(y)} "
+    return d + "Z"
+
+
 def _faithful_shape(region: Region, opt: Options) -> Shape | None:
     contours = _region_path_contours(region)
     if not contours:
         return None
 
-    ds = [
-        fit_path(
+    ds: list[str] = []
+    for contour in contours:
+        fitted = fit_path(
             contour,
             epsilon=opt.epsilon,
             max_error=opt.max_error,
             cubic=opt.cubic_paths,
-        ).params["d"]
-        for contour in contours
-    ]
+        )
+        ds.append(fitted.params["d"] if fitted is not None else _contour_line_path(contour))
     params = {"d": " ".join(ds)}
     if len(ds) > 1:
         params["fill_rule"] = "evenodd"

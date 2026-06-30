@@ -1,5 +1,26 @@
 import numpy as np
-from vectormark.contour import outer_contour, rdp, corner_indices, region_contours, _polygon_area, region_corner_radius
+from vectormark.contour import outer_contour, rdp, corner_indices, region_contours, _polygon_area, region_corner_radius, significant_contours
+
+
+def _disc_with_hole(R=40, r_hole=2, big_hole=False):
+    H = W = 100
+    yy, xx = np.ogrid[:H, :W]
+    mask = ((yy - 50) ** 2 + (xx - 50) ** 2) <= R ** 2
+    rh = 15 if big_hole else r_hole
+    mask &= ~(((yy - 50) ** 2 + (xx - 50) ** 2) <= rh ** 2)
+    return mask
+
+
+def test_tiny_noise_hole_is_dropped():
+    mask = _disc_with_hole(r_hole=2)               # a 2px speck hole
+    assert len(region_contours(mask)) >= 2          # raw: outer + speck
+    assert len(significant_contours(mask)) == 1      # filtered: outer only
+
+
+def test_genuine_counter_is_kept():
+    mask = _disc_with_hole(big_hole=True)           # a real 15px counter
+    out = significant_contours(mask)
+    assert len(out) == 2                            # outer + the genuine hole
 
 
 def test_region_contours_finds_hole_outer_first():

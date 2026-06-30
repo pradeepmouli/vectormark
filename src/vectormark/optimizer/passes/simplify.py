@@ -45,6 +45,8 @@ def _simplified_path_shape(
         return None
 
     simplified = fit_path(contour, epsilon=epsilon, max_error=max_error)
+    if simplified is None:
+        return None
     if _command_count(str(simplified.params["d"])) >= _command_count(d):
         return None
     if simplified == shape:
