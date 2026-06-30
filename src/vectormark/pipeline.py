@@ -698,32 +698,72 @@ def _idealize_rectified(arr: np.ndarray, opt: Options, rho: float, w0: int, h0: 
     return doc, cands, axes, sym_diags, diag_extra
 
 
-def _render_optimizer_body(objects) -> tuple[list[str], list[str]]:
+def _render_optimizer_body(objects, *, flatten: bool = False) -> tuple[list[str], list[str]]:
     """Serialize optimized objects, resolving object-id based <use> references."""
     defs: list[str] = []
     ordered = sorted(objects, key=lambda obj: (int(obj.id), int(obj.z)))
     id_map = {int(obj.id): f"s{idx}" for idx, obj in enumerate(ordered)}
+    object_by_id = {int(obj.id): obj for obj in ordered}
     body: list[str] = []
     for obj in ordered:
         fill = resolve_fill(obj.fill, defs)
         shape = resolve_use_shape(obj.exact, id_map)
+        if flatten:
+            if shape.kind == "use":
+                source = object_by_id[int(obj.exact.params["href_obj_id"])]
+                shape = Shape(
+                    "use",
+                    {
+                        "d": shape_to_path_d(source.exact),
+                        "transform": shape.params["transform"],
+                    },
+                )
+                fill = str(obj.exact.params.get("fill", fill))
+            body.append(path_svg(shape_to_path_d(shape), fill, fill_rule_for(shape)))
+            continue
+
+        if shape.kind == "use":
+            source = object_by_id[int(obj.exact.params["href_obj_id"])]
+            source_fill = resolve_fill(source.fill, defs)
+            use_fill = str(obj.exact.params.get("fill", fill))
+            if use_fill != source_fill:
+                shape = Shape(
+                    "use",
+                    {
+                        "d": shape_to_path_d(source.exact),
+                        "transform": shape.params["transform"],
+                    },
+                )
+                body.append(path_svg(shape_to_path_d(shape), use_fill, fill_rule_for(shape)))
+                continue
+
         body.append(shape_to_svg(shape, fill, id_map[int(obj.id)]))
     return body, defs
+
+
+def _optimizer_passes(opt: Options):
+    """Pass order for the experimental geometry optimizer."""
+    from .optimizer.passes import clones_pass, primitives_pass, simplify_pass, symmetry_pass
+
+    passes = [primitives_pass, clones_pass]
+    if not opt.no_symmetry:
+        passes.append(symmetry_pass)
+    passes.append(simplify_pass)
+    return passes
 
 
 def _idealize_optimizer(arr: np.ndarray, opt: Options, width: int, height: int) -> str:
     """Experimental faithful-vectorize + geometry-optimizer pipeline."""
     from .optimizer.faithful import faithful_objects
     from .optimizer.framework import optimize
-    from .optimizer.passes import clones_pass, primitives_pass, simplify_pass, symmetry_pass
 
     objects, masks = faithful_objects(arr, opt)
     optimized = optimize(
         objects,
         masks,
-        [primitives_pass, clones_pass, symmetry_pass, simplify_pass],
+        _optimizer_passes(opt),
     )
-    body, defs = _render_optimizer_body(optimized)
+    body, defs = _render_optimizer_body(optimized, flatten=opt.flatten)
     return render_svg_doc(width, height, body, defs)
 
 

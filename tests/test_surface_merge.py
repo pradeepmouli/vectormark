@@ -182,7 +182,7 @@ def test_seam_cache_evicts_stale_entries_after_merge():
     def _controlled_fit_fill(mask, rgb_, *, flat_hex):
         if mask[:, :24].any() and mask[:, 24:].any():
             return _ff(mask, rgb_, flat_hex=flat_hex)
-        return FlatFill(hex_=flat_hex)
+        return FlatFill(hex=flat_hex)
 
     with patch("vectormark.surface_merge.fit_fill", _controlled_fit_fill):
         out = merge_surfaces(filled, rgb)

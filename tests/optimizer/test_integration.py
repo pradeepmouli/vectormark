@@ -3,7 +3,8 @@ from pathlib import Path
 import numpy as np
 from PIL import Image
 
-from vectormark.pipeline import Options, idealize
+from vectormark.optimizer.passes.symmetry import symmetry_pass
+from vectormark.pipeline import Options, _optimizer_passes, idealize
 
 
 def _disk(h: int, w: int, cy: int, cx: int, r: int) -> np.ndarray:
@@ -31,6 +32,13 @@ def _asymmetric_cloud_image() -> np.ndarray:
     return img
 
 
+def _two_colored_square_image() -> np.ndarray:
+    img = np.full((80, 120, 3), 255, np.uint8)
+    img[20:40, 16:36] = (17, 34, 51)
+    img[20:40, 70:90] = (171, 205, 239)
+    return img
+
+
 def test_optimizer_option_defaults_off_for_existing_pipeline():
     img = _disk_image()
 
@@ -46,6 +54,28 @@ def test_optimizer_pipeline_turns_disk_into_circle_and_is_deterministic():
 
     assert first == second
     assert "<circle" in first
+
+
+def test_optimizer_flatten_emits_paths_without_primitives_or_transforms():
+    svg = idealize(_disk_image(), options=Options(optimizer=True, flatten=True))
+
+    assert "<path" in svg
+    assert "<circle" not in svg
+    assert "<use" not in svg
+    assert "transform=" not in svg
+
+
+def test_optimizer_recolored_clone_keeps_target_fill_without_use_override():
+    svg = idealize(_two_colored_square_image(), options=Options(optimizer=True))
+
+    assert "<use" not in svg
+    assert 'fill="#112233"' in svg
+    assert 'fill="#ABCDEF"' in svg
+
+
+def test_optimizer_no_symmetry_skips_symmetry_pass():
+    assert symmetry_pass in _optimizer_passes(Options(optimizer=True))
+    assert symmetry_pass not in _optimizer_passes(Options(optimizer=True, no_symmetry=True))
 
 
 def test_optimizer_pipeline_does_not_mirror_asymmetric_single_object():
