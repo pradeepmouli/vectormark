@@ -752,7 +752,66 @@ def _optimizer_passes(opt: Options):
     return passes
 
 
-def _idealize_optimizer(arr: np.ndarray, opt: Options, width: int, height: int) -> str:
+_SVG_ELEMENT_RE = re.compile(r"<(path|circle|ellipse|rect|polygon|use)\b")
+
+
+def _svg_element_count(svg: str) -> int:
+    return len(_SVG_ELEMENT_RE.findall(svg))
+
+
+def _prefer_optimizer_svg(faithful_svg: str, optimized_svg: str) -> bool:
+    """Use optimized output only when it is not structurally larger."""
+    faithful_elements = _svg_element_count(faithful_svg)
+    optimized_elements = _svg_element_count(optimized_svg)
+    return (
+        optimized_elements <= faithful_elements
+        and len(optimized_svg.encode()) <= len(faithful_svg.encode())
+    )
+
+
+def _optimizer_report(objects, opt: Options, *, fallback_reason: str | None = None) -> IdealizeReport:
+    strategies: dict[str, int] = {}
+    gradients = 0
+    object_diags = []
+    for obj in sorted(objects, key=lambda item: (int(item.id), int(item.z))):
+        strategy = f"optimizer_{obj.exact.kind}"
+        strategies[strategy] = strategies.get(strategy, 0) + 1
+        if isinstance(obj.fill, (LinearGradientFill, RadialGradientFill)):
+            gradients += 1
+        bounds = tuple(float(v) for v in getattr(obj.flat, "bounds", (0.0, 0.0, 0.0, 0.0)))
+        object_diags.append({
+            "id": int(obj.id),
+            "z": int(obj.z),
+            "shape": obj.exact.kind,
+            "fill": _fill_kind(obj.fill),
+            "bounds": bounds,
+            "area": float(getattr(obj.flat, "area", 0.0)),
+        })
+    diag = ReportDiag({
+        "options": _to_json_safe(opt),
+        "stats": {
+            "regions": 0,
+            "components": 0,
+            "elements": len(objects),
+            "gradients": gradients,
+            "axes": 0,
+        },
+        "axes": [],
+        "regions": [],
+        "optimizer_objects": object_diags,
+        "optimizer_fallback": fallback_reason,
+    })
+    return IdealizeReport(
+        types.MappingProxyType(dict(strategies)),
+        gradients,
+        len(objects),
+        (),
+        (),
+        diag,
+    )
+
+
+def _idealize_optimizer(arr: np.ndarray, opt: Options, width: int, height: int) -> tuple[str, IdealizeReport]:
     """Experimental faithful-vectorize + geometry-optimizer pipeline."""
     from .optimizer.faithful import faithful_objects
     from .optimizer.framework import optimize
@@ -763,8 +822,17 @@ def _idealize_optimizer(arr: np.ndarray, opt: Options, width: int, height: int) 
         masks,
         _optimizer_passes(opt),
     )
-    body, defs = _render_optimizer_body(optimized, flatten=opt.flatten)
-    return render_svg_doc(width, height, body, defs)
+    faithful_body, faithful_defs = _render_optimizer_body(objects, flatten=opt.flatten)
+    faithful_svg = render_svg_doc(width, height, faithful_body, faithful_defs)
+    optimized_body, optimized_defs = _render_optimizer_body(optimized, flatten=opt.flatten)
+    optimized_svg = render_svg_doc(width, height, optimized_body, optimized_defs)
+    if _prefer_optimizer_svg(faithful_svg, optimized_svg):
+        return optimized_svg, _optimizer_report(optimized, opt)
+    return faithful_svg, _optimizer_report(
+        objects,
+        opt,
+        fallback_reason="optimized output is structurally larger than faithful baseline",
+    )
 
 
 def _flatten_on_white(im: Image.Image) -> np.ndarray:
@@ -818,13 +886,10 @@ def idealize(image, *, options: Options | None = None, report: bool = False) -> 
     h0, w0 = arr.shape[:2]
 
     if opt.optimizer:
-        svg = _idealize_optimizer(arr, opt, w0, h0)
+        svg, opt_report = _idealize_optimizer(arr, opt, w0, h0)
         if (arr.shape[1], arr.shape[0]) != (orig_w, orig_h):
             svg = _set_svg_output_size(svg, orig_w, orig_h)
-        return (
-            svg,
-            _build_report([], [], [], opt=opt, regions=[], diag_extra={"n_components": 0}),
-        ) if report else svg
+        return (svg, opt_report) if report else svg
 
     w, h, regions = _segment_image(arr, opt)
     if not regions:

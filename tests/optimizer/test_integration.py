@@ -4,7 +4,7 @@ import numpy as np
 from PIL import Image
 
 from vectormark.optimizer.passes.symmetry import symmetry_pass
-from vectormark.pipeline import Options, _optimizer_passes, idealize
+from vectormark.pipeline import Options, _optimizer_passes, _prefer_optimizer_svg, idealize
 
 
 def _disk(h: int, w: int, cy: int, cx: int, r: int) -> np.ndarray:
@@ -54,6 +54,25 @@ def test_optimizer_pipeline_turns_disk_into_circle_and_is_deterministic():
 
     assert first == second
     assert "<circle" in first
+
+
+def test_optimizer_report_includes_object_diagnostics():
+    _svg, report = idealize(_disk_image(), options=Options(optimizer=True), report=True)
+
+    data = report.diagnostics.to_dict()
+    assert report.elements == 1
+    assert report.strategies["optimizer_circle"] == 1
+    assert data["optimizer_objects"][0]["shape"] == "circle"
+
+
+def test_optimizer_structural_fallback_rejects_larger_svg():
+    faithful = '<svg><path d="M0 0 Z"/></svg>'
+    larger = '<svg><path d="M0 0 Z"/><path d="M1 1 Z"/></svg>'
+    longer = '<svg><path d="M0 0 L1 1 L2 2 L3 3 Z"/></svg>'
+
+    assert not _prefer_optimizer_svg(faithful, larger)
+    assert not _prefer_optimizer_svg(faithful, longer)
+    assert _prefer_optimizer_svg(faithful, faithful)
 
 
 def test_optimizer_flatten_emits_paths_without_primitives_or_transforms():

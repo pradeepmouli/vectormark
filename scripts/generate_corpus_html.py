@@ -38,44 +38,76 @@ class CorpusEntry:
 def default_entries() -> list[CorpusEntry]:
     """Verification corpus entries rendered by the gallery.
 
-    The committed byte-identical corpus is the source of truth for the baseline
-    images/options. Optimizer entries are added for the same non-flattened images
-    so the experimental path can be inspected alongside the legacy pipeline.
+    Prefer the untracked real-logo corpus used for acceptance inspection. For
+    each logo, render the current default pipeline and the optimizer pipeline.
+    Fall back to a tiny synthetic set when the local corpus is unavailable.
     """
+    real = _real_logo_entries()
+    if real:
+        return real
+
     from tests.optimizer.test_integration import _asymmetric_cloud_image, _disk_image
-    from tests.test_candidate_byte_identical import CASES
 
     entries = [
-        CorpusEntry(name=name, mode="current", image_factory=factory, options=opts)
-        for name, factory, opts in CASES
-    ]
-
-    seen: set[str] = set()
-    for name, factory, opts in CASES:
-        base_name = name.removesuffix("_flatten")
-        if base_name in seen:
-            continue
-        seen.add(base_name)
-        entries.append(
-            CorpusEntry(
-                name=base_name,
-                mode="optimizer",
-                image_factory=factory,
-                options=dataclasses.replace(opts, optimizer=True, flatten=False),
-            )
+        CorpusEntry("disk", "current", _disk_image, Options()),
+        CorpusEntry("disk", "optimizer", _disk_image, Options(optimizer=True)),
+        CorpusEntry("asymmetric_cloud", "current", _asymmetric_cloud_image, Options()),
+        CorpusEntry(
+            "asymmetric_cloud",
+            "optimizer",
+            _asymmetric_cloud_image,
+            Options(optimizer=True),
         )
+    ]
+    return entries
 
-    entries.extend(
-        [
-            CorpusEntry("disk", "optimizer", _disk_image, Options(optimizer=True)),
-            CorpusEntry(
-                "asymmetric_cloud",
-                "optimizer",
-                _asymmetric_cloud_image,
-                Options(optimizer=True),
-            ),
-        ]
+
+def _image_factory(path: Path) -> Callable[[], np.ndarray]:
+    def _load() -> np.ndarray:
+        return np.asarray(Image.open(path).convert("RGB"), dtype=np.uint8)
+
+    return _load
+
+
+def _real_logo_entries() -> list[CorpusEntry]:
+    corpus = REPO_ROOT / "scratch" / "real-logos"
+    if not corpus.exists():
+        return []
+
+    skip_prefixes = (
+        "cap",
+        "cmp_",
+        "contact_sheet",
+        "corpus",
+        "cubic_demo",
+        "lever_",
+        "node",
+        "out_",
+        "poc_",
+        "pre",
+        "rebuild",
+        "s40",
+        "settir_cmp",
+        "settir_spike",
+        "threeway",
+        "vbird_",
+        "zoom",
     )
+    pngs = [
+        path for path in sorted(corpus.glob("*.png"))
+        if not path.stem.startswith(skip_prefixes)
+    ]
+    if not any(path.stem == "vbird" for path in pngs):
+        vbird = corpus / "vbird.png"
+        if vbird.exists():
+            pngs.append(vbird)
+            pngs.sort()
+
+    entries: list[CorpusEntry] = []
+    for path in pngs:
+        factory = _image_factory(path)
+        entries.append(CorpusEntry(path.stem, "current", factory, Options()))
+        entries.append(CorpusEntry(path.stem, "optimizer", factory, Options(optimizer=True)))
     return entries
 
 
@@ -104,7 +136,18 @@ def _input_filename(entry: CorpusEntry) -> str:
     return f"{entry.mode}-{entry.name}.png".replace("/", "_")
 
 
-def generate_corpus_html(output: Path, entries: Iterable[CorpusEntry] | None = None) -> Path:
+def _gallery_options(options: Options, working_max_dim: int | None) -> Options:
+    if working_max_dim is None or options.working_max_dim is not None:
+        return options
+    return dataclasses.replace(options, working_max_dim=working_max_dim)
+
+
+def generate_corpus_html(
+    output: Path,
+    entries: Iterable[CorpusEntry] | None = None,
+    *,
+    working_max_dim: int | None = None,
+) -> Path:
     output = Path(output)
     if output.exists():
         shutil.rmtree(output)
@@ -114,13 +157,16 @@ def generate_corpus_html(output: Path, entries: Iterable[CorpusEntry] | None = N
     input_dir.mkdir(parents=True, exist_ok=True)
 
     cards: list[str] = []
-    for entry in sorted(entries or default_entries(), key=lambda item: (item.mode, item.name)):
+    mode_order = {"current": 0, "optimizer": 1}
+    for entry in sorted(entries or default_entries(), key=lambda item: (item.name, mode_order.get(item.mode, 99))):
         image = np.asarray(entry.image_factory(), dtype=np.uint8)
         input_name = _input_filename(entry)
         input_path = input_dir / input_name
         Image.fromarray(image).save(input_path)
 
-        svg, report = idealize(image, options=entry.options, report=True)
+        options = _gallery_options(entry.options, working_max_dim)
+        print(f"rendering {entry.mode}/{entry.name}", file=sys.stderr)
+        svg, report = idealize(image, options=options, report=True)
         svg_name = _safe_filename(entry)
         svg_path = svg_dir / svg_name
         svg_path.write_text(svg)
@@ -154,7 +200,7 @@ def generate_corpus_html(output: Path, entries: Iterable[CorpusEntry] | None = N
       </details>
       <details>
         <summary>Options</summary>
-        <pre><code>{html.escape(_options_json(entry.options))}</code></pre>
+        <pre><code>{html.escape(_options_json(options))}</code></pre>
       </details>
     </article>"""
         )
@@ -246,8 +292,17 @@ def _html_document(cards: list[str]) -> str:
 def main() -> None:
     parser = argparse.ArgumentParser(description="Generate the vectormark SVG corpus gallery.")
     parser.add_argument("--output", type=Path, default=Path("scratch/corpus-html"))
+    parser.add_argument(
+        "--working-max-dim",
+        type=int,
+        default=None,
+        help="Opt-in downscale long side for faster gallery generation.",
+    )
     args = parser.parse_args()
-    index = generate_corpus_html(args.output)
+    index = generate_corpus_html(
+        args.output,
+        working_max_dim=args.working_max_dim,
+    )
     print(index)
 
 
