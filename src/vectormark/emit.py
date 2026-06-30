@@ -35,6 +35,14 @@ def shape_to_svg(shape: Shape, fill: str, elem_id: str) -> str:
     if shape.kind == "path":
         rule = f' fill-rule="{p["fill_rule"]}"' if p.get("fill_rule") else ""
         return f'<path {common}{rule} d="{p["d"]}"/>'
+    if shape.kind == "use":
+        a, b, c, d, e, f = p["transform"]
+        use_fill = p.get("fill", fill)
+        return (
+            f'<use id="{elem_id}" href="#{p["href"]}" '
+            f'transform="matrix({_fmt(a)} {_fmt(b)} {_fmt(c)} {_fmt(d)} {_fmt(e)} {_fmt(f)})" '
+            f'fill="{use_fill}"/>'
+        )
     raise ValueError(f"unknown shape kind: {shape.kind}")
 
 
@@ -68,6 +76,10 @@ def shape_to_path_d(shape: Shape) -> str:
     p = shape.params
     if shape.kind == "path":
         return p["d"]
+    if shape.kind == "use":
+        if "d" in p:
+            return transform_path_d(p["d"], p["transform"])
+        raise ValueError("cannot convert use shape to path data without source geometry")
     if shape.kind == "circle":
         return _ellipse_path_d(p["cx"], p["cy"], p["r"], p["r"])
     if shape.kind == "ellipse":

@@ -43,6 +43,22 @@ def test_shape_to_path_d_converts_basic_shapes():
     assert shape_to_path_d(Shape("path", {"d": "M0 0 L1 1 Z"})) == "M0 0 L1 1 Z"
 
 
+def test_use_shape_emits_svg_use_with_matrix_and_fill():
+    use = shape_to_svg(
+        Shape("use", {"href": "s4", "transform": (1.0, 0.0, 0.0, 1.0, 12.5, 8.0), "fill": "#abcdef"}),
+        fill="#000000",
+        elem_id="s9",
+    )
+    assert use == '<use id="s9" href="#s4" transform="matrix(1 0 0 1 12.5 8)" fill="#abcdef"/>'
+
+
+def test_shape_to_path_d_rejects_use_without_source_geometry():
+    import pytest
+
+    with pytest.raises(ValueError, match="cannot convert use shape to path data without source geometry"):
+        shape_to_path_d(Shape("use", {"href": "s4", "transform": (1.0, 0.0, 0.0, 1.0, 12.5, 8.0)}))
+
+
 def test_reflect_path_d_mirrors_x_about_axis():
     from vectormark.emit import reflect_path_d
     out = reflect_path_d("M0 0 L10 0 L10 4 Z", axis_x=5.0)
