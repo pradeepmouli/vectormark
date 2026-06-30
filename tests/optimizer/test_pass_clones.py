@@ -6,6 +6,7 @@ from shapely import affinity
 from shapely.geometry import Point, Polygon
 
 from vectormark.candidate import FlatFill, LinearGradientFill
+from vectormark.emit import optimizer_objects_to_svg
 from vectormark.fit import Shape
 from vectormark.optimizer.framework import optimize
 from vectormark.optimizer.optobject import OptObject
@@ -74,7 +75,7 @@ def test_clones_pass_proposes_use_for_translated_square_with_flat_fill_override(
     assert out[0].exact.kind == "path"
     assert out[1].exact.kind == "use"
     assert out[1].exact.params == {
-        "href": "s1",
+        "href_obj_id": 1,
         "transform": (1.0, 0.0, 0.0, 1.0, 34.0, 22.0),
         "fill": "#abcdef",
     }
@@ -129,3 +130,17 @@ def test_clones_pass_skips_non_flat_fill_clone_proposals():
     assert clones_pass(objects, masks) == []
     out = optimize(objects, masks, [clones_pass])
     assert [obj.exact.kind for obj in out] == ["path", "path"]
+
+
+def test_optimizer_object_svg_resolves_clone_href_to_emitted_id():
+    canonical = _square(10, center=(18.0, 18.0), fill=FlatFill("#112233"))
+    clone = _square(20, center=(52.0, 40.0), fill=FlatFill("#abcdef"))
+    objects = [clone, canonical]
+    masks = {obj.id: _mask_for_polygon(obj.flat) for obj in objects}
+
+    out = optimize(objects, masks, [clones_pass])
+    body = optimizer_objects_to_svg(out)
+
+    assert body[0].startswith('<path id="s0"')
+    assert body[1].startswith('<use id="s1"')
+    assert 'href="#s0"' in body[1]

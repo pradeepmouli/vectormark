@@ -4,7 +4,16 @@ import numpy as np
 
 from vectormark.fit import Shape
 from vectormark.types import Axis
-from vectormark.emit import shape_to_svg, shape_to_path_d, mirror_use, render_svg_doc
+from vectormark.candidate import FlatFill
+from vectormark.emit import (
+    optimizer_objects_to_svg,
+    resolve_use_shape,
+    shape_to_svg,
+    shape_to_path_d,
+    mirror_use,
+    render_svg_doc,
+)
+from vectormark.optimizer.optobject import OptObject
 from tests._render import render_svg
 
 
@@ -50,6 +59,48 @@ def test_use_shape_emits_svg_use_with_matrix_and_fill():
         elem_id="s9",
     )
     assert use == '<use id="s9" href="#s4" transform="matrix(1 0 0 1 12.5 8)" fill="#abcdef"/>'
+
+
+def test_use_shape_requires_resolved_href_for_svg_emission():
+    import pytest
+
+    with pytest.raises(ValueError, match="href_obj_id must be resolved"):
+        shape_to_svg(
+            Shape("use", {"href_obj_id": 4, "transform": (1.0, 0.0, 0.0, 1.0, 12.5, 8.0), "fill": "#abcdef"}),
+            fill="#000000",
+            elem_id="s9",
+        )
+
+
+def test_resolve_use_shape_maps_object_id_to_emitted_id():
+    shape = resolve_use_shape(
+        Shape("use", {"href_obj_id": 4, "transform": (1.0, 0.0, 0.0, 1.0, 12.5, 8.0), "fill": "#abcdef"}),
+        {4: "s0"},
+    )
+    assert shape.params["href"] == "s0"
+    assert "href_obj_id" not in shape.params
+
+
+def test_optimizer_objects_to_svg_resolves_object_id_hrefs():
+    source = OptObject(
+        10,
+        Shape("rect", {"x": 0.0, "y": 0.0, "w": 5.0, "h": 5.0}),
+        FlatFill("#111111"),
+        0,
+    )
+    clone = OptObject(
+        20,
+        Shape("use", {"href_obj_id": 10, "transform": (1.0, 0.0, 0.0, 1.0, 8.0, 0.0), "fill": "#222222"}),
+        FlatFill("#222222"),
+        1,
+        flat=source.flat,
+    )
+
+    body = optimizer_objects_to_svg([clone, source])
+
+    assert body[0].startswith('<rect id="s0"')
+    assert body[1].startswith('<use id="s1"')
+    assert 'href="#s0"' in body[1]
 
 
 def test_shape_to_path_d_rejects_use_without_source_geometry():

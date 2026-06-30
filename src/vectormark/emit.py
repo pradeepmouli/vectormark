@@ -38,12 +38,42 @@ def shape_to_svg(shape: Shape, fill: str, elem_id: str) -> str:
     if shape.kind == "use":
         a, b, c, d, e, f = p["transform"]
         use_fill = p.get("fill", fill)
+        href = p.get("href")
+        if href is None:
+            if "href_obj_id" in p:
+                raise ValueError("use shape href_obj_id must be resolved before SVG emission")
+            raise ValueError("use shape requires href")
         return (
-            f'<use id="{elem_id}" href="#{p["href"]}" '
+            f'<use id="{elem_id}" href="#{href}" '
             f'transform="matrix({_fmt(a)} {_fmt(b)} {_fmt(c)} {_fmt(d)} {_fmt(e)} {_fmt(f)})" '
             f'fill="{use_fill}"/>'
         )
     raise ValueError(f"unknown shape kind: {shape.kind}")
+
+
+def resolve_use_shape(shape: Shape, id_map: dict[int, str]) -> Shape:
+    """Resolve optimizer object-id references in Shape(\"use\") to emitted SVG ids."""
+    if shape.kind != "use" or "href_obj_id" not in shape.params:
+        return shape
+    obj_id = int(shape.params["href_obj_id"])
+    if obj_id not in id_map:
+        raise ValueError(f"use shape references unknown object id: {obj_id}")
+    params = dict(shape.params)
+    params["href"] = id_map[obj_id]
+    del params["href_obj_id"]
+    return Shape("use", params)
+
+
+def optimizer_objects_to_svg(objects, fills: dict[int, str] | None = None) -> list[str]:
+    """Serialize optimizer objects with object-id based <use> references resolved."""
+    ordered = sorted(objects, key=lambda obj: (int(obj.id), int(obj.z)))
+    id_map = {int(obj.id): f"s{idx}" for idx, obj in enumerate(ordered)}
+    body: list[str] = []
+    for obj in ordered:
+        fill = fills.get(obj.id, "") if fills is not None else getattr(obj.fill, "hex", "")
+        shape = resolve_use_shape(obj.exact, id_map)
+        body.append(shape_to_svg(shape, fill, id_map[int(obj.id)]))
+    return body
 
 
 def mirror_use(ref_id: str, axis: Axis) -> str:

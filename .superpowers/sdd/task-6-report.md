@@ -42,3 +42,15 @@ Verification
 Notes / concerns
 - This v1 clone matcher is deliberately pragmatic: descriptor bucketing is lightweight, and transform verification relies on minimum-rotated-rectangle orientation candidates plus geometric residual and gate checks.
 - Non-flat fill clone proposals are intentionally skipped for now because `Shape("use")` fill override support is only safe for `FlatFill` in this pass.
+
+Fix after review
+- Changed clone replacements to store `href_obj_id` instead of assuming `OptObject.id` equals emitted SVG id.
+- Added `emit.resolve_use_shape()` and `emit.optimizer_objects_to_svg()` so optimizer object lists resolve object-id references to actual emitted ids before calling `shape_to_svg()`.
+- Made direct `shape_to_svg(Shape("use", {"href_obj_id": ...}))` fail fast until the reference is resolved, while preserving literal `href` support.
+- Added regression coverage for non-sequential object ids (`10`, `20`) serializing as emitted ids `s0`, `s1` with the clone using `href="#s0"`.
+
+Final verification
+- Command:
+  - `PYTHONPATH=src ./.venv/bin/python -m pytest tests/optimizer/test_pass_clones.py tests/test_emit.py -q`
+- Result:
+  - `......................                                                   [100%]`

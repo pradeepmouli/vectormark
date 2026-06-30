@@ -176,7 +176,7 @@ def clones_pass(
                                 exact=Shape(
                                     "use",
                                     {
-                                        "href": f"s{canonical_obj.id}",
+                                        "href_obj_id": canonical_obj.id,
                                         "transform": matrix,
                                         "fill": target_fill_hex,
                                     },
