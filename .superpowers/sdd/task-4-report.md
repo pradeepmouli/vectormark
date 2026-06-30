@@ -88,6 +88,15 @@ Final local test output
   - Result:
     `.........                                                                [100%]`
 
+Task 4 empty replacement fix
+- Rejected proposals with an empty `new_objects` list before gating or mutation, preventing ungated deletion of consumed objects.
+- Added a regression proving `Proposal((1,), [])` leaves both objects and masks unchanged for later passes.
+
+Final local test output
+- `PYTHONPATH=src ./.venv/bin/python -m pytest tests/optimizer/test_framework.py -q`
+  - Result:
+    `..........                                                               [100%]`
+
 Task 4 gate API fix
 - Replaced the framework's inline `coverage_residual(...) > budget` comparison with the shared `gate_ok(..., budget=budget)` API from Task 3, keeping the no-regression decision in one place.
 

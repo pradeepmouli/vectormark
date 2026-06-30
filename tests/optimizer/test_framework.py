@@ -217,3 +217,22 @@ def test_framework_rejects_duplicate_replacement_ids_without_mutation():
     out = optimize(objs, masks, [duplicate_id_pass, verify_unchanged])
 
     assert [obj.id for obj in out] == [1, 2]
+
+
+def test_framework_rejects_empty_replacements_without_mutation():
+    objs = [_rect_obj(1, 10, 10)]
+    masks = {1: np.zeros((20, 20), bool)}
+    masks[1][0:10, 0:10] = True
+    original_mask = masks[1].copy()
+
+    def empty_pass(os, ms):
+        return [Proposal((1,), [])]
+
+    def verify_unchanged(os, ms):
+        assert [obj.id for obj in os] == [1]
+        assert np.array_equal(ms[1], original_mask)
+        return []
+
+    out = optimize(objs, masks, [empty_pass, verify_unchanged])
+
+    assert [obj.id for obj in out] == [1]

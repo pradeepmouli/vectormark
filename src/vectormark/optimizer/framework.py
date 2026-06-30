@@ -100,6 +100,8 @@ def optimize(
             proposal_ids = _proposal_key(proposal)
             if not proposal_ids:
                 continue
+            if not proposal.new_objects:
+                continue
             replacement_ids = [int(obj.id) for obj in proposal.new_objects]
             if len(set(replacement_ids)) != len(replacement_ids):
                 continue
