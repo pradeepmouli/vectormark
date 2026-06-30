@@ -15,6 +15,13 @@ def _rect_obj(i, w, h, *, x=0.0, y=0.0):
     )
 
 
+def _path_square_obj(i, *, x=0.0, y=0.0, size=10.0):
+    x2 = x + size
+    y2 = y + size
+    d = f"M{x} {y} L{x2} {y} L{x2} {y2} L{x} {y2} Z"
+    return OptObject(i, Shape("path", {"d": d}), FlatFill("#000"), 0)
+
+
 def test_framework_accepts_good_rejects_bad():
     objs = [_rect_obj(1, 10, 10)]
     masks = {1: np.zeros((20, 20), bool)}
@@ -131,3 +138,42 @@ def test_framework_rejects_replacement_id_aliasing_live_object():
     assert [obj.id for obj in out] == [1, 2, 3]
     for obj_id in (1, 2, 3):
         assert np.array_equal(masks[obj_id], original_masks[obj_id])
+
+
+def test_framework_sorts_replacements_before_later_passes():
+    objs = [_rect_obj(1, 5, 5), _rect_obj(2, 5, 5, x=5)]
+    masks = {
+        1: np.zeros((20, 20), bool),
+        2: np.zeros((20, 20), bool),
+    }
+    masks[1][0:5, 0:5] = True
+    masks[2][0:5, 5:10] = True
+
+    def reverse_order_pass(os, ms):
+        return [Proposal((1, 2), [_rect_obj(8, 9, 4), _rect_obj(7, 9, 4)])]
+
+    def verify_sorted(os, ms):
+        assert [obj.id for obj in os] == [7, 8]
+        return []
+
+    out = optimize(objs, masks, [reverse_order_pass, verify_sorted], budget=2.0)
+
+    assert [obj.id for obj in out] == [7, 8]
+
+
+def test_framework_multi_id_matching_replacement_uses_own_mask_not_union():
+    objs = [_rect_obj(1, 10, 10), _rect_obj(2, 10, 10, x=10)]
+    masks = {
+        1: np.zeros((20, 20), bool),
+        2: np.zeros((20, 20), bool),
+    }
+    masks[1][0:10, 0:10] = True
+    masks[2][0:10, 10:20] = True
+
+    def replace_one_consumed_id(os, ms):
+        return [Proposal((1, 2), [_path_square_obj(1, size=9.0)])]
+
+    out = optimize(objs, masks, [replace_one_consumed_id], budget=0.25)
+
+    assert [obj.id for obj in out] == [1]
+    assert out[0].exact.kind == "path"

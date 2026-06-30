@@ -67,3 +67,13 @@ Final test output
 - `PYTHONPATH=src ./.venv/bin/python -m pytest tests/optimizer/test_framework.py -q`
   - Result:
     `.....                                                                    [100%]`
+
+Task 4 deterministic replacement ordering fix
+- Sorted accepted replacement objects by stable `(id, z)` before reinserting them and before assigning replacement masks, so later passes no longer observe pass-provided replacement order.
+- Added a regression where a proposal emits ids `8, 7` and a later pass observes canonical `[7, 8]`.
+- Added a regression proving a matching-id replacement in a multi-id proposal is gated against its own original mask, not the consumed-mask union.
+
+Final local test output
+- `PYTHONPATH=src ./.venv/bin/python -m pytest tests/optimizer/test_framework.py -q`
+  - Result:
+    `.......                                                                  [100%]`

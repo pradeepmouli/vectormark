@@ -24,6 +24,10 @@ def _proposal_key(proposal: Proposal) -> tuple[int, ...]:
     return tuple(sorted(int(obj_id) for obj_id in proposal.obj_ids))
 
 
+def _object_key(obj: OptObject) -> tuple[int, int]:
+    return (int(obj.id), int(obj.z))
+
+
 def _geometry_changed(original: OptObject, replacement: OptObject) -> bool:
     return original.exact != replacement.exact
 
@@ -124,15 +128,14 @@ def optimize(
                 idx for idx, obj in enumerate(current_objects) if obj.id in proposal_ids
             )
             remaining = [obj for obj in current_objects if obj.id not in proposal_ids]
-            current_objects = (
-                remaining[:insert_at] + list(proposal.new_objects) + remaining[insert_at:]
-            )
+            replacements = sorted(proposal.new_objects, key=_object_key)
+            current_objects = remaining[:insert_at] + replacements + remaining[insert_at:]
 
             for obj_id in proposal_ids:
                 current_masks.pop(obj_id, None)
 
             assigned_replacement_ids: set[int] = set()
-            for replacement in proposal.new_objects:
+            for replacement in replacements:
                 if replacement.id in current_masks:
                     current_masks.pop(replacement.id, None)
 

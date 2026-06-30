@@ -42,7 +42,7 @@ Verification
   - `PYTHONPATH=src ./.venv/bin/python -m pytest tests/optimizer/test_optobject.py tests/optimizer/test_faithful.py -q`
 
 Notes
-- The implementation filters multi-contour holes by a significance threshold derived from `opt.min_region_fraction`, with a 1-pixel absolute floor, then falls back to the outer contour if needed. This keeps tiny contour noise out of Stage 1 while preserving meaningful holes.
+- The final implementation preserves every contour returned by `region_contours()` subject only to the geometric minimum needed to form a path, so Stage 1 does not drop real holes via `opt.min_region_fraction`.
 - No symmetry, primitive recognition, `recognize_primitive`, `select_geometry`, or `symmetry.py` code is called.
 
 Result
