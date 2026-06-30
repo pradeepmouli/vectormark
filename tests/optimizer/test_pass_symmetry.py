@@ -46,8 +46,11 @@ def test_symmetry_pass_replaces_mirror_pair_with_use():
     objects = [right, left]
     masks = {obj.id: _mask_for_polygon(obj.flat) for obj in objects}
 
+    proposals = symmetry_pass(objects, masks)
     out = optimize(objects, masks, [symmetry_pass])
 
+    assert proposals[0].obj_ids == (1, 2)
+    assert [obj.id for obj in proposals[0].new_objects] == [1, 2]
     assert [obj.id for obj in out] == [1, 2]
     assert out[0].exact.kind == "path"
     assert out[1].exact.kind == "use"
@@ -104,8 +107,8 @@ def test_symmetry_pass_is_deterministic_for_unordered_inputs():
     second = symmetry_pass([left, right], masks)
 
     assert first == second
-    assert first[0].obj_ids == (9,)
-    assert first[0].new_objects[0].exact.params["href_obj_id"] == 3
+    assert first[0].obj_ids == (3, 9)
+    assert first[0].new_objects[1].exact.params["href_obj_id"] == 3
 
 
 def test_symmetry_pass_rejects_pair_when_mask_gate_fails():

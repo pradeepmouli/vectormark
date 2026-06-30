@@ -240,8 +240,9 @@ def _pair_proposal(
     if not gate_ok(reflected, masks[target.id]):
         return None
     return Proposal(
-        (target.id,),
+        (canonical.id, target.id),
         [
+            canonical,
             OptObject(
                 id=target.id,
                 exact=Shape(
