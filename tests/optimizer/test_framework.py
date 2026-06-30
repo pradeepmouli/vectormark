@@ -177,3 +177,43 @@ def test_framework_multi_id_matching_replacement_uses_own_mask_not_union():
 
     assert [obj.id for obj in out] == [1]
     assert out[0].exact.kind == "path"
+
+
+def test_framework_tiebreaks_same_consumed_ids_by_replacement_values():
+    objs = [_rect_obj(1, 10, 10)]
+    masks = {1: np.zeros((20, 20), bool)}
+    masks[1][0:10, 0:10] = True
+
+    def conflicting_pass(os, ms):
+        return [
+            Proposal((1,), [_rect_obj(9, 10, 10)]),
+            Proposal((1,), [_rect_obj(8, 10, 10)]),
+        ]
+
+    out = optimize(objs, masks, [conflicting_pass])
+
+    assert [obj.id for obj in out] == [8]
+
+
+def test_framework_rejects_duplicate_replacement_ids_without_mutation():
+    objs = [_rect_obj(1, 10, 10), _rect_obj(2, 10, 10, x=10)]
+    masks = {
+        1: np.zeros((20, 20), bool),
+        2: np.zeros((20, 20), bool),
+    }
+    masks[1][0:10, 0:10] = True
+    masks[2][0:10, 10:20] = True
+    original_masks = {obj_id: mask.copy() for obj_id, mask in masks.items()}
+
+    def duplicate_id_pass(os, ms):
+        return [Proposal((1, 2), [_rect_obj(9, 20, 10), _rect_obj(9, 20, 10)])]
+
+    def verify_unchanged(os, ms):
+        assert [obj.id for obj in os] == [1, 2]
+        for obj_id in (1, 2):
+            assert np.array_equal(ms[obj_id], original_masks[obj_id])
+        return []
+
+    out = optimize(objs, masks, [duplicate_id_pass, verify_unchanged])
+
+    assert [obj.id for obj in out] == [1, 2]

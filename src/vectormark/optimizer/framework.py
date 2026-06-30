@@ -28,6 +28,19 @@ def _object_key(obj: OptObject) -> tuple[int, int]:
     return (int(obj.id), int(obj.z))
 
 
+def _shape_key(obj: OptObject) -> tuple[object, ...]:
+    return (
+        *_object_key(obj),
+        obj.exact.kind,
+        tuple(sorted((str(k), repr(v)) for k, v in obj.exact.params.items())),
+        repr(obj.fill),
+    )
+
+
+def _proposal_sort_key(proposal: Proposal) -> tuple[tuple[int, ...], tuple[tuple[object, ...], ...]]:
+    return (_proposal_key(proposal), tuple(sorted(_shape_key(obj) for obj in proposal.new_objects)))
+
+
 def _geometry_changed(original: OptObject, replacement: OptObject) -> bool:
     return original.exact != replacement.exact
 
@@ -80,12 +93,15 @@ def optimize(
     current_masks = {obj_id: np.asarray(mask, dtype=bool).copy() for obj_id, mask in masks.items()}
 
     for pass_fn in passes:
-        proposals = sorted(pass_fn(current_objects, current_masks), key=_proposal_key)
+        proposals = sorted(pass_fn(current_objects, current_masks), key=_proposal_sort_key)
         consumed_in_pass: set[int] = set()
 
         for proposal in proposals:
             proposal_ids = _proposal_key(proposal)
             if not proposal_ids:
+                continue
+            replacement_ids = [int(obj.id) for obj in proposal.new_objects]
+            if len(set(replacement_ids)) != len(replacement_ids):
                 continue
             if any(obj_id in consumed_in_pass for obj_id in proposal_ids):
                 continue

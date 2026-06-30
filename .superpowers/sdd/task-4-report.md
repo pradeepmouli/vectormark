@@ -77,3 +77,13 @@ Final local test output
 - `PYTHONPATH=src ./.venv/bin/python -m pytest tests/optimizer/test_framework.py -q`
   - Result:
     `.......                                                                  [100%]`
+
+Task 4 proposal tie and duplicate-id fix
+- Added a deterministic proposal sort key that includes both consumed ids and value-derived replacement geometry, so proposals with the same consumed-id set no longer depend on pass-provided order.
+- Rejected proposals with duplicate replacement ids before gating or mutation to avoid duplicate objects with one mask entry.
+- Added regressions for same-`obj_ids` proposal tie-breaking and duplicate replacement-id rejection without state mutation.
+
+Final local test output
+- `PYTHONPATH=src ./.venv/bin/python -m pytest tests/optimizer/test_framework.py -q`
+  - Result:
+    `.........                                                                [100%]`
