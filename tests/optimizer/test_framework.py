@@ -236,3 +236,40 @@ def test_framework_rejects_empty_replacements_without_mutation():
     out = optimize(objs, masks, [empty_pass, verify_unchanged])
 
     assert [obj.id for obj in out] == [1]
+
+
+def test_framework_canonicalizes_input_order_for_later_passes():
+    objs = [_rect_obj(2, 5, 5, x=5), _rect_obj(1, 5, 5)]
+    masks = {
+        1: np.zeros((20, 20), bool),
+        2: np.zeros((20, 20), bool),
+    }
+    masks[1][0:5, 0:5] = True
+    masks[2][0:5, 5:10] = True
+
+    def verify_canonical(os, ms):
+        assert [obj.id for obj in os] == [1, 2]
+        return []
+
+    out = optimize(objs, masks, [verify_canonical])
+
+    assert [obj.id for obj in out] == [1, 2]
+
+
+def test_framework_rejects_duplicate_consumed_ids_without_mutation():
+    objs = [_rect_obj(1, 10, 10)]
+    masks = {1: np.zeros((20, 20), bool)}
+    masks[1][0:10, 0:10] = True
+    original_mask = masks[1].copy()
+
+    def duplicate_consumed_pass(os, ms):
+        return [Proposal((1, 1), [_rect_obj(9, 10, 10)])]
+
+    def verify_unchanged(os, ms):
+        assert [obj.id for obj in os] == [1]
+        assert np.array_equal(ms[1], original_mask)
+        return []
+
+    out = optimize(objs, masks, [duplicate_consumed_pass, verify_unchanged])
+
+    assert [obj.id for obj in out] == [1]

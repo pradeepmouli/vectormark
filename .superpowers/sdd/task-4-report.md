@@ -97,6 +97,16 @@ Final local test output
   - Result:
     `..........                                                               [100%]`
 
+Task 4 canonical object ordering fix
+- Canonicalized `current_objects` by stable object key at optimizer entry, before each pass, and after each accepted mutation so later passes do not observe caller-supplied or splice-order object ordering.
+- Rejected proposals with duplicate consumed ids before normalization or mutation.
+- Added regressions for canonicalizing reversed input order and for rejecting duplicate consumed ids without mutating objects or masks.
+
+Final local test output
+- `PYTHONPATH=src ./.venv/bin/python -m pytest tests/optimizer/test_framework.py -q`
+  - Result:
+    `............                                                             [100%]`
+
 Task 4 gate API fix
 - Replaced the framework's inline `coverage_residual(...) > budget` comparison with the shared `gate_ok(..., budget=budget)` API from Task 3, keeping the no-regression decision in one place.
 

@@ -89,14 +89,18 @@ def optimize(
     *,
     budget: float = BUDGET,
 ) -> list[OptObject]:
-    current_objects = list(objects)
+    current_objects = sorted(objects, key=_object_key)
     current_masks = {obj_id: np.asarray(mask, dtype=bool).copy() for obj_id, mask in masks.items()}
 
     for pass_fn in passes:
+        current_objects = sorted(current_objects, key=_object_key)
         proposals = sorted(pass_fn(current_objects, current_masks), key=_proposal_sort_key)
         consumed_in_pass: set[int] = set()
 
         for proposal in proposals:
+            raw_proposal_ids = [int(obj_id) for obj_id in proposal.obj_ids]
+            if len(set(raw_proposal_ids)) != len(raw_proposal_ids):
+                continue
             proposal_ids = _proposal_key(proposal)
             if not proposal_ids:
                 continue
@@ -142,12 +146,9 @@ def optimize(
             }
             consumed_in_pass.update(proposal_ids)
 
-            insert_at = min(
-                idx for idx, obj in enumerate(current_objects) if obj.id in proposal_ids
-            )
             remaining = [obj for obj in current_objects if obj.id not in proposal_ids]
             replacements = sorted(proposal.new_objects, key=_object_key)
-            current_objects = remaining[:insert_at] + replacements + remaining[insert_at:]
+            current_objects = sorted(remaining + replacements, key=_object_key)
 
             for obj_id in proposal_ids:
                 current_masks.pop(obj_id, None)
