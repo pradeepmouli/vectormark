@@ -81,6 +81,26 @@ def test_framework_rejects_multi_id_new_id_without_union_coverage():
     assert [obj.exact.params["w"] for obj in out] == [10.0, 10.0]
 
 
+def test_framework_rejects_multi_id_proposal_that_drops_consumed_coverage():
+    objs = [
+        _rect_obj(1, 10, 10, x=0, y=0),
+        _rect_obj(2, 10, 10, x=10, y=0),
+    ]
+    masks = {
+        1: np.zeros((20, 20), bool),
+        2: np.zeros((20, 20), bool),
+    }
+    masks[1][0:10, 0:10] = True
+    masks[2][0:10, 10:20] = True
+
+    def drop_second_object_pass(os, ms):
+        return [Proposal((1, 2), [os[0]])]
+
+    out = optimize(objs, masks, [drop_second_object_pass])
+
+    assert [obj.id for obj in out] == [1, 2]
+
+
 def test_framework_accepts_multi_id_new_id_with_union_coverage():
     objs = [
         _rect_obj(1, 10, 10, x=0, y=0),
@@ -171,11 +191,11 @@ def test_framework_multi_id_matching_replacement_uses_own_mask_not_union():
     masks[2][0:10, 10:20] = True
 
     def replace_one_consumed_id(os, ms):
-        return [Proposal((1, 2), [_path_square_obj(1, size=9.0)])]
+        return [Proposal((1, 2), [_path_square_obj(1, size=9.0), os[1]])]
 
     out = optimize(objs, masks, [replace_one_consumed_id], budget=0.25)
 
-    assert [obj.id for obj in out] == [1]
+    assert [obj.id for obj in out] == [1, 2]
     assert out[0].exact.kind == "path"
 
 

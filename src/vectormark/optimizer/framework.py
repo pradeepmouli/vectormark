@@ -5,6 +5,7 @@ from collections.abc import Iterable
 from typing import Protocol
 
 import numpy as np
+from shapely.ops import unary_union
 
 from .gate import BUDGET, gate_ok
 from .optobject import OptObject
@@ -51,6 +52,10 @@ def _union_masks(mask_by_id: dict[int, np.ndarray], obj_ids: Iterable[int]) -> n
     for obj_id in ordered_ids:
         union |= np.asarray(mask_by_id[obj_id], dtype=bool)
     return union
+
+
+def _union_flats(objects: Iterable[OptObject]):
+    return unary_union([obj.flat for obj in objects])
 
 
 def _matched_original(
@@ -125,7 +130,15 @@ def optimize(
 
             union_mask = _union_masks(pass_masks, proposal_ids)
             gates_ok = True
+            if len(proposal_ids) > 1 and not gate_ok(
+                _union_flats(proposal.new_objects),
+                union_mask,
+                budget=budget,
+            ):
+                gates_ok = False
             for replacement in proposal.new_objects:
+                if not gates_ok:
+                    break
                 gate_mask = _gate_mask(
                     proposal_ids,
                     pass_original_by_id,

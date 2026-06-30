@@ -117,6 +117,17 @@ Final local test output
   - Result:
     `.............                                                            [100%]`
 
+Task 4 aggregate multi-id gate fix
+- Added an aggregate coverage gate for every multi-id proposal: the union of all replacement geometries must satisfy `gate_ok()` against the union of consumed masks before any per-object gate can accept the proposal.
+- Kept the per-object gates as additional constraints for matching-id and single-id replacement behavior.
+- Added a regression for a multi-id proposal that consumes two objects but returns only one unchanged object; the proposal is rejected so consumed coverage cannot be dropped without a gate.
+- Adjusted the matching-id per-object gate regression so both consumed objects remain represented while proving matched replacements are still gated against their own original masks.
+
+Final local test output
+- `PYTHONPATH=src ./.venv/bin/python -m pytest tests/optimizer/test_framework.py -q`
+  - Result:
+    `..............                                                           [100%]`
+
 Task 4 gate API fix
 - Replaced the framework's inline `coverage_residual(...) > budget` comparison with the shared `gate_ok(..., budget=budget)` API from Task 3, keeping the no-regression decision in one place.
 
