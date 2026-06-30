@@ -6,7 +6,7 @@ from typing import Protocol
 
 import numpy as np
 
-from .gate import BUDGET, coverage_residual
+from .gate import BUDGET, gate_ok
 from .optobject import OptObject
 
 Proposal = namedtuple("Proposal", "obj_ids new_objects")
@@ -127,7 +127,7 @@ def optimize(
                 )
                 if gate_mask is None:
                     continue
-                if coverage_residual(replacement.flat, gate_mask) > budget:
+                if not gate_ok(replacement.flat, gate_mask, budget=budget):
                     gates_ok = False
                     break
 

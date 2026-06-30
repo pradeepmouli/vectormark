@@ -87,3 +87,11 @@ Final local test output
 - `PYTHONPATH=src ./.venv/bin/python -m pytest tests/optimizer/test_framework.py -q`
   - Result:
     `.........                                                                [100%]`
+
+Task 4 gate API fix
+- Replaced the framework's inline `coverage_residual(...) > budget` comparison with the shared `gate_ok(..., budget=budget)` API from Task 3, keeping the no-regression decision in one place.
+
+Final local test output
+- `PYTHONPATH=src ./.venv/bin/python -m pytest tests/optimizer/test_framework.py -q`
+  - Result:
+    `.........                                                                [100%]`
