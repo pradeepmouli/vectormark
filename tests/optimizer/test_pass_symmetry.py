@@ -78,6 +78,19 @@ def test_symmetry_pass_reconstructs_self_symmetric_object_as_exact_path():
     assert reflected.area < 1e-6
 
 
+def test_symmetry_pass_preserves_self_symmetric_native_primitive():
+    poly = Polygon([(20.0, 20.0), (60.0, 20.0), (60.0, 60.0), (20.0, 60.0)])
+    obj = OptObject(
+        1,
+        Shape("rect", {"x": 20.0, "y": 20.0, "w": 40.0, "h": 40.0}),
+        FlatFill("#112233"),
+        0,
+        poly,
+    )
+
+    assert symmetry_pass([obj], {obj.id: _mask_for_polygon(poly)}) == []
+
+
 def test_symmetry_pass_skips_non_flat_fill_pair_use():
     left = _rect(1, bounds=(10.0, 20.0, 22.0, 34.0), fill=FlatFill("#112233"))
     right = _rect(

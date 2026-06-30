@@ -302,6 +302,8 @@ def symmetry_pass(
     for obj, flat, _fill_hex in usable:
         if obj.id in paired_ids:
             continue
+        if obj.exact.kind != "path":
+            continue
         best = _best_self_reconstruction(flat, masks[obj.id])
         if best is None:
             continue

@@ -21,6 +21,7 @@ from .emit import (
     reflect_path_d,
     render_svg_doc,
     resolve_fill,
+    resolve_use_shape,
     shape_to_path_d,
     shape_to_svg,
     transform_path_d,
@@ -61,6 +62,7 @@ class Options:
                                         # (LANCZOS) before segmentation; None = off (default).
                                         # Set e.g. working_max_dim=768 for noisy AI-raster inputs
                                         # where high resolution amplifies quantization noise.
+    optimizer: bool = False             # experimental geometry optimizer path; default off.
 
 
 COVERAGE_HOLE_TOL = 0.05   # if >5% of a region's eroded interior would fall below the 0.5
@@ -696,6 +698,35 @@ def _idealize_rectified(arr: np.ndarray, opt: Options, rho: float, w0: int, h0: 
     return doc, cands, axes, sym_diags, diag_extra
 
 
+def _render_optimizer_body(objects) -> tuple[list[str], list[str]]:
+    """Serialize optimized objects, resolving object-id based <use> references."""
+    defs: list[str] = []
+    ordered = sorted(objects, key=lambda obj: (int(obj.id), int(obj.z)))
+    id_map = {int(obj.id): f"s{idx}" for idx, obj in enumerate(ordered)}
+    body: list[str] = []
+    for obj in ordered:
+        fill = resolve_fill(obj.fill, defs)
+        shape = resolve_use_shape(obj.exact, id_map)
+        body.append(shape_to_svg(shape, fill, id_map[int(obj.id)]))
+    return body, defs
+
+
+def _idealize_optimizer(arr: np.ndarray, opt: Options, width: int, height: int) -> str:
+    """Experimental faithful-vectorize + geometry-optimizer pipeline."""
+    from .optimizer.faithful import faithful_objects
+    from .optimizer.framework import optimize
+    from .optimizer.passes import clones_pass, primitives_pass, simplify_pass, symmetry_pass
+
+    objects, masks = faithful_objects(arr, opt)
+    optimized = optimize(
+        objects,
+        masks,
+        [primitives_pass, clones_pass, symmetry_pass, simplify_pass],
+    )
+    body, defs = _render_optimizer_body(optimized)
+    return render_svg_doc(width, height, body, defs)
+
+
 def _flatten_on_white(im: Image.Image) -> np.ndarray:
     """RGB (H,W,3) uint8 with any alpha composited onto WHITE (a transparent surround is
     background, not a mark). PIL's plain `convert("RGB")` instead DROPS alpha, keeping each
@@ -745,6 +776,15 @@ def idealize(image, *, options: Options | None = None, report: bool = False) -> 
     orig_h, orig_w = arr.shape[:2]
     arr = _condition_input(arr, opt.working_max_dim)
     h0, w0 = arr.shape[:2]
+
+    if opt.optimizer:
+        svg = _idealize_optimizer(arr, opt, w0, h0)
+        if (arr.shape[1], arr.shape[0]) != (orig_w, orig_h):
+            svg = _set_svg_output_size(svg, orig_w, orig_h)
+        return (
+            svg,
+            _build_report([], [], [], opt=opt, regions=[], diag_extra={"n_components": 0}),
+        ) if report else svg
 
     w, h, regions = _segment_image(arr, opt)
     if not regions:
