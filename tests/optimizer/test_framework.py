@@ -181,6 +181,30 @@ def test_framework_sorts_replacements_before_later_passes():
     assert [obj.id for obj in out] == [7, 8]
 
 
+def test_framework_aggregate_gate_is_independent_of_replacement_order():
+    objs = [
+        _rect_obj(1, 10, 10, x=0, y=0),
+        _rect_obj(2, 10, 10, x=10, y=0),
+    ]
+    masks = {
+        1: np.zeros((20, 20), bool),
+        2: np.zeros((20, 20), bool),
+    }
+    masks[1][0:10, 0:10] = True
+    masks[2][0:10, 10:20] = True
+
+    def forward_pass(os, ms):
+        return [Proposal((1, 2), [_rect_obj(8, 10, 10, x=10), _rect_obj(7, 10, 10)])]
+
+    def reverse_pass(os, ms):
+        return [Proposal((1, 2), [_rect_obj(7, 10, 10), _rect_obj(8, 10, 10, x=10)])]
+
+    forward = optimize(objs, masks, [forward_pass])
+    reverse = optimize(objs, masks, [reverse_pass])
+
+    assert [obj.id for obj in forward] == [obj.id for obj in reverse]
+
+
 def test_framework_multi_id_matching_replacement_uses_own_mask_not_union():
     objs = [_rect_obj(1, 10, 10), _rect_obj(2, 10, 10, x=10)]
     masks = {
@@ -315,3 +339,24 @@ def test_framework_rejects_same_pass_consumption_of_created_id():
     out = optimize(objs, masks, [chaining_pass, verify_only_first_proposal_applied])
 
     assert [obj.id for obj in out] == [9]
+
+
+def test_framework_rejects_same_pass_reuse_of_created_replacement_id():
+    objs = [_rect_obj(1, 10, 10), _rect_obj(2, 10, 10, x=10)]
+    masks = {
+        1: np.zeros((20, 20), bool),
+        2: np.zeros((20, 20), bool),
+    }
+    masks[1][0:10, 0:10] = True
+    masks[2][0:10, 10:20] = True
+
+    def duplicate_created_id_pass(os, ms):
+        return [
+            Proposal((1,), [_rect_obj(9, 10, 10)]),
+            Proposal((2,), [_rect_obj(9, 10, 10, x=10)]),
+        ]
+
+    out = optimize(objs, masks, [duplicate_created_id_pass])
+
+    assert [obj.id for obj in out] == [2, 9]
+    assert len({obj.id for obj in out}) == len(out)

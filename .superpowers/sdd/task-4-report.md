@@ -128,6 +128,17 @@ Final local test output
   - Result:
     `..............                                                           [100%]`
 
+Task 4 same-pass alias and aggregate-order fix
+- Extended live replacement-id alias checks to include ids created earlier in the same pass, not only ids present in the pass-start snapshot.
+- Sorted replacement objects before aggregate `unary_union()` so multi-id aggregate gating does not depend on callback-provided replacement order.
+- Changed unmatched replacements in multi-id proposals to rely on the aggregate gate instead of each being individually gated against the full consumed union.
+- Added regressions for same-pass reuse of a created replacement id and for equivalent aggregate-gate outcomes under reversed replacement order.
+
+Final local test output
+- `PYTHONPATH=src ./.venv/bin/python -m pytest tests/optimizer/test_framework.py -q`
+  - Result:
+    `................                                                         [100%]`
+
 Task 4 gate API fix
 - Replaced the framework's inline `coverage_residual(...) > budget` comparison with the shared `gate_ok(..., budget=budget)` API from Task 3, keeping the no-regression decision in one place.
 

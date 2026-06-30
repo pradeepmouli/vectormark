@@ -55,7 +55,7 @@ def _union_masks(mask_by_id: dict[int, np.ndarray], obj_ids: Iterable[int]) -> n
 
 
 def _union_flats(objects: Iterable[OptObject]):
-    return unary_union([obj.flat for obj in objects])
+    return unary_union([obj.flat for obj in sorted(objects, key=_shape_key)])
 
 
 def _matched_original(
@@ -81,7 +81,7 @@ def _gate_mask(
     if original is None:
         if len(proposal_ids) == 1:
             return current_masks[proposal_ids[0]]
-        return union_mask
+        return None
     if not _geometry_changed(original, replacement):
         return None
     return current_masks[original.id]
@@ -124,6 +124,12 @@ def optimize(
                 continue
             if any(
                 replacement.id in pass_original_by_id and replacement.id not in proposal_ids
+                for replacement in proposal.new_objects
+            ):
+                continue
+            current_object_ids = {obj.id for obj in current_objects}
+            if any(
+                replacement.id in current_object_ids and replacement.id not in proposal_ids
                 for replacement in proposal.new_objects
             ):
                 continue
