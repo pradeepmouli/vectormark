@@ -107,6 +107,16 @@ Final local test output
   - Result:
     `............                                                             [100%]`
 
+Task 4 pass snapshot fix
+- Captured pass-start objects, masks, and original-id lookup before applying proposals, then used that snapshot for proposal validation, live-id alias checks, gate masks, and preserved replacement masks.
+- This prevents a later proposal in the same pass from consuming ids created by an earlier proposal in that pass.
+- Added a regression where one pass returns `Proposal((1,), [9])` and `Proposal((9,), [10])`; only the first proposal applies because id `9` was not in the pass-start snapshot.
+
+Final local test output
+- `PYTHONPATH=src ./.venv/bin/python -m pytest tests/optimizer/test_framework.py -q`
+  - Result:
+    `.............                                                            [100%]`
+
 Task 4 gate API fix
 - Replaced the framework's inline `coverage_residual(...) > budget` comparison with the shared `gate_ok(..., budget=budget)` API from Task 3, keeping the no-regression decision in one place.
 

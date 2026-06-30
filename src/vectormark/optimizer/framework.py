@@ -94,7 +94,10 @@ def optimize(
 
     for pass_fn in passes:
         current_objects = sorted(current_objects, key=_object_key)
-        proposals = sorted(pass_fn(current_objects, current_masks), key=_proposal_sort_key)
+        pass_objects = list(current_objects)
+        pass_masks = {obj_id: mask.copy() for obj_id, mask in current_masks.items()}
+        pass_original_by_id = {obj.id: obj for obj in pass_objects}
+        proposals = sorted(pass_fn(pass_objects, pass_masks), key=_proposal_sort_key)
         consumed_in_pass: set[int] = set()
 
         for proposal in proposals:
@@ -112,22 +115,21 @@ def optimize(
             if any(obj_id in consumed_in_pass for obj_id in proposal_ids):
                 continue
 
-            original_by_id = {obj.id: obj for obj in current_objects}
-            if any(obj_id not in original_by_id or obj_id not in current_masks for obj_id in proposal_ids):
+            if any(obj_id not in pass_original_by_id or obj_id not in pass_masks for obj_id in proposal_ids):
                 continue
             if any(
-                replacement.id in original_by_id and replacement.id not in proposal_ids
+                replacement.id in pass_original_by_id and replacement.id not in proposal_ids
                 for replacement in proposal.new_objects
             ):
                 continue
 
-            union_mask = _union_masks(current_masks, proposal_ids)
+            union_mask = _union_masks(pass_masks, proposal_ids)
             gates_ok = True
             for replacement in proposal.new_objects:
                 gate_mask = _gate_mask(
                     proposal_ids,
-                    original_by_id,
-                    current_masks,
+                    pass_original_by_id,
+                    pass_masks,
                     replacement,
                     union_mask,
                 )
@@ -141,7 +143,7 @@ def optimize(
                 continue
 
             preserved_masks = {
-                obj_id: np.asarray(current_masks[obj_id], dtype=bool).copy()
+                obj_id: np.asarray(pass_masks[obj_id], dtype=bool).copy()
                 for obj_id in proposal_ids
             }
             consumed_in_pass.update(proposal_ids)
@@ -158,7 +160,7 @@ def optimize(
                 if replacement.id in current_masks:
                     current_masks.pop(replacement.id, None)
 
-                if replacement.id in original_by_id and replacement.id in proposal_ids:
+                if replacement.id in pass_original_by_id and replacement.id in proposal_ids:
                     if replacement.id not in assigned_replacement_ids:
                         current_masks[replacement.id] = preserved_masks[replacement.id]
                         assigned_replacement_ids.add(replacement.id)

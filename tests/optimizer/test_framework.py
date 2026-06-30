@@ -273,3 +273,25 @@ def test_framework_rejects_duplicate_consumed_ids_without_mutation():
     out = optimize(objs, masks, [duplicate_consumed_pass, verify_unchanged])
 
     assert [obj.id for obj in out] == [1]
+
+
+def test_framework_rejects_same_pass_consumption_of_created_id():
+    objs = [_rect_obj(1, 10, 10)]
+    masks = {1: np.zeros((20, 20), bool)}
+    masks[1][0:10, 0:10] = True
+
+    def chaining_pass(os, ms):
+        return [
+            Proposal((1,), [_rect_obj(9, 10, 10)]),
+            Proposal((9,), [_rect_obj(10, 10, 10)]),
+        ]
+
+    def verify_only_first_proposal_applied(os, ms):
+        assert [obj.id for obj in os] == [9]
+        assert 9 in ms
+        assert 10 not in ms
+        return []
+
+    out = optimize(objs, masks, [chaining_pass, verify_only_first_proposal_applied])
+
+    assert [obj.id for obj in out] == [9]
