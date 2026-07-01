@@ -30,29 +30,6 @@ def region_contours(mask: np.ndarray, *, coverage: np.ndarray | None = None) -> 
     return out
 
 
-HOLE_AREA_FRACTION = 0.01   # an inner contour smaller than this fraction of the outer
-                            # area is quantization speckle, not an intentional counter.
-
-
-def significant_contours(
-    mask: np.ndarray, *,
-    coverage: np.ndarray | None = None,
-    min_hole_fraction: float = HOLE_AREA_FRACTION,
-):
-    """Outer contour + only inner contours that clear the area fraction. Drops tiny
-    noise holes (the white specks) while keeping genuine counters."""
-    contours = [c for c in region_contours(mask, coverage=coverage) if len(c) >= 3]
-    if not contours:
-        return []
-    areas = [_polygon_area(c) for c in contours]
-    outer_i = int(np.argmax(areas))
-    outer_area = areas[outer_i] or 1.0
-    keep = [contours[outer_i]]
-    floor = min_hole_fraction * outer_area
-    keep += [c for i, c in enumerate(contours) if i != outer_i and areas[i] >= floor]
-    return keep
-
-
 def outer_contour(mask: np.ndarray, *, coverage: np.ndarray | None = None) -> np.ndarray:
     """Longest sub-pixel contour of `mask`, as an (N, 2) array of (x, y) points.
     With `coverage` (a float α field, boundary at 0.5) the contour is extracted from the

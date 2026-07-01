@@ -100,7 +100,7 @@ def test_optimizer_no_symmetry_skips_symmetry_pass():
 def test_optimizer_pipeline_does_not_mirror_asymmetric_single_object():
     svg = idealize(_asymmetric_cloud_image(), options=Options(optimizer=True))
 
-    assert any(token in svg for token in ("<path", "<polygon", "<circle", "<ellipse", "<rect"))
+    assert "<path" in svg
     assert "<use" not in svg
 
 
