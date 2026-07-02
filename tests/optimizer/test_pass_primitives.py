@@ -87,6 +87,23 @@ def test_primitives_pass_uses_largest_polygon_exterior_for_multipolygon():
     assert replacement.exact.params["r"] > 10.0
 
 
+def test_primitives_pass_skips_polygon_with_counter():
+    outer = Point(40.0, 40.0).buffer(24.0, quad_segs=32)
+    inner = Point(40.0, 40.0).buffer(5.0, quad_segs=32)
+    ring = Polygon(outer.exterior.coords, [inner.exterior.coords])
+    obj = OptObject(
+        id=8,
+        exact=Shape("path", {"d": "M0 0 L1 0 L1 1 L0 1 Z"}),
+        fill=FlatFill("#000000"),
+        z=0,
+        flat=ring,
+    )
+
+    proposals = primitives_pass([obj], {8: np.zeros((80, 80), dtype=bool)})
+
+    assert proposals == []
+
+
 def test_primitives_pass_skips_empty_and_nonpolygon_geometry():
     empty = OptObject(
         id=1,

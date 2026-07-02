@@ -448,7 +448,11 @@ def _render_body(
         # outweighs the vertical pair axis within a single component.
         # For single-component images (e.g. a full-bleed radish+wordmark) this is
         # identical to a global call, so the radish body's vertical axis still wins.
-        _comp_groups = [] if opt.no_symmetry else detect_symmetry_groups(comp)
+        _comp_groups = [] if opt.no_symmetry else detect_symmetry_groups(
+            comp,
+            straddle_iou=opt.straddle_iou,
+            pair_iou=opt.pair_iou,
+        )
         _comp_region_axis: dict[int, Axis2D | None] = {}
         _comp_region_role: dict[int, str] = {}
         _comp_pair_partner: dict[int, int] = {}
@@ -701,23 +705,28 @@ def _idealize_rectified(arr: np.ndarray, opt: Options, rho: float, w0: int, h0: 
 def _render_optimizer_body(objects, *, flatten: bool = False) -> tuple[list[str], list[str]]:
     """Serialize optimized objects, resolving object-id based <use> references."""
     defs: list[str] = []
-    ordered = sorted(objects, key=lambda obj: (int(obj.id), int(obj.z)))
+    ordered = sorted(objects, key=lambda obj: (int(obj.z), int(obj.id)))
     id_map = {int(obj.id): f"s{idx}" for idx, obj in enumerate(ordered)}
     object_by_id = {int(obj.id): obj for obj in ordered}
     body: list[str] = []
+
+    def _inlined_use_shape(source_shape: Shape, transform) -> Shape:
+        params = {
+            "d": shape_to_path_d(source_shape),
+            "transform": transform,
+        }
+        rule = fill_rule_for(source_shape)
+        if rule is not None:
+            params["fill_rule"] = rule
+        return Shape("use", params)
+
     for obj in ordered:
         fill = resolve_fill(obj.fill, defs)
         shape = resolve_use_shape(obj.exact, id_map)
         if flatten:
             if shape.kind == "use":
                 source = object_by_id[int(obj.exact.params["href_obj_id"])]
-                shape = Shape(
-                    "use",
-                    {
-                        "d": shape_to_path_d(source.exact),
-                        "transform": shape.params["transform"],
-                    },
-                )
+                shape = _inlined_use_shape(source.exact, shape.params["transform"])
                 fill = str(obj.exact.params.get("fill", fill))
             body.append(path_svg(shape_to_path_d(shape), fill, fill_rule_for(shape)))
             continue
@@ -727,13 +736,7 @@ def _render_optimizer_body(objects, *, flatten: bool = False) -> tuple[list[str]
             source_fill = resolve_fill(source.fill, defs)
             use_fill = str(obj.exact.params.get("fill", fill))
             if use_fill != source_fill:
-                shape = Shape(
-                    "use",
-                    {
-                        "d": shape_to_path_d(source.exact),
-                        "transform": shape.params["transform"],
-                    },
-                )
+                shape = _inlined_use_shape(source.exact, shape.params["transform"])
                 body.append(path_svg(shape_to_path_d(shape), use_fill, fill_rule_for(shape)))
                 continue
 

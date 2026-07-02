@@ -20,6 +20,8 @@ def _polygon_exterior_points(flat: object) -> np.ndarray | None:
 
     if polygon is None or polygon.is_empty:
         return None
+    if polygon.interiors:
+        return None
 
     coords = np.asarray(polygon.exterior.coords, dtype=float)
     if len(coords) < 4:

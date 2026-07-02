@@ -60,11 +60,13 @@ def sym_off_ratio(mask: np.ndarray, axis: Axis2D) -> float:
     return off / peri if peri > 0 else (0.0 if off == 0 else float("inf"))
 
 
-def region_is_self_symmetric(region, axis: Axis2D) -> bool:
-    return sym_off_ratio(region.mask, axis) <= K_BAND
+def region_is_self_symmetric(region, axis: Axis2D, *, max_off_ratio: float = K_BAND) -> bool:
+    return sym_off_ratio(region.mask, axis) <= max_off_ratio
 
 
-def regions_mirror_pair(a, b, axis: Axis2D) -> bool:
+def regions_mirror_pair(a, b, axis: Axis2D, *, max_off_ratio: float = K_BAND) -> bool:
+    if getattr(a, "color_hex", None) != getattr(b, "color_hex", None):
+        return False
     aa, ab = int(a.mask.sum()), int(b.mask.sum())
     if aa == 0 or ab == 0 or min(aa, ab) / max(aa, ab) < 0.9:
         return False
@@ -72,7 +74,7 @@ def regions_mirror_pair(a, b, axis: Axis2D) -> bool:
     off = reflection_off_count(_fg_xy(a.mask), axis, dist_b)
     peri_a = _perimeter(a.mask)
     ratio = off / peri_a if peri_a > 0 else (0.0 if off == 0 else float("inf"))
-    return ratio <= K_BAND
+    return ratio <= max_off_ratio
 
 
 AxisProposal = namedtuple("AxisProposal", "theta cx cy weight")
@@ -83,7 +85,13 @@ def _centroid(mask):
     return float(xs.mean()), float(ys.mean())
 
 
-def propose_axes(regions, *, theta_steps: int = 12):
+def propose_axes(
+    regions,
+    *,
+    theta_steps: int = 12,
+    straddle_off_ratio: float = K_BAND,
+    pair_off_ratio: float = K_BAND,
+):
     props: list[AxisProposal] = []
     ordered = sorted(regions, key=lambda r: r.label)
     # self-axes
@@ -93,7 +101,7 @@ def propose_axes(regions, *, theta_steps: int = 12):
         cx, cy = _centroid(r.mask)
         area = int(r.mask.sum())
         for theta in np.linspace(0.0, np.pi, theta_steps, endpoint=False):
-            if region_is_self_symmetric(r, Axis2D(float(theta), cx, cy)):
+            if region_is_self_symmetric(r, Axis2D(float(theta), cx, cy), max_off_ratio=straddle_off_ratio):
                 props.append(AxisProposal(float(theta), cx, cy, area))
     # pair-bisectors
     h, w = ordered[0].mask.shape if ordered else (1, 1)
@@ -102,6 +110,8 @@ def propose_axes(regions, *, theta_steps: int = 12):
     areas = {r.label: int(r.mask.sum()) for r in ordered}
     for i, a in enumerate(ordered):
         for b in ordered[i + 1:]:
+            if a.color_hex != b.color_hex:
+                continue
             aa, ab = areas[a.label], areas[b.label]
             if aa == 0 or ab == 0 or min(aa, ab) / max(aa, ab) < 0.9:
                 continue
@@ -110,7 +120,7 @@ def propose_axes(regions, *, theta_steps: int = 12):
                 continue
             theta = (np.arctan2(by - ay, bx - ax) + np.pi / 2) % np.pi
             mx, my = (ax + bx) / 2.0, (ay + by) / 2.0
-            if regions_mirror_pair(a, b, Axis2D(float(theta), mx, my)):
+            if regions_mirror_pair(a, b, Axis2D(float(theta), mx, my), max_off_ratio=pair_off_ratio):
                 props.append(AxisProposal(float(theta), mx, my, aa + ab))
     return props
 
@@ -149,14 +159,34 @@ def cluster_axes(proposals, *, d_theta: float = 0.09, d_offset: float = 2.0, min
 SymmetricGroup = namedtuple("SymmetricGroup", "axes straddlers pairs loners")
 
 
-def detect_symmetry_groups(regions):
+def _threshold_to_off_ratio(value: float, default_value: float) -> float:
+    if default_value >= 1.0:
+        return 0.0
+    return K_BAND * max(0.0, 1.0 - float(value)) / max(1e-9, 1.0 - default_value)
+
+
+def detect_symmetry_groups(
+    regions,
+    *,
+    straddle_iou: float = 0.96,
+    pair_iou: float = 0.90,
+):
     ordered = sorted(regions, key=lambda r: r.label)
-    ranked = cluster_axes(propose_axes(ordered))
+    straddle_off_ratio = _threshold_to_off_ratio(straddle_iou, STRADDLE_MIN_IOU)
+    pair_off_ratio = _threshold_to_off_ratio(pair_iou, 1.0 - SYM_TOL)
+    ranked = cluster_axes(propose_axes(
+        ordered,
+        straddle_off_ratio=straddle_off_ratio,
+        pair_off_ratio=pair_off_ratio,
+    ))
     claimed: set[int] = set()
     groups: list[dict] = []   # {"axes":[Axis2D], "straddlers":[], "pairs":[], "members":set}
     for axis, _w in ranked:
         avail = [r for r in ordered if r.label not in claimed]
-        straddlers = [r for r in avail if region_is_self_symmetric(r, axis)]
+        straddlers = [
+            r for r in avail
+            if region_is_self_symmetric(r, axis, max_off_ratio=straddle_off_ratio)
+        ]
         pairs = []
         used = {r.label for r in straddlers}
         rest = [r for r in avail if r.label not in used]
@@ -166,7 +196,7 @@ def detect_symmetry_groups(regions):
             for b in rest[i + 1:]:
                 if b.label in used:
                     continue
-                if regions_mirror_pair(a, b, axis):
+                if regions_mirror_pair(a, b, axis, max_off_ratio=pair_off_ratio):
                     pairs.append((a, b)); used.add(a.label); used.add(b.label); break
         members = {r.label for r in straddlers} | used
         if straddlers or pairs:
@@ -176,7 +206,10 @@ def detect_symmetry_groups(regions):
             # axis claims no NEW regions: if some existing group's straddlers ALL also
             # satisfy this axis, it is a secondary axis of that figure -> append.
             for g in groups:
-                if g["straddlers"] and all(region_is_self_symmetric(r, axis) for r in g["straddlers"]):
+                if g["straddlers"] and all(
+                    region_is_self_symmetric(r, axis, max_off_ratio=straddle_off_ratio)
+                    for r in g["straddlers"]
+                ):
                     g["axes"].append(axis)
                     break
     result = [SymmetricGroup(tuple(g["axes"]), g["straddlers"], g["pairs"], []) for g in groups]

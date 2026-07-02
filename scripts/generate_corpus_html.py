@@ -20,6 +20,7 @@ import numpy as np
 from PIL import Image
 
 from vectormark import Options, idealize
+from vectormark.pipeline import _flatten_on_white
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
@@ -69,7 +70,8 @@ def default_entries() -> list[CorpusEntry]:
 
 def _image_factory(path: Path) -> Callable[[], np.ndarray]:
     def _load() -> np.ndarray:
-        return np.asarray(Image.open(path).convert("RGB"), dtype=np.uint8)
+        with Image.open(path) as image:
+            return _flatten_on_white(image)
 
     return _load
 

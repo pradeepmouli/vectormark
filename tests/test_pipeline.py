@@ -1,6 +1,9 @@
 import numpy as np
 from PIL import Image
-from vectormark.pipeline import Options, _segment_image, idealize
+from vectormark.candidate import FlatFill
+from vectormark.fit import Shape
+from vectormark.optimizer.optobject import OptObject
+from vectormark.pipeline import Options, _render_optimizer_body, _segment_image, idealize
 from tests._render import render_svg, ssim
 
 
@@ -46,6 +49,90 @@ def test_symmetric_holed_region_emits_exactly_symmetric():
     # and it still renders recognizably to the source (a thin ring is harsh on
     # SSIM, so this is a sanity floor, not a fidelity assertion)
     assert ssim(render_svg(svg, w, h), img) >= 0.90
+
+
+def _evenodd_source(obj_id: int, *, fill: str = "#111111", z: int = 0) -> OptObject:
+    return OptObject(
+        obj_id,
+        Shape(
+            "path",
+            {
+                "d": "M0 0 L20 0 L20 20 L0 20 Z M5 5 L15 5 L15 15 L5 15 Z",
+                "fill_rule": "evenodd",
+            },
+        ),
+        FlatFill(fill),
+        z,
+    )
+
+
+def test_optimizer_body_preserves_evenodd_when_flattening_use():
+    source = _evenodd_source(10)
+    clone = OptObject(
+        20,
+        Shape("use", {"href_obj_id": 10, "transform": (1.0, 0.0, 0.0, 1.0, 24.0, 0.0)}),
+        FlatFill("#111111"),
+        0,
+        flat=source.flat,
+    )
+
+    body, _defs = _render_optimizer_body([clone, source], flatten=True)
+
+    assert body[0].count('fill-rule="evenodd"') == 1
+    assert body[1].count('fill-rule="evenodd"') == 1
+
+
+def test_optimizer_body_preserves_evenodd_when_inlining_recolored_use():
+    source = _evenodd_source(10, fill="#111111")
+    clone = OptObject(
+        20,
+        Shape(
+            "use",
+            {
+                "href_obj_id": 10,
+                "transform": (1.0, 0.0, 0.0, 1.0, 24.0, 0.0),
+                "fill": "#222222",
+            },
+        ),
+        FlatFill("#222222"),
+        0,
+        flat=source.flat,
+    )
+
+    body, _defs = _render_optimizer_body([clone, source])
+
+    assert body[0].startswith('<path id="s0"')
+    assert 'fill="#111111"' in body[0]
+    assert body[1].startswith('<path fill="#222222"')
+    assert 'fill-rule="evenodd"' in body[1]
+
+
+def test_optimizer_body_renders_by_z_then_id():
+    low_source = OptObject(
+        10,
+        Shape("rect", {"x": 0.0, "y": 0.0, "w": 10.0, "h": 10.0}),
+        FlatFill("#111111"),
+        0,
+    )
+    low_use = OptObject(
+        99,
+        Shape("use", {"href_obj_id": 10, "transform": (1.0, 0.0, 0.0, 1.0, 12.0, 0.0)}),
+        FlatFill("#111111"),
+        0,
+        flat=low_source.flat,
+    )
+    high_cover = OptObject(
+        2,
+        Shape("rect", {"x": 0.0, "y": 0.0, "w": 30.0, "h": 30.0}),
+        FlatFill("#333333"),
+        1,
+    )
+
+    body, _defs = _render_optimizer_body([high_cover, low_use, low_source])
+
+    assert 'fill="#111111"' in body[0]
+    assert body[1].startswith('<use')
+    assert 'fill="#333333"' in body[2]
 
 
 def test_area_filter_is_scale_independent():

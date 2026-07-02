@@ -4,7 +4,7 @@ from vectormark.symmetry import Axis2D, _perimeter, reflection_off_count
 from vectormark.symmetry import region_is_self_symmetric, regions_mirror_pair, K_BAND
 from vectormark.symmetry import propose_axes
 from vectormark.symmetry import cluster_axes, AxisProposal
-from vectormark.symmetry import detect_symmetry_groups, sym_off_ratio
+from vectormark.symmetry import detect_symmetry_groups, sym_off_ratio, _threshold_to_off_ratio
 from vectormark.types import Region
 from vectormark.pipeline import idealize, Options
 from scipy import ndimage as ndi
@@ -59,6 +59,26 @@ def test_mirror_pair_detected_and_size_guarded():
     assert regions_mirror_pair(_region(left, 1), _region(right, 2), axis)
     big = np.zeros((80, 80), bool); big[20:60, 50:70] = True        # bigger -> not a pair
     assert not regions_mirror_pair(_region(left, 1), _region(big, 3), axis)
+
+
+def test_mirror_pair_requires_matching_color():
+    left = np.zeros((80, 80), bool); left[30:50, 15:25] = True
+    right = np.zeros((80, 80), bool); right[30:50, 55:65] = True
+    axis = Axis2D(np.pi / 2, 40.0, 40.0)
+
+    assert not regions_mirror_pair(
+        Region(label=1, mask=left, color_hex="#000000"),
+        Region(label=2, mask=right, color_hex="#ffffff"),
+        axis,
+    )
+
+
+def test_iou_threshold_mapping_preserves_default_and_scales_monotonically():
+    default = _threshold_to_off_ratio(0.96, 0.96)
+
+    assert default == K_BAND
+    assert _threshold_to_off_ratio(0.98, 0.96) < default
+    assert _threshold_to_off_ratio(0.90, 0.96) > default
 
 
 def test_propose_axes_finds_vertical_for_centered_symmetric_region():

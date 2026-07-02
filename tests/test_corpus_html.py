@@ -60,6 +60,19 @@ def test_generate_corpus_html_can_opt_into_cubic_paths(tmp_path):
     assert '"cubic_paths": true' in options.read_text()
 
 
+def test_corpus_image_factory_composites_alpha_on_white(tmp_path):
+    rgba = np.zeros((3, 3, 4), dtype=np.uint8)
+    rgba[1, 1] = (200, 30, 30, 255)
+    path = tmp_path / "transparent.png"
+    Image.fromarray(rgba, "RGBA").save(path)
+
+    image = corpus_html._image_factory(path)()
+
+    assert image.shape == (3, 3, 3)
+    assert tuple(image[0, 0]) == (255, 255, 255)
+    assert tuple(image[1, 1]) == (200, 30, 30)
+
+
 def test_default_entries_use_corpus_input_and_include_vbird(tmp_path, monkeypatch):
     corpus = tmp_path / "corpus" / "input"
     legacy = tmp_path / "scratch" / "real-logos"
