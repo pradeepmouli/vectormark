@@ -151,6 +151,23 @@ def test_framework_accepts_single_id_split_and_assigns_replacement_masks():
     assert [current.id for current in out] == [1, 9]
 
 
+def test_framework_updates_region_raster_and_pass_diagnostics():
+    obj = _rect_obj(1, 20, 10, x=0, y=0)
+    masks = {1: rasterize(obj.flat, (20, 30))}
+
+    def split_for_diagnostics(os, ms):
+        return [Proposal((1,), [_rect_obj(1, 10, 10, x=0, y=0), _rect_obj(9, 10, 10, x=10, y=0)])]
+
+    out = optimize([obj], masks, [split_for_diagnostics])
+    by_id = {region.id: region for region in out}
+
+    assert np.array_equal(by_id[1].raster, rasterize(by_id[1].flat, (20, 30)))
+    assert np.array_equal(by_id[9].raster, rasterize(by_id[9].flat, (20, 30)))
+    assert by_id[1].diagnostics["split_for_diagnostics"]["accepted"] is True
+    assert by_id[1].diagnostics["split_for_diagnostics"]["proposal_ids"] == [1]
+    assert by_id[9].diagnostics["split_for_diagnostics"]["proposal_ids"] == [1]
+
+
 def test_framework_rejects_replacement_id_aliasing_live_object():
     objs = [
         _rect_obj(1, 10, 10, x=0, y=0),

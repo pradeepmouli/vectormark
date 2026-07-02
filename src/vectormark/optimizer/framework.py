@@ -8,7 +8,7 @@ import numpy as np
 from shapely.ops import unary_union
 
 from .gate import BUDGET, gate_ok, rasterize
-from .optobject import OptObject
+from .optobject import VectorRegion
 
 Proposal = namedtuple("Proposal", "obj_ids new_objects")
 
@@ -16,7 +16,7 @@ Proposal = namedtuple("Proposal", "obj_ids new_objects")
 class Pass(Protocol):
     def __call__(
         self,
-        objects: list[OptObject],
+        objects: list[VectorRegion],
         masks: dict[int, np.ndarray],
     ) -> list[Proposal]: ...
 
@@ -25,11 +25,11 @@ def _proposal_key(proposal: Proposal) -> tuple[int, ...]:
     return tuple(sorted(int(obj_id) for obj_id in proposal.obj_ids))
 
 
-def _object_key(obj: OptObject) -> tuple[int, int]:
+def _object_key(obj: VectorRegion) -> tuple[int, int]:
     return (int(obj.id), int(obj.z))
 
 
-def _shape_key(obj: OptObject) -> tuple[object, ...]:
+def _shape_key(obj: VectorRegion) -> tuple[object, ...]:
     return (
         *_object_key(obj),
         obj.exact.kind,
@@ -42,7 +42,7 @@ def _proposal_sort_key(proposal: Proposal) -> tuple[tuple[int, ...], tuple[tuple
     return (_proposal_key(proposal), tuple(sorted(_shape_key(obj) for obj in proposal.new_objects)))
 
 
-def _geometry_changed(original: OptObject, replacement: OptObject) -> bool:
+def _geometry_changed(original: VectorRegion, replacement: VectorRegion) -> bool:
     return original.exact != replacement.exact
 
 
@@ -54,15 +54,15 @@ def _union_masks(mask_by_id: dict[int, np.ndarray], obj_ids: Iterable[int]) -> n
     return union
 
 
-def _union_flats(objects: Iterable[OptObject]):
+def _union_flats(objects: Iterable[VectorRegion]):
     return unary_union([obj.flat for obj in sorted(objects, key=_shape_key)])
 
 
 def _matched_original(
     proposal_ids: tuple[int, ...],
-    originals: dict[int, OptObject],
-    replacement: OptObject,
-) -> OptObject | None:
+    originals: dict[int, VectorRegion],
+    replacement: VectorRegion,
+) -> VectorRegion | None:
     if replacement.id in proposal_ids and replacement.id in originals:
         return originals[replacement.id]
     if len(proposal_ids) == 1:
@@ -72,9 +72,9 @@ def _matched_original(
 
 def _gate_mask(
     proposal_ids: tuple[int, ...],
-    originals: dict[int, OptObject],
+    originals: dict[int, VectorRegion],
     current_masks: dict[int, np.ndarray],
-    replacement: OptObject,
+    replacement: VectorRegion,
     union_mask: np.ndarray,
 ) -> np.ndarray | None:
     original = _matched_original(proposal_ids, originals, replacement)
@@ -94,17 +94,45 @@ def _gate_mask(
     return mask
 
 
+def _pass_name(pass_fn: Pass) -> str:
+    name = getattr(pass_fn, "__name__", None)
+    if name:
+        return str(name)
+    return pass_fn.__class__.__name__
+
+
+def _annotate_replacement(
+    replacement: VectorRegion,
+    *,
+    pass_name: str,
+    proposal_ids: tuple[int, ...],
+    raster: np.ndarray,
+) -> VectorRegion:
+    return replacement.with_current(
+        replacement.current,
+        footprint=replacement.footprint,
+        raster=raster,
+        diagnostics={
+            pass_name: {
+                "accepted": True,
+                "proposal_ids": [int(obj_id) for obj_id in proposal_ids],
+            }
+        },
+    )
+
+
 def optimize(
-    objects: list[OptObject],
+    objects: list[VectorRegion],
     masks: dict[int, np.ndarray],
     passes: Iterable[Pass],
     *,
     budget: float = BUDGET,
-) -> list[OptObject]:
+) -> list[VectorRegion]:
     current_objects = sorted(objects, key=_object_key)
     current_masks = {obj_id: np.asarray(mask, dtype=bool).copy() for obj_id, mask in masks.items()}
 
     for pass_fn in passes:
+        pass_name = _pass_name(pass_fn)
         current_objects = sorted(current_objects, key=_object_key)
         pass_objects = list(current_objects)
         pass_masks = {obj_id: mask.copy() for obj_id, mask in current_masks.items()}
@@ -184,28 +212,42 @@ def optimize(
             }
             consumed_in_pass.update(proposal_ids)
 
-            remaining = [obj for obj in current_objects if obj.id not in proposal_ids]
             replacements = sorted(proposal.new_objects, key=_object_key)
-            current_objects = sorted(remaining + replacements, key=_object_key)
+            remaining = [obj for obj in current_objects if obj.id not in proposal_ids]
 
             for obj_id in proposal_ids:
                 current_masks.pop(obj_id, None)
 
             assigned_replacement_ids: set[int] = set()
+            replacement_masks: dict[int, np.ndarray] = {}
             for replacement in replacements:
                 if replacement.id in current_masks:
                     current_masks.pop(replacement.id, None)
 
                 if split_replacement:
-                    current_masks[replacement.id] = rasterize(replacement.flat, union_mask.shape)
+                    replacement_masks[replacement.id] = rasterize(replacement.flat, union_mask.shape)
+                    current_masks[replacement.id] = replacement_masks[replacement.id]
                     continue
 
                 if replacement.id in pass_original_by_id and replacement.id in proposal_ids:
                     if replacement.id not in assigned_replacement_ids:
-                        current_masks[replacement.id] = preserved_masks[replacement.id]
+                        replacement_masks[replacement.id] = preserved_masks[replacement.id]
+                        current_masks[replacement.id] = replacement_masks[replacement.id]
                         assigned_replacement_ids.add(replacement.id)
                         continue
 
-                current_masks[replacement.id] = union_mask.copy()
+                replacement_masks[replacement.id] = union_mask.copy()
+                current_masks[replacement.id] = replacement_masks[replacement.id]
+
+            annotated_replacements = [
+                _annotate_replacement(
+                    replacement,
+                    pass_name=pass_name,
+                    proposal_ids=proposal_ids,
+                    raster=replacement_masks[replacement.id],
+                )
+                for replacement in replacements
+            ]
+            current_objects = sorted(remaining + annotated_replacements, key=_object_key)
 
     return current_objects

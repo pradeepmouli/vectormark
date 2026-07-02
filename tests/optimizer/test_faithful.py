@@ -2,6 +2,7 @@ import numpy as np
 
 from vectormark.candidate import LinearGradientFill, RadialGradientFill
 from vectormark.optimizer.faithful import faithful_objects
+from vectormark.optimizer.trace import trace_regions
 from vectormark.pipeline import Options, _segment_image
 
 
@@ -30,6 +31,23 @@ def test_faithful_single_disk_one_object_path():
     assert o.exact.kind == "path"
     assert o.id in masks and masks[o.id].sum() > 0
     assert abs(o.flat.area - np.pi * 40**2) / (np.pi * 40**2) < 0.1
+
+
+def test_trace_regions_carry_source_raster_and_diagnostics():
+    img = np.full((80, 80, 3), 255, np.uint8)
+    img[_disk(80, 80, 40, 40, 20)] = (20, 40, 80)
+
+    regions, masks = trace_regions(img, Options())
+
+    assert len(regions) == 1
+    region = regions[0]
+    assert region.id in masks
+    assert np.array_equal(region.raster, masks[region.id])
+    assert region.original == region.current == region.exact
+    assert region.source_label is not None
+    assert region.color_hex == "#142850"
+    assert region.diagnostics["trace"]["area"] == int(region.raster.sum())
+    assert region.diagnostics["trace"]["contours"] == 1
 
 
 def test_faithful_small_hole_preserves_evenodd_path_and_area():

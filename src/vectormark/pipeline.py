@@ -816,10 +816,10 @@ def _optimizer_report(objects, opt: Options, *, fallback_reason: str | None = No
 
 def _idealize_optimizer(arr: np.ndarray, opt: Options, width: int, height: int) -> tuple[str, IdealizeReport]:
     """Experimental faithful-vectorize + geometry-optimizer pipeline."""
-    from .optimizer.faithful import faithful_objects
     from .optimizer.framework import optimize
+    from .optimizer.trace import trace_regions
 
-    objects, masks = faithful_objects(arr, opt)
+    objects, masks = trace_regions(arr, opt)
     optimized = optimize(
         objects,
         masks,

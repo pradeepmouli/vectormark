@@ -4,7 +4,7 @@ from shapely.geometry import Polygon
 from vectormark.candidate import FlatFill
 from vectormark.fit import Shape
 from vectormark.occlusion import intersection_lens_d
-from vectormark.optimizer.optobject import OptObject, flatten_points, to_polygon
+from vectormark.optimizer.optobject import OptObject, VectorRegion, flatten_points, to_polygon
 
 
 def test_to_polygon_circle_area_matches():
@@ -50,3 +50,32 @@ def test_optobject_with_exact_refreshes_flat():
     assert abs(o.flat.area - 100) < 1
     o2 = o.with_exact(Shape("rect", {"x": 0.0, "y": 0.0, "w": 20.0, "h": 10.0}))
     assert abs(o2.flat.area - 200) < 1 and abs(o.flat.area - 100) < 1
+
+
+def test_optobject_is_vector_region_compatibility_constructor():
+    raster = np.zeros((6, 6), dtype=bool)
+    raster[1:5, 2:4] = True
+    shape = Shape("rect", {"x": 2.0, "y": 1.0, "w": 2.0, "h": 4.0})
+
+    region = OptObject(
+        id=7,
+        exact=shape,
+        fill=FlatFill("#000000"),
+        z=3,
+        raster=raster,
+        source_label=11,
+        color_hex="#000000",
+        diagnostics={"trace": {"area": int(raster.sum())}},
+    )
+
+    assert isinstance(region, VectorRegion)
+    assert region.original == shape
+    assert region.current == shape
+    assert region.exact == shape
+    assert np.array_equal(region.raster, raster)
+    assert np.array_equal(region.mask, raster)
+    assert abs(region.footprint.area - 8) < 1
+    assert region.flat == region.footprint
+    assert region.source_label == 11
+    assert region.color_hex == "#000000"
+    assert region.diagnostics["trace"]["area"] == 8

@@ -3,6 +3,7 @@ from __future__ import annotations
 import math
 import re
 from dataclasses import dataclass, field
+from typing import Any, Mapping
 
 import numpy as np
 from shapely.geometry import MultiPolygon, Polygon
@@ -197,17 +198,137 @@ def to_polygon(shape: Shape, *, samples: int = 24) -> Polygon | MultiPolygon:
     return out if out.is_valid else out.buffer(0)
 
 
-@dataclass(frozen=True)
-class OptObject:
+@dataclass(frozen=True, init=False)
+class VectorRegion:
     id: int
-    exact: Shape
+    raster: np.ndarray = field(compare=False)
+    footprint: Polygon | MultiPolygon | object = field(compare=False)
     fill: Fill
     z: int
-    flat: Polygon | MultiPolygon | object = field(default=None, compare=False)
+    original: Shape
+    current: Shape
+    source_label: int | None = None
+    color_hex: str | None = None
+    coverage: np.ndarray | None = field(default=None, compare=False)
+    diagnostics: Mapping[str, Any] = field(default_factory=dict, compare=False)
 
-    def __post_init__(self) -> None:
-        if self.flat is None:
-            object.__setattr__(self, "flat", to_polygon(self.exact))
+    def __init__(
+        self,
+        id: int,
+        exact: Shape | None = None,
+        fill: Fill | None = None,
+        z: int = 0,
+        flat: Polygon | MultiPolygon | object | None = None,
+        *,
+        raster: np.ndarray | None = None,
+        footprint: Polygon | MultiPolygon | object | None = None,
+        original: Shape | None = None,
+        current: Shape | None = None,
+        source_label: int | None = None,
+        color_hex: str | None = None,
+        coverage: np.ndarray | None = None,
+        diagnostics: Mapping[str, Any] | None = None,
+    ) -> None:
+        if current is None:
+            current = exact
+        if original is None:
+            original = current
+        if current is None or original is None:
+            raise TypeError("VectorRegion requires a current/original shape or exact shape")
+        if fill is None:
+            raise TypeError("VectorRegion requires fill")
+        if footprint is None:
+            footprint = flat
+        if footprint is None:
+            footprint = to_polygon(current)
+        if raster is None:
+            raster = np.zeros((0, 0), dtype=bool)
 
-    def with_exact(self, new_shape: Shape) -> "OptObject":
-        return OptObject(self.id, new_shape, self.fill, self.z)
+        object.__setattr__(self, "id", int(id))
+        object.__setattr__(self, "raster", np.asarray(raster, dtype=bool).copy())
+        object.__setattr__(self, "footprint", footprint)
+        object.__setattr__(self, "fill", fill)
+        object.__setattr__(self, "z", int(z))
+        object.__setattr__(self, "original", original)
+        object.__setattr__(self, "current", current)
+        object.__setattr__(self, "source_label", source_label)
+        object.__setattr__(self, "color_hex", color_hex)
+        object.__setattr__(self, "coverage", None if coverage is None else np.asarray(coverage).copy())
+        object.__setattr__(self, "diagnostics", dict(diagnostics or {}))
+
+    @classmethod
+    def from_shape(
+        cls,
+        *,
+        id: int,
+        shape: Shape,
+        fill: Fill,
+        z: int,
+        raster: np.ndarray | None = None,
+        footprint: Polygon | MultiPolygon | object | None = None,
+        source_label: int | None = None,
+        color_hex: str | None = None,
+        coverage: np.ndarray | None = None,
+        diagnostics: Mapping[str, Any] | None = None,
+    ) -> "VectorRegion":
+        return cls(
+            id=id,
+            fill=fill,
+            z=z,
+            raster=raster,
+            footprint=footprint,
+            original=shape,
+            current=shape,
+            source_label=source_label,
+            color_hex=color_hex,
+            coverage=coverage,
+            diagnostics=diagnostics,
+        )
+
+    @property
+    def exact(self) -> Shape:
+        """Compatibility alias for the current emitted geometry."""
+        return self.current
+
+    @property
+    def flat(self) -> Polygon | MultiPolygon | object:
+        """Compatibility alias for the polygonal spatial footprint."""
+        return self.footprint
+
+    @property
+    def mask(self) -> np.ndarray:
+        """Compatibility alias for the trace raster."""
+        return self.raster
+
+    def with_current(
+        self,
+        new_shape: Shape,
+        *,
+        footprint: Polygon | MultiPolygon | object | None = None,
+        raster: np.ndarray | None = None,
+        fill: Fill | None = None,
+        z: int | None = None,
+        diagnostics: Mapping[str, Any] | None = None,
+    ) -> "VectorRegion":
+        merged_diagnostics = dict(self.diagnostics)
+        if diagnostics:
+            merged_diagnostics.update(diagnostics)
+        return VectorRegion(
+            id=self.id,
+            fill=self.fill if fill is None else fill,
+            z=self.z if z is None else z,
+            raster=self.raster if raster is None else raster,
+            footprint=to_polygon(new_shape) if footprint is None else footprint,
+            original=self.original,
+            current=new_shape,
+            source_label=self.source_label,
+            color_hex=self.color_hex,
+            coverage=self.coverage,
+            diagnostics=merged_diagnostics,
+        )
+
+    def with_exact(self, new_shape: Shape) -> "VectorRegion":
+        return self.with_current(new_shape)
+
+
+OptObject = VectorRegion
