@@ -8,7 +8,7 @@ import numpy as np
 from shapely.ops import unary_union
 
 from .gate import BUDGET, gate_ok, rasterize
-from .optobject import VectorRegion
+from .vector_region import VectorRegion
 
 Proposal = namedtuple("Proposal", "obj_ids new_objects")
 
@@ -32,8 +32,8 @@ def _object_key(obj: VectorRegion) -> tuple[int, int]:
 def _shape_key(obj: VectorRegion) -> tuple[object, ...]:
     return (
         *_object_key(obj),
-        obj.exact.kind,
-        tuple(sorted((str(k), repr(v)) for k, v in obj.exact.params.items())),
+        obj.current.kind,
+        tuple(sorted((str(k), repr(v)) for k, v in obj.current.params.items())),
         repr(obj.fill),
     )
 
@@ -43,7 +43,7 @@ def _proposal_sort_key(proposal: Proposal) -> tuple[tuple[int, ...], tuple[tuple
 
 
 def _geometry_changed(original: VectorRegion, replacement: VectorRegion) -> bool:
-    return original.exact != replacement.exact
+    return original.current != replacement.current
 
 
 def _union_masks(mask_by_id: dict[int, np.ndarray], obj_ids: Iterable[int]) -> np.ndarray:
@@ -55,7 +55,7 @@ def _union_masks(mask_by_id: dict[int, np.ndarray], obj_ids: Iterable[int]) -> n
 
 
 def _union_flats(objects: Iterable[VectorRegion]):
-    return unary_union([obj.flat for obj in sorted(objects, key=_shape_key)])
+    return unary_union([obj.footprint for obj in sorted(objects, key=_shape_key)])
 
 
 def _matched_original(
@@ -199,7 +199,7 @@ def optimize(
                 )
                 if gate_mask is None:
                     continue
-                if not gate_ok(replacement.flat, gate_mask, budget=budget):
+                if not gate_ok(replacement.footprint, gate_mask, budget=budget):
                     gates_ok = False
                     break
 
@@ -225,7 +225,7 @@ def optimize(
                     current_masks.pop(replacement.id, None)
 
                 if split_replacement:
-                    replacement_masks[replacement.id] = rasterize(replacement.flat, union_mask.shape)
+                    replacement_masks[replacement.id] = rasterize(replacement.footprint, union_mask.shape)
                     current_masks[replacement.id] = replacement_masks[replacement.id]
                     continue
 

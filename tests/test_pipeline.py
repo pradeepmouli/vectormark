@@ -2,7 +2,7 @@ import numpy as np
 from PIL import Image
 from vectormark.candidate import FlatFill
 from vectormark.fit import Shape
-from vectormark.optimizer.optobject import OptObject
+from vectormark.optimizer.vector_region import VectorRegion
 from vectormark.pipeline import Options, _render_optimizer_body, _segment_image, idealize
 from tests._render import render_svg, ssim
 
@@ -51,8 +51,8 @@ def test_symmetric_holed_region_emits_exactly_symmetric():
     assert ssim(render_svg(svg, w, h), img) >= 0.90
 
 
-def _evenodd_source(obj_id: int, *, fill: str = "#111111", z: int = 0) -> OptObject:
-    return OptObject(
+def _evenodd_source(obj_id: int, *, fill: str = "#111111", z: int = 0) -> VectorRegion:
+    return VectorRegion(
         obj_id,
         Shape(
             "path",
@@ -68,12 +68,12 @@ def _evenodd_source(obj_id: int, *, fill: str = "#111111", z: int = 0) -> OptObj
 
 def test_optimizer_body_preserves_evenodd_when_flattening_use():
     source = _evenodd_source(10)
-    clone = OptObject(
+    clone = VectorRegion(
         20,
         Shape("use", {"href_obj_id": 10, "transform": (1.0, 0.0, 0.0, 1.0, 24.0, 0.0)}),
         FlatFill("#111111"),
         0,
-        flat=source.flat,
+        footprint=source.footprint,
     )
 
     body, _defs = _render_optimizer_body([clone, source], flatten=True)
@@ -84,7 +84,7 @@ def test_optimizer_body_preserves_evenodd_when_flattening_use():
 
 def test_optimizer_body_preserves_evenodd_when_inlining_recolored_use():
     source = _evenodd_source(10, fill="#111111")
-    clone = OptObject(
+    clone = VectorRegion(
         20,
         Shape(
             "use",
@@ -96,7 +96,7 @@ def test_optimizer_body_preserves_evenodd_when_inlining_recolored_use():
         ),
         FlatFill("#222222"),
         0,
-        flat=source.flat,
+        footprint=source.footprint,
     )
 
     body, _defs = _render_optimizer_body([clone, source])
@@ -108,20 +108,20 @@ def test_optimizer_body_preserves_evenodd_when_inlining_recolored_use():
 
 
 def test_optimizer_body_renders_by_z_then_id():
-    low_source = OptObject(
+    low_source = VectorRegion(
         10,
         Shape("rect", {"x": 0.0, "y": 0.0, "w": 10.0, "h": 10.0}),
         FlatFill("#111111"),
         0,
     )
-    low_use = OptObject(
+    low_use = VectorRegion(
         99,
         Shape("use", {"href_obj_id": 10, "transform": (1.0, 0.0, 0.0, 1.0, 12.0, 0.0)}),
         FlatFill("#111111"),
         0,
-        flat=low_source.flat,
+        footprint=low_source.footprint,
     )
-    high_cover = OptObject(
+    high_cover = VectorRegion(
         2,
         Shape("rect", {"x": 0.0, "y": 0.0, "w": 30.0, "h": 30.0}),
         FlatFill("#333333"),

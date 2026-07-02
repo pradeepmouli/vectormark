@@ -10,7 +10,7 @@ from ..fit import Shape, fit_path
 from ..pipeline import Options, _segment_image
 from ..surface_merge import merge_surfaces
 from ..types import Region
-from .optobject import VectorRegion, to_polygon
+from .vector_region import VectorRegion, to_polygon
 
 
 def _region_path_contours(region: Region) -> list[np.ndarray]:

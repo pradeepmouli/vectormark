@@ -13,7 +13,7 @@ from ...candidate import FlatFill
 from ...fit import Shape, _fmt, fit_path
 from ..framework import Proposal
 from ..gate import gate_ok
-from ..optobject import OptObject
+from ..vector_region import VectorRegion
 
 Axis2D = namedtuple("Axis2D", "theta cx cy")
 
@@ -269,9 +269,9 @@ def _best_self_reconstruction(
 
 
 def _pair_proposal(
-    canonical: OptObject,
+    canonical: VectorRegion,
     canonical_flat: Polygon | MultiPolygon,
-    target: OptObject,
+    target: VectorRegion,
     target_flat: Polygon | MultiPolygon,
     target_fill_hex: str,
     masks: dict[int, np.ndarray],
@@ -293,9 +293,9 @@ def _pair_proposal(
         (canonical.id, target.id),
         [
             canonical,
-            OptObject(
+            VectorRegion(
                 id=target.id,
-                exact=Shape(
+                current=Shape(
                     "use",
                     {
                         "href_obj_id": canonical.id,
@@ -305,20 +305,20 @@ def _pair_proposal(
                 ),
                 fill=target.fill,
                 z=target.z,
-                flat=reflected,
+                footprint=reflected,
             )
         ],
     )
 
 
 def symmetry_pass(
-    objects: list[OptObject],
+    objects: list[VectorRegion],
     masks: dict[int, np.ndarray],
 ) -> list[Proposal]:
-    usable: list[tuple[OptObject, Polygon | MultiPolygon, str | None]] = []
+    usable: list[tuple[VectorRegion, Polygon | MultiPolygon, str | None]] = []
     for obj in sorted(objects, key=lambda current: int(current.id)):
-        flat = _polygonal_flat(obj.flat)
-        if flat is None or obj.exact.kind == "use" or obj.id not in masks:
+        flat = _polygonal_flat(obj.footprint)
+        if flat is None or obj.current.kind == "use" or obj.id not in masks:
             continue
         usable.append((obj, flat, _flat_fill_hex(obj.fill)))
 
@@ -353,13 +353,13 @@ def symmetry_pass(
     for obj, flat, _fill_hex in usable:
         if obj.id in paired_ids:
             continue
-        if obj.exact.kind != "path":
+        if obj.current.kind != "path":
             continue
         best = _best_self_reconstruction(flat, masks[obj.id])
         if best is None:
             continue
         axis, half, reflected_half, shape = best
-        if shape == obj.exact or not _self_split_improves(obj.exact, shape):
+        if shape == obj.current or not _self_split_improves(obj.current, shape):
             continue
         use_id = next_id
         next_id += 1
@@ -367,10 +367,10 @@ def symmetry_pass(
             Proposal(
                 (obj.id,),
                 [
-                    OptObject(obj.id, shape, obj.fill, obj.z, half),
-                    OptObject(
+                    VectorRegion(obj.id, shape, obj.fill, obj.z, half),
+                    VectorRegion(
                         id=use_id,
-                        exact=Shape(
+                        current=Shape(
                             "use",
                             {
                                 "href_obj_id": obj.id,
@@ -379,7 +379,7 @@ def symmetry_pass(
                         ),
                         fill=obj.fill,
                         z=obj.z,
-                        flat=reflected_half,
+                        footprint=reflected_half,
                     ),
                 ],
             )

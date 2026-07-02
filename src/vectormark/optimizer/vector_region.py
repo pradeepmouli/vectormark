@@ -215,30 +215,20 @@ class VectorRegion:
     def __init__(
         self,
         id: int,
-        exact: Shape | None = None,
-        fill: Fill | None = None,
+        current: Shape,
+        fill: Fill,
         z: int = 0,
-        flat: Polygon | MultiPolygon | object | None = None,
+        footprint: Polygon | MultiPolygon | object | None = None,
         *,
         raster: np.ndarray | None = None,
-        footprint: Polygon | MultiPolygon | object | None = None,
         original: Shape | None = None,
-        current: Shape | None = None,
         source_label: int | None = None,
         color_hex: str | None = None,
         coverage: np.ndarray | None = None,
         diagnostics: Mapping[str, Any] | None = None,
     ) -> None:
-        if current is None:
-            current = exact
         if original is None:
             original = current
-        if current is None or original is None:
-            raise TypeError("VectorRegion requires a current/original shape or exact shape")
-        if fill is None:
-            raise TypeError("VectorRegion requires fill")
-        if footprint is None:
-            footprint = flat
         if footprint is None:
             footprint = to_polygon(current)
         if raster is None:
@@ -273,32 +263,17 @@ class VectorRegion:
     ) -> "VectorRegion":
         return cls(
             id=id,
+            current=shape,
             fill=fill,
             z=z,
             raster=raster,
             footprint=footprint,
             original=shape,
-            current=shape,
             source_label=source_label,
             color_hex=color_hex,
             coverage=coverage,
             diagnostics=diagnostics,
         )
-
-    @property
-    def exact(self) -> Shape:
-        """Compatibility alias for the current emitted geometry."""
-        return self.current
-
-    @property
-    def flat(self) -> Polygon | MultiPolygon | object:
-        """Compatibility alias for the polygonal spatial footprint."""
-        return self.footprint
-
-    @property
-    def mask(self) -> np.ndarray:
-        """Compatibility alias for the trace raster."""
-        return self.raster
 
     def with_current(
         self,
@@ -315,20 +290,14 @@ class VectorRegion:
             merged_diagnostics.update(diagnostics)
         return VectorRegion(
             id=self.id,
+            current=new_shape,
             fill=self.fill if fill is None else fill,
             z=self.z if z is None else z,
             raster=self.raster if raster is None else raster,
             footprint=to_polygon(new_shape) if footprint is None else footprint,
             original=self.original,
-            current=new_shape,
             source_label=self.source_label,
             color_hex=self.color_hex,
             coverage=self.coverage,
             diagnostics=merged_diagnostics,
         )
-
-    def with_exact(self, new_shape: Shape) -> "VectorRegion":
-        return self.with_current(new_shape)
-
-
-OptObject = VectorRegion

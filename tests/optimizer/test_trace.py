@@ -1,7 +1,6 @@
 import numpy as np
 
 from vectormark.candidate import LinearGradientFill, RadialGradientFill
-from vectormark.optimizer.faithful import faithful_objects
 from vectormark.optimizer.trace import trace_regions
 from vectormark.pipeline import Options, _segment_image
 
@@ -20,17 +19,17 @@ def _touches(mask_a, mask_b):
     )
 
 
-def test_faithful_single_disk_one_object_path():
+def test_trace_single_disk_one_object_path():
     img = np.full((120, 120, 3), 255, np.uint8)
     img[_disk(120, 120, 60, 60, 40)] = (200, 30, 30)
 
-    objs, masks = faithful_objects(img, Options())
+    objs, masks = trace_regions(img, Options())
 
     assert len(objs) == 1
     o = objs[0]
-    assert o.exact.kind == "path"
+    assert o.current.kind == "path"
     assert o.id in masks and masks[o.id].sum() > 0
-    assert abs(o.flat.area - np.pi * 40**2) / (np.pi * 40**2) < 0.1
+    assert abs(o.footprint.area - np.pi * 40**2) / (np.pi * 40**2) < 0.1
 
 
 def test_trace_regions_carry_source_raster_and_diagnostics():
@@ -43,14 +42,14 @@ def test_trace_regions_carry_source_raster_and_diagnostics():
     region = regions[0]
     assert region.id in masks
     assert np.array_equal(region.raster, masks[region.id])
-    assert region.original == region.current == region.exact
+    assert region.original == region.current
     assert region.source_label is not None
     assert region.color_hex == "#142850"
     assert region.diagnostics["trace"]["area"] == int(region.raster.sum())
     assert region.diagnostics["trace"]["contours"] == 1
 
 
-def test_faithful_small_hole_preserves_evenodd_path_and_area():
+def test_trace_small_hole_preserves_evenodd_path_and_area():
     h = w = 160
     img = np.full((h, w, 3), 255, np.uint8)
     outer_radius = 45
@@ -60,7 +59,7 @@ def test_faithful_small_hole_preserves_evenodd_path_and_area():
     img[outer] = (200, 30, 30)
     img[hole] = (255, 255, 255)
 
-    objs, masks = faithful_objects(img, Options())
+    objs, masks = trace_regions(img, Options())
 
     assert len(objs) == 1
     obj = objs[0]
@@ -68,14 +67,14 @@ def test_faithful_small_hole_preserves_evenodd_path_and_area():
     outer_area = int(outer.sum())
     expected_hole_area = int(hole.sum())
 
-    assert obj.exact.kind == "path"
-    assert obj.exact.params.get("fill_rule") == "evenodd"
+    assert obj.current.kind == "path"
+    assert obj.current.params.get("fill_rule") == "evenodd"
     assert mask_area == outer_area - expected_hole_area
-    assert abs(obj.flat.area - mask_area) < expected_hole_area
-    assert outer_area - obj.flat.area > expected_hole_area * 0.5
+    assert abs(obj.footprint.area - mask_area) < expected_hole_area
+    assert outer_area - obj.footprint.area > expected_hole_area * 0.5
 
 
-def test_faithful_gradient_strip_merges_adjacent_regions_to_one_gradient_object():
+def test_trace_gradient_strip_merges_adjacent_regions_to_one_gradient_object():
     h, w = 80, 120
     img = np.full((h, w, 3), 255, np.uint8)
     strip_y0, strip_y1 = 20, 60
@@ -103,7 +102,7 @@ def test_faithful_gradient_strip_merges_adjacent_regions_to_one_gradient_object(
         for right in strip_regions[i + 1:]
     )
 
-    objs, masks = faithful_objects(img, opt)
+    objs, masks = trace_regions(img, opt)
 
     assert len(objs) == 1
     assert isinstance(objs[0].fill, (LinearGradientFill, RadialGradientFill))

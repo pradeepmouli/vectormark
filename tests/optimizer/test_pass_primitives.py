@@ -3,9 +3,9 @@ from shapely.geometry import GeometryCollection, MultiPolygon, Point, Polygon
 
 from vectormark.candidate import FlatFill
 from vectormark.fit import Shape
-from vectormark.optimizer.faithful import faithful_objects
+from vectormark.optimizer.trace import trace_regions
 from vectormark.optimizer.framework import optimize
-from vectormark.optimizer.optobject import OptObject
+from vectormark.optimizer.vector_region import VectorRegion
 from vectormark.optimizer.passes.primitives import primitives_pass
 from vectormark.pipeline import Options
 
@@ -31,72 +31,72 @@ def _irregular_blob_image():
     return img
 
 
-def test_primitives_pass_proposes_circle_for_faithful_disk_path():
-    objects, masks = faithful_objects(_disk_image(), Options())
+def test_primitives_pass_proposes_circle_for_trace_disk_path():
+    objects, masks = trace_regions(_disk_image(), Options())
 
     assert len(objects) == 1
-    assert objects[0].exact.kind == "path"
+    assert objects[0].current.kind == "path"
 
     proposals = primitives_pass(objects, masks)
 
     assert len(proposals) == 1
     assert proposals[0].obj_ids == (objects[0].id,)
     assert len(proposals[0].new_objects) == 1
-    assert proposals[0].new_objects[0].exact.kind == "circle"
+    assert proposals[0].new_objects[0].current.kind == "circle"
 
 
-def test_optimize_applies_primitives_pass_to_faithful_disk():
-    objects, masks = faithful_objects(_disk_image(), Options())
+def test_optimize_applies_primitives_pass_to_trace_disk():
+    objects, masks = trace_regions(_disk_image(), Options())
 
     out = optimize(objects, masks, [primitives_pass])
 
     assert len(out) == 1
-    assert out[0].exact.kind == "circle"
+    assert out[0].current.kind == "circle"
 
 
 def test_primitives_pass_skips_irregular_blob():
-    objects, masks = faithful_objects(_irregular_blob_image(), Options())
+    objects, masks = trace_regions(_irregular_blob_image(), Options())
 
     assert len(objects) == 1
-    assert objects[0].exact.kind == "path"
+    assert objects[0].current.kind == "path"
 
     proposals = primitives_pass(objects, masks)
     out = optimize(objects, masks, [primitives_pass])
 
     assert proposals == []
     assert len(out) == 1
-    assert out[0].exact.kind == "path"
+    assert out[0].current.kind == "path"
 
 
 def test_primitives_pass_uses_largest_polygon_exterior_for_multipolygon():
     large = Point(40.0, 40.0).buffer(18.0, quad_segs=32)
     small = Polygon([(0.0, 0.0), (6.0, 0.0), (6.0, 6.0), (0.0, 6.0)])
-    obj = OptObject(
+    obj = VectorRegion(
         id=7,
-        exact=Shape("path", {"d": "M0 0 L1 0 L1 1 L0 1 Z"}),
+        current=Shape("path", {"d": "M0 0 L1 0 L1 1 L0 1 Z"}),
         fill=FlatFill("#000000"),
         z=0,
-        flat=MultiPolygon([small, large]),
+        footprint=MultiPolygon([small, large]),
     )
 
     proposals = primitives_pass([obj], {7: np.zeros((80, 80), dtype=bool)})
 
     assert len(proposals) == 1
     replacement = proposals[0].new_objects[0]
-    assert replacement.exact.kind == "circle"
-    assert replacement.exact.params["r"] > 10.0
+    assert replacement.current.kind == "circle"
+    assert replacement.current.params["r"] > 10.0
 
 
 def test_primitives_pass_skips_polygon_with_counter():
     outer = Point(40.0, 40.0).buffer(24.0, quad_segs=32)
     inner = Point(40.0, 40.0).buffer(5.0, quad_segs=32)
     ring = Polygon(outer.exterior.coords, [inner.exterior.coords])
-    obj = OptObject(
+    obj = VectorRegion(
         id=8,
-        exact=Shape("path", {"d": "M0 0 L1 0 L1 1 L0 1 Z"}),
+        current=Shape("path", {"d": "M0 0 L1 0 L1 1 L0 1 Z"}),
         fill=FlatFill("#000000"),
         z=0,
-        flat=ring,
+        footprint=ring,
     )
 
     proposals = primitives_pass([obj], {8: np.zeros((80, 80), dtype=bool)})
@@ -105,19 +105,19 @@ def test_primitives_pass_skips_polygon_with_counter():
 
 
 def test_primitives_pass_skips_empty_and_nonpolygon_geometry():
-    empty = OptObject(
+    empty = VectorRegion(
         id=1,
-        exact=Shape("path", {"d": "M0 0 L1 0 L1 1 L0 1 Z"}),
+        current=Shape("path", {"d": "M0 0 L1 0 L1 1 L0 1 Z"}),
         fill=FlatFill("#000000"),
         z=0,
-        flat=GeometryCollection(),
+        footprint=GeometryCollection(),
     )
-    nonpolygon = OptObject(
+    nonpolygon = VectorRegion(
         id=2,
-        exact=Shape("path", {"d": "M0 0 L1 0 L1 1 L0 1 Z"}),
+        current=Shape("path", {"d": "M0 0 L1 0 L1 1 L0 1 Z"}),
         fill=FlatFill("#000000"),
         z=0,
-        flat=Point(0.0, 0.0),
+        footprint=Point(0.0, 0.0),
     )
 
     proposals = primitives_pass(

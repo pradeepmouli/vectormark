@@ -9,7 +9,7 @@ from shapely.geometry import MultiPolygon, Polygon
 from ...fit import Shape, _fmt, fit_path
 from ..framework import Proposal
 from ..gate import BUDGET, rasterize
-from ..optobject import OptObject, _parse_subpaths, _ring_area, _sample_subpath
+from ..vector_region import VectorRegion, _parse_subpaths, _ring_area, _sample_subpath
 
 _PATH_COMMAND = re.compile(r"[MLQCAZ]")
 
@@ -216,15 +216,15 @@ def _simplifiable_polygon(flat: object) -> bool:
 
 
 def _covering_later_ids(
-    obj: OptObject,
+    obj: VectorRegion,
     candidate: Shape,
-    objects: list[OptObject],
+    objects: list[VectorRegion],
     masks: dict[int, np.ndarray],
 ) -> list[int] | None:
     if obj.id not in masks:
         return None
-    candidate_obj = obj.with_exact(candidate)
-    candidate_mask = rasterize(candidate_obj.flat, masks[obj.id].shape)
+    candidate_obj = obj.with_current(candidate)
+    candidate_mask = rasterize(candidate_obj.footprint, masks[obj.id].shape)
     added = candidate_mask & ~np.asarray(masks[obj.id], dtype=bool)
     added_count = int(added.sum())
     if added_count == 0:
@@ -248,7 +248,7 @@ def _covering_later_ids(
 
 
 def simplify_pass(
-    objects: list[OptObject],
+    objects: list[VectorRegion],
     masks: dict[int, np.ndarray],
     *,
     epsilon: float = 1.5,
@@ -257,11 +257,11 @@ def simplify_pass(
 ) -> list[Proposal]:
     proposals: list[Proposal] = []
     for obj in sorted(objects, key=lambda current: int(current.id)):
-        if isinstance(obj.flat, MultiPolygon) or not _simplifiable_polygon(obj.flat):
+        if isinstance(obj.footprint, MultiPolygon) or not _simplifiable_polygon(obj.footprint):
             continue
-        if obj.exact.kind == "path" and obj.exact.params.get("fill_rule"):
+        if obj.current.kind == "path" and obj.current.params.get("fill_rule"):
             solid = _simplified_path_shape(
-                obj.exact,
+                obj.current,
                 epsilon=epsilon,
                 max_error=max_error,
                 samples=samples,
@@ -272,17 +272,17 @@ def simplify_pass(
                 if cover_ids is not None:
                     by_id = {int(current.id): current for current in objects}
                     proposal_ids = tuple([int(obj.id), *cover_ids])
-                    new_objects = [obj.with_exact(solid), *(by_id[obj_id] for obj_id in cover_ids)]
+                    new_objects = [obj.with_current(solid), *(by_id[obj_id] for obj_id in cover_ids)]
                     proposals.append(Proposal(proposal_ids, new_objects))
                     continue
         simplified = _simplified_path_shape(
-            obj.exact,
+            obj.current,
             epsilon=epsilon,
             max_error=max_error,
             samples=samples,
         )
         if simplified is None:
             continue
-        proposals.append(Proposal((obj.id,), [obj.with_exact(simplified)]))
+        proposals.append(Proposal((obj.id,), [obj.with_current(simplified)]))
 
     return proposals

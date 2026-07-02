@@ -66,13 +66,13 @@ def test_optimizer_report_includes_object_diagnostics():
 
 
 def test_optimizer_structural_fallback_rejects_larger_svg():
-    faithful = '<svg><path d="M0 0 Z"/></svg>'
+    trace = '<svg><path d="M0 0 Z"/></svg>'
     larger = '<svg><path d="M0 0 Z"/><path d="M1 1 Z"/></svg>'
     longer = '<svg><path d="M0 0 L1 1 L2 2 L3 3 Z"/></svg>'
 
-    assert not _prefer_optimizer_svg(faithful, larger)
-    assert not _prefer_optimizer_svg(faithful, longer)
-    assert _prefer_optimizer_svg(faithful, faithful)
+    assert not _prefer_optimizer_svg(trace, larger)
+    assert not _prefer_optimizer_svg(trace, longer)
+    assert _prefer_optimizer_svg(trace, trace)
 
 
 def test_optimizer_flatten_emits_paths_without_primitives_or_transforms():

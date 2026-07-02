@@ -13,7 +13,7 @@ from vectormark.emit import (
     mirror_use,
     render_svg_doc,
 )
-from vectormark.optimizer.optobject import OptObject
+from vectormark.optimizer.vector_region import VectorRegion
 from tests._render import render_svg
 
 
@@ -82,18 +82,18 @@ def test_resolve_use_shape_maps_object_id_to_emitted_id():
 
 
 def test_optimizer_objects_to_svg_resolves_object_id_hrefs():
-    source = OptObject(
+    source = VectorRegion(
         10,
         Shape("rect", {"x": 0.0, "y": 0.0, "w": 5.0, "h": 5.0}),
         FlatFill("#111111"),
         0,
     )
-    clone = OptObject(
+    clone = VectorRegion(
         20,
         Shape("use", {"href_obj_id": 10, "transform": (1.0, 0.0, 0.0, 1.0, 8.0, 0.0), "fill": "#222222"}),
         FlatFill("#222222"),
         1,
-        flat=source.flat,
+        footprint=source.footprint,
     )
 
     body = optimizer_objects_to_svg([clone, source])

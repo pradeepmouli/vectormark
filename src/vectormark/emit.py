@@ -71,7 +71,7 @@ def optimizer_objects_to_svg(objects, fills: dict[int, str] | None = None) -> li
     body: list[str] = []
     for obj in ordered:
         fill = fills.get(obj.id, "") if fills is not None else getattr(obj.fill, "hex", "")
-        shape = resolve_use_shape(obj.exact, id_map)
+        shape = resolve_use_shape(obj.current, id_map)
         body.append(shape_to_svg(shape, fill, id_map[int(obj.id)]))
     return body
 

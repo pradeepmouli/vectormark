@@ -5,7 +5,7 @@ from shapely.geometry import MultiPolygon, Polygon
 
 from ...fit import recognize_primitive
 from ..framework import Proposal
-from ..optobject import OptObject
+from ..vector_region import VectorRegion
 
 
 def _polygon_exterior_points(flat: object) -> np.ndarray | None:
@@ -30,7 +30,7 @@ def _polygon_exterior_points(flat: object) -> np.ndarray | None:
 
 
 def primitives_pass(
-    objects: list[OptObject],
+    objects: list[VectorRegion],
     masks: dict[int, np.ndarray],
     *,
     epsilon: float = 1.5,
@@ -39,14 +39,14 @@ def primitives_pass(
 
     proposals: list[Proposal] = []
     for obj in sorted(objects, key=lambda current: int(current.id)):
-        points = _polygon_exterior_points(obj.flat)
+        points = _polygon_exterior_points(obj.footprint)
         if points is None:
             continue
 
         primitive = recognize_primitive(points, epsilon=epsilon)
-        if primitive is None or primitive == obj.exact:
+        if primitive is None or primitive == obj.current:
             continue
 
-        proposals.append(Proposal((obj.id,), [obj.with_exact(primitive)]))
+        proposals.append(Proposal((obj.id,), [obj.with_current(primitive)]))
 
     return proposals

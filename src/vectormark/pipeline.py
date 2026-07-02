@@ -722,21 +722,21 @@ def _render_optimizer_body(objects, *, flatten: bool = False) -> tuple[list[str]
 
     for obj in ordered:
         fill = resolve_fill(obj.fill, defs)
-        shape = resolve_use_shape(obj.exact, id_map)
+        shape = resolve_use_shape(obj.current, id_map)
         if flatten:
             if shape.kind == "use":
-                source = object_by_id[int(obj.exact.params["href_obj_id"])]
-                shape = _inlined_use_shape(source.exact, shape.params["transform"])
-                fill = str(obj.exact.params.get("fill", fill))
+                source = object_by_id[int(obj.current.params["href_obj_id"])]
+                shape = _inlined_use_shape(source.current, shape.params["transform"])
+                fill = str(obj.current.params.get("fill", fill))
             body.append(path_svg(shape_to_path_d(shape), fill, fill_rule_for(shape)))
             continue
 
         if shape.kind == "use":
-            source = object_by_id[int(obj.exact.params["href_obj_id"])]
+            source = object_by_id[int(obj.current.params["href_obj_id"])]
             source_fill = resolve_fill(source.fill, defs)
-            use_fill = str(obj.exact.params.get("fill", fill))
+            use_fill = str(obj.current.params.get("fill", fill))
             if use_fill != source_fill:
-                shape = _inlined_use_shape(source.exact, shape.params["transform"])
+                shape = _inlined_use_shape(source.current, shape.params["transform"])
                 body.append(path_svg(shape_to_path_d(shape), use_fill, fill_rule_for(shape)))
                 continue
 
@@ -762,13 +762,13 @@ def _svg_element_count(svg: str) -> int:
     return len(_SVG_ELEMENT_RE.findall(svg))
 
 
-def _prefer_optimizer_svg(faithful_svg: str, optimized_svg: str) -> bool:
+def _prefer_optimizer_svg(trace_svg: str, optimized_svg: str) -> bool:
     """Use optimized output only when it is not structurally larger."""
-    faithful_elements = _svg_element_count(faithful_svg)
+    trace_elements = _svg_element_count(trace_svg)
     optimized_elements = _svg_element_count(optimized_svg)
     return (
-        optimized_elements <= faithful_elements
-        and len(optimized_svg.encode()) <= len(faithful_svg.encode())
+        optimized_elements <= trace_elements
+        and len(optimized_svg.encode()) <= len(trace_svg.encode())
     )
 
 
@@ -777,18 +777,18 @@ def _optimizer_report(objects, opt: Options, *, fallback_reason: str | None = No
     gradients = 0
     object_diags = []
     for obj in sorted(objects, key=lambda item: (int(item.id), int(item.z))):
-        strategy = f"optimizer_{obj.exact.kind}"
+        strategy = f"optimizer_{obj.current.kind}"
         strategies[strategy] = strategies.get(strategy, 0) + 1
         if isinstance(obj.fill, (LinearGradientFill, RadialGradientFill)):
             gradients += 1
-        bounds = tuple(float(v) for v in getattr(obj.flat, "bounds", (0.0, 0.0, 0.0, 0.0)))
+        bounds = tuple(float(v) for v in getattr(obj.footprint, "bounds", (0.0, 0.0, 0.0, 0.0)))
         object_diags.append({
             "id": int(obj.id),
             "z": int(obj.z),
-            "shape": obj.exact.kind,
+            "shape": obj.current.kind,
             "fill": _fill_kind(obj.fill),
             "bounds": bounds,
-            "area": float(getattr(obj.flat, "area", 0.0)),
+            "area": float(getattr(obj.footprint, "area", 0.0)),
         })
     diag = ReportDiag({
         "options": _to_json_safe(opt),
@@ -815,7 +815,7 @@ def _optimizer_report(objects, opt: Options, *, fallback_reason: str | None = No
 
 
 def _idealize_optimizer(arr: np.ndarray, opt: Options, width: int, height: int) -> tuple[str, IdealizeReport]:
-    """Experimental faithful-vectorize + geometry-optimizer pipeline."""
+    """Experimental trace-vectorize + geometry-optimizer pipeline."""
     from .optimizer.framework import optimize
     from .optimizer.trace import trace_regions
 
@@ -825,16 +825,16 @@ def _idealize_optimizer(arr: np.ndarray, opt: Options, width: int, height: int) 
         masks,
         _optimizer_passes(opt),
     )
-    faithful_body, faithful_defs = _render_optimizer_body(objects, flatten=opt.flatten)
-    faithful_svg = render_svg_doc(width, height, faithful_body, faithful_defs)
+    trace_body, trace_defs = _render_optimizer_body(objects, flatten=opt.flatten)
+    trace_svg = render_svg_doc(width, height, trace_body, trace_defs)
     optimized_body, optimized_defs = _render_optimizer_body(optimized, flatten=opt.flatten)
     optimized_svg = render_svg_doc(width, height, optimized_body, optimized_defs)
-    if _prefer_optimizer_svg(faithful_svg, optimized_svg):
+    if _prefer_optimizer_svg(trace_svg, optimized_svg):
         return optimized_svg, _optimizer_report(optimized, opt)
-    return faithful_svg, _optimizer_report(
+    return trace_svg, _optimizer_report(
         objects,
         opt,
-        fallback_reason="optimized output is structurally larger than faithful baseline",
+        fallback_reason="optimized output is structurally larger than trace baseline",
     )
 
 

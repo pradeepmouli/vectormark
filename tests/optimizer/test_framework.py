@@ -4,11 +4,11 @@ from vectormark.candidate import FlatFill
 from vectormark.fit import Shape
 from vectormark.optimizer.framework import Proposal, optimize
 from vectormark.optimizer.gate import rasterize
-from vectormark.optimizer.optobject import OptObject
+from vectormark.optimizer.vector_region import VectorRegion
 
 
 def _rect_obj(i, w, h, *, x=0.0, y=0.0):
-    return OptObject(
+    return VectorRegion(
         i,
         Shape("rect", {"x": float(x), "y": float(y), "w": float(w), "h": float(h)}),
         FlatFill("#000"),
@@ -20,7 +20,7 @@ def _path_square_obj(i, *, x=0.0, y=0.0, size=10.0):
     x2 = x + size
     y2 = y + size
     d = f"M{x} {y} L{x2} {y} L{x2} {y2} L{x} {y2} Z"
-    return OptObject(i, Shape("path", {"d": d}), FlatFill("#000"), 0)
+    return VectorRegion(i, Shape("path", {"d": d}), FlatFill("#000"), 0)
 
 
 def test_framework_accepts_good_rejects_bad():
@@ -34,7 +34,7 @@ def test_framework_accepts_good_rejects_bad():
 
     bad = lambda os, ms: [Proposal((1,), [_rect_obj(1, 2, 2)])]
     out2 = optimize(objs, masks, [bad])
-    assert abs(out2[0].exact.params["w"] - 10) < 1e-9
+    assert abs(out2[0].current.params["w"] - 10) < 1e-9
 
 
 def test_framework_orders_multi_id_proposals_and_unions_masks_for_new_ids():
@@ -79,7 +79,7 @@ def test_framework_rejects_multi_id_new_id_without_union_coverage():
     out = optimize(objs, masks, [bad_pass])
 
     assert [obj.id for obj in out] == [1, 2]
-    assert [obj.exact.params["w"] for obj in out] == [10.0, 10.0]
+    assert [obj.current.params["w"] for obj in out] == [10.0, 10.0]
 
 
 def test_framework_rejects_multi_id_proposal_that_drops_consumed_coverage():
@@ -126,20 +126,20 @@ def test_framework_accepts_multi_id_new_id_with_union_coverage():
     out = optimize(objs, masks, [merge_pass, verify_union_mask])
 
     assert [obj.id for obj in out] == [9]
-    assert out[0].exact.params["w"] == 19.0
+    assert out[0].current.params["w"] == 19.0
 
 
 def test_framework_accepts_single_id_split_and_assigns_replacement_masks():
     obj = _rect_obj(1, 20, 10, x=0, y=0)
-    masks = {1: rasterize(obj.flat, (20, 30))}
+    masks = {1: rasterize(obj.footprint, (20, 30))}
 
     def split_pass(os, ms):
         return [Proposal((1,), [_rect_obj(1, 10, 10, x=0, y=0), _rect_obj(9, 10, 10, x=10, y=0)])]
 
     def verify_split_masks(os, ms):
         assert [current.id for current in os] == [1, 9]
-        expected_left = rasterize(os[0].flat, (20, 30))
-        expected_right = rasterize(os[1].flat, (20, 30))
+        expected_left = rasterize(os[0].footprint, (20, 30))
+        expected_right = rasterize(os[1].footprint, (20, 30))
         assert np.array_equal(ms[1], expected_left)
         assert np.array_equal(ms[9], expected_right)
         assert int(ms[1].sum()) < int(masks[1].sum())
@@ -153,7 +153,7 @@ def test_framework_accepts_single_id_split_and_assigns_replacement_masks():
 
 def test_framework_updates_region_raster_and_pass_diagnostics():
     obj = _rect_obj(1, 20, 10, x=0, y=0)
-    masks = {1: rasterize(obj.flat, (20, 30))}
+    masks = {1: rasterize(obj.footprint, (20, 30))}
 
     def split_for_diagnostics(os, ms):
         return [Proposal((1,), [_rect_obj(1, 10, 10, x=0, y=0), _rect_obj(9, 10, 10, x=10, y=0)])]
@@ -161,8 +161,8 @@ def test_framework_updates_region_raster_and_pass_diagnostics():
     out = optimize([obj], masks, [split_for_diagnostics])
     by_id = {region.id: region for region in out}
 
-    assert np.array_equal(by_id[1].raster, rasterize(by_id[1].flat, (20, 30)))
-    assert np.array_equal(by_id[9].raster, rasterize(by_id[9].flat, (20, 30)))
+    assert np.array_equal(by_id[1].raster, rasterize(by_id[1].footprint, (20, 30)))
+    assert np.array_equal(by_id[9].raster, rasterize(by_id[9].footprint, (20, 30)))
     assert by_id[1].diagnostics["split_for_diagnostics"]["accepted"] is True
     assert by_id[1].diagnostics["split_for_diagnostics"]["proposal_ids"] == [1]
     assert by_id[9].diagnostics["split_for_diagnostics"]["proposal_ids"] == [1]
@@ -260,7 +260,7 @@ def test_framework_multi_id_matching_replacement_uses_own_mask_not_union():
     out = optimize(objs, masks, [replace_one_consumed_id], budget=0.25)
 
     assert [obj.id for obj in out] == [1, 2]
-    assert out[0].exact.kind == "path"
+    assert out[0].current.kind == "path"
 
 
 def test_framework_tiebreaks_same_consumed_ids_by_replacement_values():

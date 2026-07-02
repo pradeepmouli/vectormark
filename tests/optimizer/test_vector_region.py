@@ -4,7 +4,7 @@ from shapely.geometry import Polygon
 from vectormark.candidate import FlatFill
 from vectormark.fit import Shape
 from vectormark.occlusion import intersection_lens_d
-from vectormark.optimizer.optobject import OptObject, VectorRegion, flatten_points, to_polygon
+from vectormark.optimizer.vector_region import VectorRegion, flatten_points, to_polygon
 
 
 def test_to_polygon_circle_area_matches():
@@ -40,26 +40,26 @@ def test_to_polygon_supports_absolute_arc_paths_from_intersection_lens():
     assert abs(poly.area - expected) / expected < 0.02
 
 
-def test_optobject_with_exact_refreshes_flat():
-    o = OptObject(
+def test_vector_region_with_current_refreshes_footprint():
+    o = VectorRegion(
         id=1,
-        exact=Shape("rect", {"x": 0.0, "y": 0.0, "w": 10.0, "h": 10.0}),
+        current=Shape("rect", {"x": 0.0, "y": 0.0, "w": 10.0, "h": 10.0}),
         fill=FlatFill("#000000"),
         z=0,
     )
-    assert abs(o.flat.area - 100) < 1
-    o2 = o.with_exact(Shape("rect", {"x": 0.0, "y": 0.0, "w": 20.0, "h": 10.0}))
-    assert abs(o2.flat.area - 200) < 1 and abs(o.flat.area - 100) < 1
+    assert abs(o.footprint.area - 100) < 1
+    o2 = o.with_current(Shape("rect", {"x": 0.0, "y": 0.0, "w": 20.0, "h": 10.0}))
+    assert abs(o2.footprint.area - 200) < 1 and abs(o.footprint.area - 100) < 1
 
 
-def test_optobject_is_vector_region_compatibility_constructor():
+def test_vector_region_carries_trace_fields():
     raster = np.zeros((6, 6), dtype=bool)
     raster[1:5, 2:4] = True
     shape = Shape("rect", {"x": 2.0, "y": 1.0, "w": 2.0, "h": 4.0})
 
-    region = OptObject(
+    region = VectorRegion(
         id=7,
-        exact=shape,
+        current=shape,
         fill=FlatFill("#000000"),
         z=3,
         raster=raster,
@@ -71,11 +71,8 @@ def test_optobject_is_vector_region_compatibility_constructor():
     assert isinstance(region, VectorRegion)
     assert region.original == shape
     assert region.current == shape
-    assert region.exact == shape
     assert np.array_equal(region.raster, raster)
-    assert np.array_equal(region.mask, raster)
     assert abs(region.footprint.area - 8) < 1
-    assert region.flat == region.footprint
     assert region.source_label == 11
     assert region.color_hex == "#000000"
     assert region.diagnostics["trace"]["area"] == 8

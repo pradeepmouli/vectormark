@@ -11,7 +11,7 @@ from ...candidate import FlatFill
 from ...fit import Shape
 from ..framework import Proposal
 from ..gate import gate_ok
-from ..optobject import OptObject
+from ..vector_region import VectorRegion
 
 _ANGLE_EPS = 1e-9
 _AREA_RATIO_TOL = 0.01
@@ -134,18 +134,18 @@ def _best_transform(
 
 
 def clones_pass(
-    objects: list[OptObject],
+    objects: list[VectorRegion],
     masks: dict[int, np.ndarray],
 ) -> list[Proposal]:
-    usable: list[tuple[OptObject, Polygon | MultiPolygon, tuple[float, float, int], str]] = []
+    usable: list[tuple[VectorRegion, Polygon | MultiPolygon, tuple[float, float, int], str]] = []
     for obj in sorted(objects, key=lambda current: int(current.id)):
-        flat = _polygonal_flat(obj.flat)
+        flat = _polygonal_flat(obj.footprint)
         fill_hex = _flat_fill_hex(obj.fill)
-        if flat is None or fill_hex is None or obj.exact.kind == "use":
+        if flat is None or fill_hex is None or obj.current.kind == "use":
             continue
         usable.append((obj, flat, _shape_descriptor(flat), fill_hex))
 
-    by_bucket: dict[tuple[int, int, int], list[tuple[OptObject, Polygon | MultiPolygon, tuple[float, float, int], str]]] = defaultdict(list)
+    by_bucket: dict[tuple[int, int, int], list[tuple[VectorRegion, Polygon | MultiPolygon, tuple[float, float, int], str]]] = defaultdict(list)
     for item in usable:
         by_bucket[_bucket_key(item[2])].append(item)
 
@@ -171,9 +171,9 @@ def clones_pass(
                     Proposal(
                         (target_obj.id,),
                         [
-                            OptObject(
+                            VectorRegion(
                                 id=target_obj.id,
-                                exact=Shape(
+                                current=Shape(
                                     "use",
                                     {
                                         "href_obj_id": canonical_obj.id,
@@ -183,7 +183,7 @@ def clones_pass(
                                 ),
                                 fill=target_obj.fill,
                                 z=target_obj.z,
-                                flat=transformed,
+                                footprint=transformed,
                             )
                         ],
                     )
