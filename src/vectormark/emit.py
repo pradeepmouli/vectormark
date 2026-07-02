@@ -66,11 +66,15 @@ def resolve_use_shape(shape: Shape, id_map: dict[int, str]) -> Shape:
 
 def optimizer_objects_to_svg(objects, fills: dict[int, str] | None = None) -> list[str]:
     """Serialize optimizer objects with object-id based <use> references resolved."""
+    from .optimizer.vector_region import leaves
+
+    objects = leaves(objects)
     ordered = sorted(objects, key=lambda obj: (int(obj.id), int(obj.z)))
     id_map = {int(obj.id): f"s{idx}" for idx, obj in enumerate(ordered)}
     body: list[str] = []
     for obj in ordered:
         fill = fills.get(obj.id, "") if fills is not None else getattr(obj.fill, "hex", "")
+        assert obj.current is not None
         shape = resolve_use_shape(obj.current, id_map)
         body.append(shape_to_svg(shape, fill, id_map[int(obj.id)]))
     return body

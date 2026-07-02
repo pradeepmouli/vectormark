@@ -3,10 +3,12 @@ from __future__ import annotations
 import math
 import re
 from dataclasses import dataclass, field
+from collections.abc import Sequence
 from typing import Any, Mapping
 
 import numpy as np
 from shapely.geometry import MultiPolygon, Polygon
+from shapely.ops import unary_union
 
 from ..candidate import Fill
 from ..emit import shape_to_path_d
@@ -203,10 +205,11 @@ class VectorRegion:
     id: int
     raster: np.ndarray = field(compare=False)
     footprint: Polygon | MultiPolygon | object = field(compare=False)
-    fill: Fill
+    fill: Fill | None
     z: int
-    original: Shape
-    current: Shape
+    original: Shape | None
+    current: Shape | None
+    children: tuple["VectorRegion", ...]
     source_label: int | None = None
     color_hex: str | None = None
     coverage: np.ndarray | None = field(default=None, compare=False)
@@ -215,24 +218,31 @@ class VectorRegion:
     def __init__(
         self,
         id: int,
-        current: Shape,
-        fill: Fill,
+        current: Shape | None,
+        fill: Fill | None,
         z: int = 0,
         footprint: Polygon | MultiPolygon | object | None = None,
         *,
         raster: np.ndarray | None = None,
         original: Shape | None = None,
+        children: Sequence["VectorRegion"] = (),
         source_label: int | None = None,
         color_hex: str | None = None,
         coverage: np.ndarray | None = None,
         diagnostics: Mapping[str, Any] | None = None,
     ) -> None:
-        if original is None:
+        child_tuple = tuple(children)
+        if current is None and not child_tuple:
+            raise TypeError("VectorRegion branch nodes require children")
+        if current is not None and original is None:
             original = current
         if footprint is None:
-            footprint = to_polygon(current)
+            if current is not None:
+                footprint = to_polygon(current)
+            else:
+                footprint = unary_union([child.footprint for child in child_tuple])
         if raster is None:
-            raster = np.zeros((0, 0), dtype=bool)
+            raster = _union_child_rasters(child_tuple)
 
         object.__setattr__(self, "id", int(id))
         object.__setattr__(self, "raster", np.asarray(raster, dtype=bool).copy())
@@ -241,6 +251,7 @@ class VectorRegion:
         object.__setattr__(self, "z", int(z))
         object.__setattr__(self, "original", original)
         object.__setattr__(self, "current", current)
+        object.__setattr__(self, "children", child_tuple)
         object.__setattr__(self, "source_label", source_label)
         object.__setattr__(self, "color_hex", color_hex)
         object.__setattr__(self, "coverage", None if coverage is None else np.asarray(coverage).copy())
@@ -275,6 +286,51 @@ class VectorRegion:
             diagnostics=diagnostics,
         )
 
+    @classmethod
+    def branch(
+        cls,
+        *,
+        id: int,
+        children: Sequence["VectorRegion"],
+        z: int = 0,
+        raster: np.ndarray | None = None,
+        footprint: Polygon | MultiPolygon | object | None = None,
+        fill: Fill | None = None,
+        source_label: int | None = None,
+        color_hex: str | None = None,
+        diagnostics: Mapping[str, Any] | None = None,
+    ) -> "VectorRegion":
+        if not children:
+            raise ValueError("branch VectorRegion requires at least one child")
+        return cls(
+            id=id,
+            current=None,
+            fill=fill,
+            z=z,
+            raster=raster,
+            footprint=footprint,
+            children=children,
+            source_label=source_label,
+            color_hex=color_hex,
+            diagnostics=diagnostics,
+        )
+
+    @property
+    def is_leaf(self) -> bool:
+        return self.current is not None
+
+    @property
+    def is_branch(self) -> bool:
+        return self.current is None
+
+    def leaves(self) -> tuple["VectorRegion", ...]:
+        if self.is_leaf:
+            return (self,)
+        leaves: list[VectorRegion] = []
+        for child in self.children:
+            leaves.extend(child.leaves())
+        return tuple(leaves)
+
     def with_current(
         self,
         new_shape: Shape,
@@ -285,6 +341,8 @@ class VectorRegion:
         z: int | None = None,
         diagnostics: Mapping[str, Any] | None = None,
     ) -> "VectorRegion":
+        if not self.is_leaf:
+            raise ValueError("branch VectorRegion does not have current geometry")
         merged_diagnostics = dict(self.diagnostics)
         if diagnostics:
             merged_diagnostics.update(diagnostics)
@@ -301,3 +359,55 @@ class VectorRegion:
             coverage=self.coverage,
             diagnostics=merged_diagnostics,
         )
+
+    def with_diagnostics(
+        self,
+        diagnostics: Mapping[str, Any],
+        *,
+        raster: np.ndarray | None = None,
+    ) -> "VectorRegion":
+        merged_diagnostics = dict(self.diagnostics)
+        merged_diagnostics.update(diagnostics)
+        if self.is_leaf:
+            assert self.current is not None
+            return VectorRegion(
+                id=self.id,
+                current=self.current,
+                fill=self.fill,
+                z=self.z,
+                raster=self.raster if raster is None else raster,
+                footprint=self.footprint,
+                original=self.original,
+                source_label=self.source_label,
+                color_hex=self.color_hex,
+                coverage=self.coverage,
+                diagnostics=merged_diagnostics,
+            )
+        return VectorRegion.branch(
+            id=self.id,
+            children=self.children,
+            z=self.z,
+            raster=self.raster if raster is None else raster,
+            footprint=self.footprint,
+            fill=self.fill,
+            source_label=self.source_label,
+            color_hex=self.color_hex,
+            diagnostics=merged_diagnostics,
+        )
+
+
+def _union_child_rasters(children: Sequence[VectorRegion]) -> np.ndarray:
+    if not children:
+        return np.zeros((0, 0), dtype=bool)
+    raster = np.zeros_like(children[0].raster, dtype=bool)
+    for child in children:
+        if child.raster.shape == raster.shape:
+            raster |= np.asarray(child.raster, dtype=bool)
+    return raster
+
+
+def leaves(regions: Sequence[VectorRegion]) -> list[VectorRegion]:
+    out: list[VectorRegion] = []
+    for region in regions:
+        out.extend(region.leaves())
+    return out

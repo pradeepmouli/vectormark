@@ -317,6 +317,8 @@ def symmetry_pass(
 ) -> list[Proposal]:
     usable: list[tuple[VectorRegion, Polygon | MultiPolygon, str | None]] = []
     for obj in sorted(objects, key=lambda current: int(current.id)):
+        if not obj.is_leaf or obj.current is None:
+            continue
         flat = _polygonal_flat(obj.footprint)
         if flat is None or obj.current.kind == "use" or obj.id not in masks:
             continue

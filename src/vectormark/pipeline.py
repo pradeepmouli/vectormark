@@ -704,7 +704,10 @@ def _idealize_rectified(arr: np.ndarray, opt: Options, rho: float, w0: int, h0: 
 
 def _render_optimizer_body(objects, *, flatten: bool = False) -> tuple[list[str], list[str]]:
     """Serialize optimized objects, resolving object-id based <use> references."""
+    from .optimizer.vector_region import leaves
+
     defs: list[str] = []
+    objects = leaves(objects)
     ordered = sorted(objects, key=lambda obj: (int(obj.z), int(obj.id)))
     id_map = {int(obj.id): f"s{idx}" for idx, obj in enumerate(ordered)}
     object_by_id = {int(obj.id): obj for obj in ordered}
@@ -721,6 +724,8 @@ def _render_optimizer_body(objects, *, flatten: bool = False) -> tuple[list[str]
         return Shape("use", params)
 
     for obj in ordered:
+        assert obj.current is not None
+        assert obj.fill is not None
         fill = resolve_fill(obj.fill, defs)
         shape = resolve_use_shape(obj.current, id_map)
         if flatten:
@@ -746,9 +751,9 @@ def _render_optimizer_body(objects, *, flatten: bool = False) -> tuple[list[str]
 
 def _optimizer_passes(opt: Options):
     """Pass order for the experimental geometry optimizer."""
-    from .optimizer.passes import clones_pass, primitives_pass, simplify_pass, symmetry_pass
+    from .optimizer.passes import clones_pass, occlusion_pass, primitives_pass, simplify_pass, symmetry_pass
 
-    passes = [primitives_pass, clones_pass]
+    passes = [primitives_pass, occlusion_pass, clones_pass]
     if not opt.no_symmetry:
         passes.append(symmetry_pass)
     passes.append(simplify_pass)
@@ -773,10 +778,23 @@ def _prefer_optimizer_svg(trace_svg: str, optimized_svg: str) -> bool:
 
 
 def _optimizer_report(objects, opt: Options, *, fallback_reason: str | None = None) -> IdealizeReport:
+    from .optimizer.vector_region import leaves
+
     strategies: dict[str, int] = {}
     gradients = 0
+    region_diags = []
     object_diags = []
-    for obj in sorted(objects, key=lambda item: (int(item.id), int(item.z))):
+    flat_objects = leaves(objects)
+    for region in sorted(objects, key=lambda item: (int(item.z), int(item.id))):
+        region_diags.append({
+            "id": int(region.id),
+            "z": int(region.z),
+            "kind": "leaf" if region.is_leaf else "branch",
+            "children": len(region.children),
+            "diagnostics": _to_json_safe(dict(region.diagnostics)),
+        })
+    for obj in sorted(flat_objects, key=lambda item: (int(item.id), int(item.z))):
+        assert obj.current is not None
         strategy = f"optimizer_{obj.current.kind}"
         strategies[strategy] = strategies.get(strategy, 0) + 1
         if isinstance(obj.fill, (LinearGradientFill, RadialGradientFill)):
@@ -786,7 +804,7 @@ def _optimizer_report(objects, opt: Options, *, fallback_reason: str | None = No
             "id": int(obj.id),
             "z": int(obj.z),
             "shape": obj.current.kind,
-            "fill": _fill_kind(obj.fill),
+            "fill": _fill_kind(obj.fill) if obj.fill is not None else "none",
             "bounds": bounds,
             "area": float(getattr(obj.footprint, "area", 0.0)),
         })
@@ -795,19 +813,20 @@ def _optimizer_report(objects, opt: Options, *, fallback_reason: str | None = No
         "stats": {
             "regions": 0,
             "components": 0,
-            "elements": len(objects),
+            "elements": len(flat_objects),
             "gradients": gradients,
             "axes": 0,
         },
         "axes": [],
         "regions": [],
+        "optimizer_regions": region_diags,
         "optimizer_objects": object_diags,
         "optimizer_fallback": fallback_reason,
     })
     return IdealizeReport(
         types.MappingProxyType(dict(strategies)),
         gradients,
-        len(objects),
+        len(flat_objects),
         (),
         (),
         diag,

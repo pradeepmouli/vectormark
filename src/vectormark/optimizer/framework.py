@@ -30,6 +30,13 @@ def _object_key(obj: VectorRegion) -> tuple[int, int]:
 
 
 def _shape_key(obj: VectorRegion) -> tuple[object, ...]:
+    if obj.current is None:
+        return (
+            *_object_key(obj),
+            "branch",
+            tuple(_shape_key(child) for child in obj.leaves()),
+            repr(obj.fill),
+        )
     return (
         *_object_key(obj),
         obj.current.kind,
@@ -43,6 +50,8 @@ def _proposal_sort_key(proposal: Proposal) -> tuple[tuple[int, ...], tuple[tuple
 
 
 def _geometry_changed(original: VectorRegion, replacement: VectorRegion) -> bool:
+    if original.current is None or replacement.current is None:
+        return original.footprint != replacement.footprint
     return original.current != replacement.current
 
 
@@ -108,9 +117,7 @@ def _annotate_replacement(
     proposal_ids: tuple[int, ...],
     raster: np.ndarray,
 ) -> VectorRegion:
-    return replacement.with_current(
-        replacement.current,
-        footprint=replacement.footprint,
+    return replacement.with_diagnostics(
         raster=raster,
         diagnostics={
             pass_name: {

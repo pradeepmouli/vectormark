@@ -39,6 +39,8 @@ def primitives_pass(
 
     proposals: list[Proposal] = []
     for obj in sorted(objects, key=lambda current: int(current.id)):
+        if not obj.is_leaf or obj.current is None:
+            continue
         points = _polygon_exterior_points(obj.footprint)
         if points is None:
             continue

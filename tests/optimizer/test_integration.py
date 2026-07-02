@@ -39,6 +39,19 @@ def _two_colored_square_image() -> np.ndarray:
     return img
 
 
+def _synthetic_mastercard_image() -> np.ndarray:
+    h, w, gap, r = 240, 360, 58, 104
+    yy, xx = np.ogrid[:h, :w]
+    cx, cy = w // 2, h // 2
+    left = (xx - (cx - gap)) ** 2 + (yy - cy) ** 2 <= r ** 2
+    right = (xx - (cx + gap)) ** 2 + (yy - cy) ** 2 <= r ** 2
+    img = np.full((h, w, 3), 255, np.uint8)
+    img[left] = (235, 0, 27)
+    img[right] = (247, 158, 27)
+    img[left & right] = (255, 95, 0)
+    return img
+
+
 def test_optimizer_option_defaults_off_for_existing_pipeline():
     img = _disk_image()
 
@@ -113,3 +126,15 @@ def test_optimizer_pipeline_keeps_daikonic_fixture_objects_present():
     element_count = sum(svg.count(token) for token in ("<path", "<circle", "<ellipse", "<rect", "<use"))
     assert element_count >= 8
     assert len(svg) > 1000
+
+
+def test_optimizer_pipeline_reconstructs_mastercard_as_scene_branch():
+    svg, report = idealize(_synthetic_mastercard_image(), options=Options(optimizer=True), report=True)
+
+    assert svg.count("<circle") == 2
+    assert svg.count("<path") == 1
+    diagnostics = report.diagnostics.to_dict()
+    assert diagnostics["optimizer_fallback"] is None
+    assert diagnostics["optimizer_regions"][0]["kind"] == "branch"
+    assert diagnostics["optimizer_regions"][0]["children"] == 3
+    assert [obj["shape"] for obj in diagnostics["optimizer_objects"]] == ["circle", "circle", "path"]

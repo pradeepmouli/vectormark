@@ -4,7 +4,7 @@ from shapely.geometry import Polygon
 from vectormark.candidate import FlatFill
 from vectormark.fit import Shape
 from vectormark.occlusion import intersection_lens_d
-from vectormark.optimizer.vector_region import VectorRegion, flatten_points, to_polygon
+from vectormark.optimizer.vector_region import VectorRegion, flatten_points, leaves, to_polygon
 
 
 def test_to_polygon_circle_area_matches():
@@ -76,3 +76,34 @@ def test_vector_region_carries_trace_fields():
     assert region.source_label == 11
     assert region.color_hex == "#000000"
     assert region.diagnostics["trace"]["area"] == 8
+
+
+def test_vector_region_branch_has_children_not_current_geometry():
+    left = VectorRegion(
+        id=1,
+        current=Shape("rect", {"x": 0.0, "y": 0.0, "w": 4.0, "h": 4.0}),
+        fill=FlatFill("#111111"),
+        z=0,
+    )
+    right = VectorRegion(
+        id=2,
+        current=Shape("rect", {"x": 4.0, "y": 0.0, "w": 4.0, "h": 4.0}),
+        fill=FlatFill("#222222"),
+        z=1,
+    )
+
+    branch = VectorRegion.branch(
+        id=9,
+        children=[left, right],
+        diagnostics={"occlusion": {"accepted": True}},
+    )
+
+    assert branch.is_branch
+    assert not branch.is_leaf
+    assert branch.current is None
+    assert branch.original is None
+    assert branch.fill is None
+    assert branch.leaves() == (left, right)
+    assert leaves([branch]) == [left, right]
+    assert abs(branch.footprint.area - 32) < 1
+    assert branch.diagnostics["occlusion"]["accepted"] is True

@@ -257,6 +257,8 @@ def simplify_pass(
 ) -> list[Proposal]:
     proposals: list[Proposal] = []
     for obj in sorted(objects, key=lambda current: int(current.id)):
+        if not obj.is_leaf or obj.current is None:
+            continue
         if isinstance(obj.footprint, MultiPolygon) or not _simplifiable_polygon(obj.footprint):
             continue
         if obj.current.kind == "path" and obj.current.params.get("fill_rule"):

@@ -139,6 +139,8 @@ def clones_pass(
 ) -> list[Proposal]:
     usable: list[tuple[VectorRegion, Polygon | MultiPolygon, tuple[float, float, int], str]] = []
     for obj in sorted(objects, key=lambda current: int(current.id)):
+        if not obj.is_leaf or obj.current is None:
+            continue
         flat = _polygonal_flat(obj.footprint)
         fill_hex = _flat_fill_hex(obj.fill)
         if flat is None or fill_hex is None or obj.current.kind == "use":
