@@ -128,6 +128,53 @@ def _annotate_replacement(
     )
 
 
+def _masks_from_objects(
+    objects: Iterable[VectorRegion],
+    fallback: dict[int, np.ndarray],
+) -> dict[int, np.ndarray]:
+    out: dict[int, np.ndarray] = {}
+    for obj in objects:
+        if obj.raster.size:
+            out[obj.id] = np.asarray(obj.raster, dtype=bool).copy()
+        elif obj.id in fallback:
+            out[obj.id] = np.asarray(fallback[obj.id], dtype=bool).copy()
+    return out
+
+
+def _optimize_branch_children(
+    objects: list[VectorRegion],
+    pass_fn: Pass,
+    pass_name: str,
+    *,
+    budget: float,
+) -> list[VectorRegion]:
+    updated: list[VectorRegion] = []
+    for obj in objects:
+        if obj.is_leaf:
+            updated.append(obj)
+            continue
+        child_objects = list(obj.children)
+        child_masks = _masks_from_objects(child_objects, {})
+        optimized_children = optimize(child_objects, child_masks, [pass_fn], budget=budget)
+        if len(optimized_children) == len(obj.children) and all(
+            optimized is original
+            for optimized, original in zip(optimized_children, obj.children, strict=True)
+        ):
+            updated.append(obj)
+            continue
+        updated.append(
+            obj.with_children(
+                optimized_children,
+                diagnostics={
+                    pass_name: {
+                        "children_optimized": True,
+                    }
+                },
+            )
+        )
+    return updated
+
+
 def optimize(
     objects: list[VectorRegion],
     masks: dict[int, np.ndarray],
@@ -140,6 +187,13 @@ def optimize(
 
     for pass_fn in passes:
         pass_name = _pass_name(pass_fn)
+        current_objects = _optimize_branch_children(
+            current_objects,
+            pass_fn,
+            pass_name,
+            budget=budget,
+        )
+        current_masks = _masks_from_objects(current_objects, current_masks)
         current_objects = sorted(current_objects, key=_object_key)
         pass_objects = list(current_objects)
         pass_masks = {obj_id: mask.copy() for obj_id, mask in current_masks.items()}

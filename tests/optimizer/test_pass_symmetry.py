@@ -42,7 +42,7 @@ def _rect(
 
 def test_symmetry_pass_replaces_mirror_pair_with_use():
     left = _rect(1, bounds=(10.0, 20.0, 22.0, 34.0), fill=FlatFill("#112233"))
-    right = _rect(2, bounds=(58.0, 20.0, 70.0, 34.0), fill=FlatFill("#abcdef"))
+    right = _rect(2, bounds=(58.0, 20.0, 70.0, 34.0), fill=FlatFill("#112233"))
     objects = [right, left]
     masks = {obj.id: _mask_for_polygon(obj.footprint) for obj in objects}
 
@@ -57,7 +57,7 @@ def test_symmetry_pass_replaces_mirror_pair_with_use():
     assert out[1].current.params == {
         "href_obj_id": 1,
         "transform": (-1.0, 0.0, 0.0, 1.0, 80.0, 0.0),
-        "fill": "#abcdef",
+        "fill": "#112233",
     }
 
 
@@ -114,9 +114,22 @@ def test_symmetry_pass_skips_non_flat_fill_pair_use():
     assert [obj.current.kind for obj in out] == ["path", "path"]
 
 
+def test_symmetry_pass_skips_recolored_pair_use():
+    left = _rect(1, bounds=(10.0, 20.0, 22.0, 34.0), fill=FlatFill("#112233"))
+    right = _rect(2, bounds=(58.0, 20.0, 70.0, 34.0), fill=FlatFill("#abcdef"))
+    objects = [left, right]
+    masks = {obj.id: _mask_for_polygon(obj.footprint) for obj in objects}
+
+    proposals = symmetry_pass(objects, masks)
+    out = optimize(objects, masks, [symmetry_pass])
+
+    assert proposals == []
+    assert [obj.current.kind for obj in out] == ["path", "path"]
+
+
 def test_symmetry_pass_is_deterministic_for_unordered_inputs():
     left = _rect(3, bounds=(10.0, 20.0, 22.0, 34.0), fill=FlatFill("#112233"))
-    right = _rect(9, bounds=(58.0, 20.0, 70.0, 34.0), fill=FlatFill("#abcdef"))
+    right = _rect(9, bounds=(58.0, 20.0, 70.0, 34.0), fill=FlatFill("#112233"))
     masks = {obj.id: _mask_for_polygon(obj.footprint) for obj in [left, right]}
 
     first = symmetry_pass([right, left], masks)
@@ -129,7 +142,7 @@ def test_symmetry_pass_is_deterministic_for_unordered_inputs():
 
 def test_symmetry_pass_rejects_pair_when_mask_gate_fails():
     left = _rect(1, bounds=(10.0, 20.0, 22.0, 34.0), fill=FlatFill("#112233"))
-    right = _rect(2, bounds=(58.0, 20.0, 70.0, 34.0), fill=FlatFill("#abcdef"))
+    right = _rect(2, bounds=(58.0, 20.0, 70.0, 34.0), fill=FlatFill("#112233"))
     masks = {
         left.id: _mask_for_polygon(left.footprint),
         right.id: _mask_for_polygon(Polygon([(0.0, 0.0), (5.0, 0.0), (5.0, 5.0), (0.0, 5.0)])),

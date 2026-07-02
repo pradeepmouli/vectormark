@@ -395,6 +395,27 @@ class VectorRegion:
             diagnostics=merged_diagnostics,
         )
 
+    def with_children(
+        self,
+        children: Sequence["VectorRegion"],
+        *,
+        diagnostics: Mapping[str, Any] | None = None,
+    ) -> "VectorRegion":
+        if not self.is_branch:
+            raise ValueError("leaf VectorRegion does not have children")
+        merged_diagnostics = dict(self.diagnostics)
+        if diagnostics:
+            merged_diagnostics.update(diagnostics)
+        return VectorRegion.branch(
+            id=self.id,
+            children=children,
+            z=self.z,
+            fill=self.fill,
+            source_label=self.source_label,
+            color_hex=self.color_hex,
+            diagnostics=merged_diagnostics,
+        )
+
 
 def _union_child_rasters(children: Sequence[VectorRegion]) -> np.ndarray:
     if not children:

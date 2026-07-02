@@ -63,9 +63,9 @@ def _circle(obj_id: int, *, center=(20.0, 20.0), radius=6.0, fill="#778899") -> 
     )
 
 
-def test_clones_pass_proposes_use_for_translated_square_with_flat_fill_override():
+def test_clones_pass_proposes_use_for_translated_square_with_same_flat_fill():
     canonical = _square(1, center=(18.0, 18.0), fill=FlatFill("#112233"))
-    clone = _square(2, center=(52.0, 40.0), fill=FlatFill("#abcdef"))
+    clone = _square(2, center=(52.0, 40.0), fill=FlatFill("#112233"))
     objects = [clone, canonical]
     masks = {obj.id: _mask_for_polygon(obj.footprint) for obj in objects}
 
@@ -77,13 +77,13 @@ def test_clones_pass_proposes_use_for_translated_square_with_flat_fill_override(
     assert out[1].current.params == {
         "href_obj_id": 1,
         "transform": (1.0, 0.0, 0.0, 1.0, 34.0, 22.0),
-        "fill": "#abcdef",
+        "fill": "#112233",
     }
 
 
 def test_clones_pass_matches_rotated_congruent_square():
     canonical = _square(1, center=(22.0, 22.0), fill=FlatFill("#102030"))
-    rotated = _square(2, center=(60.0, 48.0), angle_deg=30.0, fill=FlatFill("#405060"))
+    rotated = _square(2, center=(60.0, 48.0), angle_deg=30.0, fill=FlatFill("#102030"))
     objects = [canonical, rotated]
     masks = {obj.id: _mask_for_polygon(obj.footprint) for obj in objects}
 
@@ -114,6 +114,17 @@ def test_clones_pass_skips_non_congruent_shapes():
     assert [obj.current.kind for obj in out] == ["path", "circle"]
 
 
+def test_clones_pass_skips_recolored_clone_proposals():
+    canonical = _square(1, center=(18.0, 18.0), fill=FlatFill("#112233"))
+    clone = _square(2, center=(52.0, 40.0), fill=FlatFill("#abcdef"))
+    objects = [canonical, clone]
+    masks = {obj.id: _mask_for_polygon(obj.footprint) for obj in objects}
+
+    assert clones_pass(objects, masks) == []
+    out = optimize(objects, masks, [clones_pass])
+    assert [obj.current.kind for obj in out] == ["path", "path"]
+
+
 def test_clones_pass_skips_non_flat_fill_clone_proposals():
     canonical = _square(1, center=(18.0, 18.0), fill=FlatFill("#112233"))
     clone = _square(
@@ -134,7 +145,7 @@ def test_clones_pass_skips_non_flat_fill_clone_proposals():
 
 def test_optimizer_object_svg_resolves_clone_href_to_emitted_id():
     canonical = _square(10, center=(18.0, 18.0), fill=FlatFill("#112233"))
-    clone = _square(20, center=(52.0, 40.0), fill=FlatFill("#abcdef"))
+    clone = _square(20, center=(52.0, 40.0), fill=FlatFill("#112233"))
     objects = [clone, canonical]
     masks = {obj.id: _mask_for_polygon(obj.footprint) for obj in objects}
 

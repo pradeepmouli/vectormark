@@ -157,6 +157,8 @@ def clones_pass(
         for index, (target_obj, target_flat, target_desc, target_fill_hex) in enumerate(group):
             matched = False
             for canonical_obj, canonical_flat, canonical_desc, _canonical_fill_hex in group[:index]:
+                if _canonical_fill_hex != target_fill_hex:
+                    continue
                 if not _within_ratio(canonical_desc[0], target_desc[0], _AREA_RATIO_TOL):
                     continue
                 if not _within_ratio(canonical_desc[1], target_desc[1], _PERIMETER_RATIO_TOL):

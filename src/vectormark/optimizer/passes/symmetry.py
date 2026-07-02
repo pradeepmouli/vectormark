@@ -338,6 +338,8 @@ def symmetry_pass(
                 continue
             if target_fill is None:
                 continue
+            if target_fill != canonical_fill:
+                continue
             proposal = _pair_proposal(
                 canonical,
                 canonical_flat,

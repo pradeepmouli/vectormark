@@ -168,6 +168,41 @@ def test_framework_updates_region_raster_and_pass_diagnostics():
     assert by_id[9].diagnostics["split_for_diagnostics"]["proposal_ids"] == [1]
 
 
+def test_framework_runs_passes_inside_branch_children():
+    path_child = _path_square_obj(1, size=10.0)
+    child_mask = rasterize(path_child.footprint, (20, 20))
+    path_child = VectorRegion(
+        id=path_child.id,
+        current=path_child.current,
+        fill=path_child.fill,
+        z=path_child.z,
+        raster=child_mask,
+        footprint=path_child.footprint,
+    )
+    branch = VectorRegion.branch(id=9, children=[path_child])
+
+    def promote_child(os, ms):
+        if any(not obj.is_leaf for obj in os):
+            return []
+        assert [obj.id for obj in os] == [1]
+        assert 1 in ms
+        replacement = os[0].with_current(
+            Shape("rect", {"x": 0.0, "y": 0.0, "w": 10.0, "h": 10.0}),
+            footprint=os[0].footprint,
+        )
+        return [Proposal((1,), [replacement])]
+
+    out = optimize([branch], {9: branch.raster}, [promote_child])
+
+    assert len(out) == 1
+    assert out[0].is_branch
+    assert out[0].diagnostics["promote_child"]["children_optimized"] is True
+    child = out[0].children[0]
+    assert child.current.kind == "rect"
+    assert child.diagnostics["promote_child"]["accepted"] is True
+    assert np.array_equal(out[0].raster, child.raster)
+
+
 def test_framework_rejects_replacement_id_aliasing_live_object():
     objs = [
         _rect_obj(1, 10, 10, x=0, y=0),
