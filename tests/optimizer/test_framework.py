@@ -3,6 +3,7 @@ import numpy as np
 from vectormark.candidate import FlatFill
 from vectormark.fit import Shape
 from vectormark.optimizer.framework import Proposal, optimize
+from vectormark.optimizer.gate import rasterize
 from vectormark.optimizer.optobject import OptObject
 
 
@@ -126,6 +127,28 @@ def test_framework_accepts_multi_id_new_id_with_union_coverage():
 
     assert [obj.id for obj in out] == [9]
     assert out[0].exact.params["w"] == 19.0
+
+
+def test_framework_accepts_single_id_split_and_assigns_replacement_masks():
+    obj = _rect_obj(1, 20, 10, x=0, y=0)
+    masks = {1: rasterize(obj.flat, (20, 30))}
+
+    def split_pass(os, ms):
+        return [Proposal((1,), [_rect_obj(1, 10, 10, x=0, y=0), _rect_obj(9, 10, 10, x=10, y=0)])]
+
+    def verify_split_masks(os, ms):
+        assert [current.id for current in os] == [1, 9]
+        expected_left = rasterize(os[0].flat, (20, 30))
+        expected_right = rasterize(os[1].flat, (20, 30))
+        assert np.array_equal(ms[1], expected_left)
+        assert np.array_equal(ms[9], expected_right)
+        assert int(ms[1].sum()) < int(masks[1].sum())
+        assert int(ms[9].sum()) < int(masks[1].sum())
+        return []
+
+    out = optimize([obj], masks, [split_pass, verify_split_masks])
+
+    assert [current.id for current in out] == [1, 9]
 
 
 def test_framework_rejects_replacement_id_aliasing_live_object():

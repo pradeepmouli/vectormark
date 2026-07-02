@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import math
+import re
 from collections import namedtuple
 
 import numpy as np
@@ -9,7 +10,7 @@ from shapely.geometry import MultiPolygon, Polygon
 from shapely.ops import unary_union
 
 from ...candidate import FlatFill
-from ...fit import Shape, _fmt
+from ...fit import Shape, _fmt, fit_path
 from ..framework import Proposal
 from ..gate import gate_ok
 from ..optobject import OptObject
@@ -21,6 +22,7 @@ _AREA_RATIO_TOL = 0.03
 _PERIMETER_RATIO_TOL = 0.03
 _PAIR_RESIDUAL_TOL = 0.02
 _SELF_RESIDUAL_TOL = 0.02
+_PATH_COMMAND = re.compile(r"[MLQCAZ]")
 
 
 def _polygonal_flat(flat: object) -> Polygon | MultiPolygon | None:
@@ -145,15 +147,11 @@ def _half_plane(flat: Polygon | MultiPolygon, axis: Axis2D) -> Polygon:
     )
 
 
-def _force_self_symmetric(flat: Polygon | MultiPolygon, axis: Axis2D) -> Polygon | MultiPolygon | None:
+def _canonical_half(flat: Polygon | MultiPolygon, axis: Axis2D) -> Polygon | MultiPolygon | None:
     half = flat.intersection(_half_plane(flat, axis))
-    if half.is_empty:
+    if half.is_empty or not isinstance(half, (Polygon, MultiPolygon)):
         return None
-    reflected = _reflect_flat(half, axis)
-    out = unary_union([half, reflected])
-    if out.is_empty or not isinstance(out, (Polygon, MultiPolygon)):
-        return None
-    return out if out.is_valid else out.buffer(0)
+    return half if half.is_valid else half.buffer(0)
 
 
 def _ring_d(coords) -> str:
@@ -189,33 +187,85 @@ def _geometry_to_path_shape(flat: Polygon | MultiPolygon) -> Shape | None:
     return Shape("path", params)
 
 
+def _command_count(d: str) -> int:
+    return len(_PATH_COMMAND.findall(d))
+
+
+def _self_split_improves(original: Shape, half_shape: Shape) -> bool:
+    if original.kind != "path" or half_shape.kind != "path":
+        return False
+    original_d = str(original.params.get("d", ""))
+    half_d = str(half_shape.params.get("d", ""))
+    if not original_d or not half_d:
+        return False
+    # Count the mirrored <use> as one drawing command. This keeps already-simple
+    # symmetric polygons from being split just because they have an axis.
+    return (
+        _command_count(half_d) + 1 < _command_count(original_d)
+        and len(half_d.encode()) < len(original_d.encode())
+    )
+
+
+def _fit_polygon_path(poly: Polygon) -> str | None:
+    coords = np.asarray(poly.exterior.coords, dtype=float)
+    if len(coords) < 4:
+        return None
+    try:
+        fitted = fit_path(coords, epsilon=1.5, max_error=1.0)
+    except Exception:
+        return None
+    return str(fitted.params["d"])
+
+
+def _fit_geometry_to_path_shape(flat: Polygon | MultiPolygon) -> Shape | None:
+    if isinstance(flat, MultiPolygon):
+        return _geometry_to_path_shape(flat)
+    if flat.is_empty:
+        return None
+    exterior = _fit_polygon_path(flat)
+    if exterior is None:
+        return _geometry_to_path_shape(flat)
+    parts = [exterior]
+    parts.extend(_ring_d(ring.coords) for ring in flat.interiors)
+    params: dict[str, object] = {"d": " ".join(part for part in parts if part)}
+    if flat.interiors:
+        params["fill_rule"] = "evenodd"
+    return Shape("path", params)
+
+
 def _best_self_reconstruction(
     flat: Polygon | MultiPolygon,
     mask: np.ndarray,
-) -> tuple[Axis2D, Polygon | MultiPolygon, Shape] | None:
-    candidates: list[tuple[float, Axis2D, Polygon | MultiPolygon, Shape]] = []
+) -> tuple[Axis2D, Polygon | MultiPolygon, Polygon | MultiPolygon, Shape] | None:
+    candidates: list[tuple[float, Axis2D, Polygon | MultiPolygon, Polygon | MultiPolygon, Shape]] = []
     for axis in _self_axis_candidates(flat):
         reflected = _reflect_flat(flat, axis)
         if _residual(reflected, flat) > _SELF_RESIDUAL_TOL:
             continue
-        reconstructed = _force_self_symmetric(flat, axis)
+        half = _canonical_half(flat, axis)
+        if half is None:
+            continue
+        reflected_half = _reflect_flat(half, axis)
+        reconstructed = unary_union([half, reflected_half])
         if reconstructed is None:
+            continue
+        if reconstructed.is_empty or not isinstance(reconstructed, (Polygon, MultiPolygon)):
             continue
         if not gate_ok(reconstructed, mask):
             continue
-        shape = _geometry_to_path_shape(reconstructed)
+        shape = _fit_geometry_to_path_shape(half)
         if shape is None:
             continue
-        candidates.append((_residual(reconstructed, flat), axis, reconstructed, shape))
+        candidates.append((_residual(reconstructed, flat), axis, half, reflected_half, shape))
 
     if not candidates:
         return None
 
-    _score, axis, reconstructed, shape = min(
+    _score, axis, half, reflected_half, shape = min(
         candidates,
-        key=lambda item: (round(item[0], 12), _axis_key(item[1]), item[3].params["d"]),
+        key=lambda item: (round(item[0], 12), _axis_key(item[1]), item[4].params["d"]),
     )
-    return axis, reconstructed, shape
+    return axis, half, reflected_half, shape
 
 
 def _pair_proposal(
@@ -274,6 +324,7 @@ def symmetry_pass(
 
     proposals: list[Proposal] = []
     paired_ids: set[int] = set()
+    next_id = max((int(obj.id) for obj, _flat, _fill in usable), default=-1) + 1
 
     for index, (canonical, canonical_flat, canonical_fill) in enumerate(usable):
         if canonical.id in paired_ids:
@@ -307,9 +358,31 @@ def symmetry_pass(
         best = _best_self_reconstruction(flat, masks[obj.id])
         if best is None:
             continue
-        _axis, reconstructed, shape = best
-        if shape == obj.exact:
+        axis, half, reflected_half, shape = best
+        if shape == obj.exact or not _self_split_improves(obj.exact, shape):
             continue
-        proposals.append(Proposal((obj.id,), [OptObject(obj.id, shape, obj.fill, obj.z, reconstructed)]))
+        use_id = next_id
+        next_id += 1
+        proposals.append(
+            Proposal(
+                (obj.id,),
+                [
+                    OptObject(obj.id, shape, obj.fill, obj.z, half),
+                    OptObject(
+                        id=use_id,
+                        exact=Shape(
+                            "use",
+                            {
+                                "href_obj_id": obj.id,
+                                "transform": _svg_reflection_matrix(axis),
+                            },
+                        ),
+                        fill=obj.fill,
+                        z=obj.z,
+                        flat=reflected_half,
+                    ),
+                ],
+            )
+        )
 
     return proposals

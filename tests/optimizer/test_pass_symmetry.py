@@ -62,19 +62,22 @@ def test_symmetry_pass_replaces_mirror_pair_with_use():
 
 
 def test_symmetry_pass_reconstructs_self_symmetric_object_as_exact_path():
-    diamond = Polygon([(40.0, 16.0), (58.0, 32.0), (40.0, 48.0), (22.0, 32.0)])
-    obj = _obj(1, diamond)
+    angles = np.linspace(0.0, 2.0 * np.pi, 32, endpoint=False)
+    symmetric_contour = Polygon(
+        [(48.0 + 20.0 * np.cos(theta), 48.0 + 30.0 * np.sin(theta)) for theta in angles]
+    )
+    obj = _obj(1, symmetric_contour)
     masks = {obj.id: _mask_for_polygon(obj.flat)}
 
     out = optimize([obj], masks, [symmetry_pass])
 
-    assert len(out) == 1
+    assert len(out) == 2
+    assert [current.exact.kind for current in out] == ["path", "use"]
     assert out[0].id == 1
     assert out[0].exact.kind == "path"
     assert out[0].exact != obj.exact
-    reflected = out[0].flat.symmetric_difference(
-        Polygon([(40.0, 16.0), (58.0, 32.0), (40.0, 48.0), (22.0, 32.0)])
-    )
+    assert out[1].exact.params["href_obj_id"] == 1
+    reflected = out[0].flat.union(out[1].flat).symmetric_difference(symmetric_contour)
     assert reflected.area < 1e-6
 
 

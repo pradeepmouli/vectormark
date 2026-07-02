@@ -7,7 +7,7 @@ from typing import Protocol
 import numpy as np
 from shapely.ops import unary_union
 
-from .gate import BUDGET, gate_ok
+from .gate import BUDGET, gate_ok, rasterize
 from .optobject import OptObject
 
 Proposal = namedtuple("Proposal", "obj_ids new_objects")
@@ -84,7 +84,14 @@ def _gate_mask(
         return None
     if not _geometry_changed(original, replacement):
         return None
-    return current_masks[original.id]
+    mask = np.asarray(current_masks[original.id], dtype=bool)
+    if len(proposal_ids) > 1:
+        mask = mask.copy()
+        for obj_id in proposal_ids:
+            other = originals[obj_id]
+            if other.z > original.z:
+                mask |= np.asarray(current_masks[obj_id], dtype=bool)
+    return mask
 
 
 def optimize(
@@ -136,15 +143,25 @@ def optimize(
 
             union_mask = _union_masks(pass_masks, proposal_ids)
             gates_ok = True
-            if len(proposal_ids) > 1 and not gate_ok(
+            split_replacement = len(proposal_ids) == 1 and len(proposal.new_objects) > 1
+            if (len(proposal_ids) > 1 or split_replacement) and not gate_ok(
                 _union_flats(proposal.new_objects),
                 union_mask,
                 budget=budget,
             ):
                 gates_ok = False
+            if split_replacement and not gates_ok:
+                continue
+            if split_replacement:
+                gates_ok = True
+                per_replacement_gate = False
+            else:
+                per_replacement_gate = True
             for replacement in proposal.new_objects:
                 if not gates_ok:
                     break
+                if not per_replacement_gate:
+                    continue
                 gate_mask = _gate_mask(
                     proposal_ids,
                     pass_original_by_id,
@@ -178,6 +195,10 @@ def optimize(
             for replacement in replacements:
                 if replacement.id in current_masks:
                     current_masks.pop(replacement.id, None)
+
+                if split_replacement:
+                    current_masks[replacement.id] = rasterize(replacement.flat, union_mask.shape)
+                    continue
 
                 if replacement.id in pass_original_by_id and replacement.id in proposal_ids:
                     if replacement.id not in assigned_replacement_ids:

@@ -19,17 +19,93 @@ def _obj_from_d(d: str, obj_id: int = 1) -> OptObject:
     return OptObject(obj_id, Shape("path", {"d": d}), FlatFill("#000000"), 0)
 
 
+def _obj_from_path(shape: Shape, obj_id: int = 1) -> OptObject:
+    return OptObject(obj_id, shape, FlatFill("#000000"), 0)
+
+
 def _mask_for_obj(obj: OptObject, shape_hw: tuple[int, int] = (96, 96)) -> np.ndarray:
     return rasterize(obj.flat, shape_hw)
 
 
-def _optimized_d(obj: OptObject, *, epsilon: float = 1.5, max_error: float = 1.0) -> str:
+def _optimized_obj(obj: OptObject, *, epsilon: float = 1.5, max_error: float = 1.0) -> OptObject:
     out = optimize(
         [obj],
         {obj.id: _mask_for_obj(obj)},
         [lambda objects, masks: simplify_pass(objects, masks, epsilon=epsilon, max_error=max_error)],
     )
-    return str(out[0].exact.params["d"])
+    return out[0]
+
+
+def _optimized_d(obj: OptObject, *, epsilon: float = 1.5, max_error: float = 1.0) -> str:
+    return str(_optimized_obj(obj, epsilon=epsilon, max_error=max_error).exact.params["d"])
+
+
+def _dense_rounded_rect_d(x0: float, y0: float, x1: float, y1: float, radius: float, *, samples: int = 10) -> str:
+    commands = [f"M{x0 + radius} {y0}", f"L{x1 - radius} {y0}"]
+    arcs = (
+        (x1 - radius, y0 + radius, -math.pi / 2.0, 0.0),
+        (x1 - radius, y1 - radius, 0.0, math.pi / 2.0),
+        (x0 + radius, y1 - radius, math.pi / 2.0, math.pi),
+        (x0 + radius, y0 + radius, math.pi, math.pi * 1.5),
+    )
+    straight_ends = (
+        (x1, y1 - radius),
+        (x0 + radius, y1),
+        (x0, y0 + radius),
+        (x0 + radius, y0),
+    )
+    for (cx, cy, start, end), line_end in zip(arcs, straight_ends, strict=True):
+        for theta in np.linspace(start, end, samples + 1)[1:]:
+            commands.append(f"L{cx + radius * math.cos(float(theta))} {cy + radius * math.sin(float(theta))}")
+        if line_end != straight_ends[-1]:
+            commands.append(f"L{line_end[0]} {line_end[1]}")
+    commands.append("Z")
+    return " ".join(commands)
+
+
+def test_simplify_pass_refits_dense_rounded_rect_to_quadratic_border():
+    d = _dense_rounded_rect_d(8.0, 8.0, 88.0, 88.0, 18.0, samples=12)
+    obj = _obj_from_d(d)
+
+    simplified_d = _optimized_d(obj, epsilon=1.0, max_error=1.0)
+
+    assert _command_count(simplified_d) < _command_count(d)
+    assert simplified_d.count("Q") == 8
+    assert "C" not in simplified_d
+
+
+def test_simplify_pass_preserves_holes_when_refitting_outer_border():
+    outer = _dense_rounded_rect_d(8.0, 8.0, 88.0, 88.0, 18.0, samples=12)
+    hole = "M35 35 L50 35 L42 50 Z"
+    obj = _obj_from_path(Shape("path", {"d": f"{outer} {hole}", "fill_rule": "evenodd"}))
+
+    optimized = _optimized_obj(obj, epsilon=1.0, max_error=1.0)
+    simplified_d = str(optimized.exact.params["d"])
+
+    assert optimized.exact.params.get("fill_rule") == "evenodd"
+    assert simplified_d.count("M") == 2
+    assert simplified_d.count("Q") == 8
+    assert "L50 35" in simplified_d
+
+
+def test_simplify_pass_drops_cutout_when_later_path_covers_it():
+    outer = _dense_rounded_rect_d(8.0, 8.0, 88.0, 88.0, 18.0, samples=12)
+    hole = "M35 35 L50 35 L42 50 Z"
+    background = _obj_from_path(Shape("path", {"d": f"{outer} {hole}", "fill_rule": "evenodd"}), obj_id=1)
+    cover = OptObject(2, Shape("path", {"d": hole}), FlatFill("#FFFFFF"), 1)
+
+    out = optimize(
+        [background, cover],
+        {background.id: _mask_for_obj(background), cover.id: _mask_for_obj(cover)},
+        [lambda objects, masks: simplify_pass(objects, masks, epsilon=1.0, max_error=1.0)],
+    )
+
+    by_id = {obj.id: obj for obj in out}
+    background_d = str(by_id[1].exact.params["d"])
+    assert by_id[1].exact.params.get("fill_rule") is None
+    assert background_d.count("M") == 1
+    assert background_d.count("Q") == 8
+    assert by_id[2].exact.params["d"] == hole
 
 
 def test_simplify_pass_collapses_long_straight_line_runs():

@@ -22,6 +22,7 @@ htmlcov/
 /out/
 *.tmp.svg
 *.tmp.png
+corpus/
 
 # OS
 .DS_Store

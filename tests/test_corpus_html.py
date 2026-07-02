@@ -28,30 +28,101 @@ def test_generate_corpus_html_writes_render_svg_and_diagnostics(tmp_path):
 
     html = index.read_text()
     svg = (index.parent / "svg" / "optimizer-tiny_disk.svg").read_text()
-    png = index.parent / "input" / "optimizer-tiny_disk.png"
+    png = index.parent / "rendered-input" / "optimizer-tiny_disk.png"
+    raw = index.parent / "raw" / "optimizer-tiny_disk.svg.txt"
+    diagnostics = index.parent / "diagnostics" / "optimizer-tiny_disk.json"
+    options = index.parent / "options" / "optimizer-tiny_disk.json"
 
     assert "optimizer / tiny_disk" in html
-    assert '<img src="input/optimizer-tiny_disk.png"' in html
+    assert '<img src="rendered-input/optimizer-tiny_disk.png"' in html
     assert '<object data="svg/optimizer-tiny_disk.svg"' in html
     assert "<summary>SVG</summary>" in html
     assert "<summary>Diagnostics</summary>" in html
-    assert "&quot;elements&quot;" in html
+    assert 'src="raw/optimizer-tiny_disk.svg.txt"' in html
+    assert 'src="diagnostics/optimizer-tiny_disk.json"' in html
+    assert 'src="options/optimizer-tiny_disk.json"' in html
     assert png.exists()
     assert svg.startswith("<svg ")
+    assert raw.read_text() == svg
+    assert '"elements"' in diagnostics.read_text()
+    assert '"optimizer": true' in options.read_text()
 
 
-def test_default_entries_use_real_logo_corpus_and_include_vbird(tmp_path, monkeypatch):
-    corpus = tmp_path / "scratch" / "real-logos"
+def test_generate_corpus_html_can_opt_into_cubic_paths(tmp_path):
+    index = generate_corpus_html(
+        tmp_path / "corpus",
+        [CorpusEntry("tiny_disk", "optimizer", _tiny_disk, Options(optimizer=True))],
+        cubic_paths=True,
+    )
+
+    options = index.parent / "options" / "optimizer-tiny_disk.json"
+
+    assert '"cubic_paths": true' in options.read_text()
+
+
+def test_default_entries_use_corpus_input_and_include_vbird(tmp_path, monkeypatch):
+    corpus = tmp_path / "corpus" / "input"
+    legacy = tmp_path / "scratch" / "real-logos"
     corpus.mkdir(parents=True)
+    legacy.mkdir(parents=True)
     Image.fromarray(_tiny_disk()).save(corpus / "icloud.png")
     Image.fromarray(_tiny_disk()).save(corpus / "vbird.png")
     Image.fromarray(_tiny_disk()).save(corpus / "cmp_icloud.png")
+    Image.fromarray(_tiny_disk()).save(legacy / "legacy_only.png")
 
     monkeypatch.setattr(corpus_html, "REPO_ROOT", tmp_path)
+    monkeypatch.setattr(corpus_html, "DEFAULT_CORPUS_INPUT", corpus)
+    monkeypatch.setattr(corpus_html, "LEGACY_CORPUS_INPUT", legacy)
 
     entries = corpus_html.default_entries()
 
     assert [entry.name for entry in entries].count("icloud") == 2
     assert [entry.name for entry in entries].count("vbird") == 2
+    assert "legacy_only" not in {entry.name for entry in entries}
     assert "cmp_icloud" not in {entry.name for entry in entries}
     assert {entry.mode for entry in entries if entry.name == "vbird"} == {"current", "optimizer"}
+
+
+def test_generate_corpus_html_only_updates_sidecars_when_manifest_is_unchanged(tmp_path):
+    output = tmp_path / "corpus"
+    entries = [
+        CorpusEntry("a", "current", _tiny_disk, Options()),
+        CorpusEntry("b", "current", _tiny_disk, Options()),
+    ]
+    index = generate_corpus_html(output, entries)
+    original_index = index.read_text()
+    marker = "<!-- stable index marker -->"
+    index.write_text(original_index + marker)
+
+    generate_corpus_html(output, entries, only=["a"])
+
+    assert index.read_text().endswith(marker)
+    assert (output / "svg" / "current-a.svg").exists()
+    assert (output / "svg" / "current-b.svg").exists()
+
+
+def test_generate_corpus_html_writes_index_before_rendering_entries(tmp_path):
+    output = tmp_path / "corpus"
+
+    def _assert_index_exists():
+        assert (output / "index.html").exists()
+        return _tiny_disk()
+
+    generate_corpus_html(
+        output,
+        [CorpusEntry("a", "current", _assert_index_exists, Options())],
+    )
+
+
+def test_corpus_output_does_not_write_generated_inputs_into_source_input_dir(tmp_path):
+    corpus = tmp_path / "corpus"
+    source = corpus / "input"
+    source.mkdir(parents=True)
+    Image.fromarray(_tiny_disk()).save(source / "appstore.png")
+
+    generate_corpus_html(corpus, corpus_html.corpus_entries(source), only=["appstore"])
+
+    assert (corpus / "index.html").exists()
+    assert (corpus / "rendered-input" / "current-appstore.png").exists()
+    assert not (source / "current-appstore.png").exists()
+    assert not (source / "optimizer-appstore.png").exists()

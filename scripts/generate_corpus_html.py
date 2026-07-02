@@ -1,7 +1,7 @@
 """Generate an inspectable HTML gallery for the verification SVG corpus.
 
 Run:
-    PYTHONPATH=src ./.venv/bin/python scripts/generate_corpus_html.py --output scratch/corpus-html
+    PYTHONPATH=src ./.venv/bin/python scripts/generate_corpus_html.py
 """
 
 from __future__ import annotations
@@ -10,7 +10,6 @@ import argparse
 import dataclasses
 import html
 import json
-import shutil
 import sys
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass
@@ -26,6 +25,10 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
+DEFAULT_CORPUS_INPUT = REPO_ROOT / "corpus" / "input"
+DEFAULT_CORPUS_OUTPUT = Path("corpus")
+LEGACY_CORPUS_INPUT = REPO_ROOT / "scratch" / "real-logos"
+
 
 @dataclass(frozen=True)
 class CorpusEntry:
@@ -38,13 +41,15 @@ class CorpusEntry:
 def default_entries() -> list[CorpusEntry]:
     """Verification corpus entries rendered by the gallery.
 
-    Prefer the untracked real-logo corpus used for acceptance inspection. For
-    each logo, render the current default pipeline and the optimizer pipeline.
+    Prefer the checked-in/drop-in corpus directory, then the legacy untracked
+    real-logo corpus used for acceptance inspection. For each logo, render the
+    current default pipeline and the optimizer pipeline.
     Fall back to a tiny synthetic set when the local corpus is unavailable.
     """
-    real = _real_logo_entries()
-    if real:
-        return real
+    for corpus in (DEFAULT_CORPUS_INPUT, LEGACY_CORPUS_INPUT):
+        entries = corpus_entries(corpus)
+        if entries:
+            return entries
 
     from tests.optimizer.test_integration import _asymmetric_cloud_image, _disk_image
 
@@ -69,11 +74,8 @@ def _image_factory(path: Path) -> Callable[[], np.ndarray]:
     return _load
 
 
-def _real_logo_entries() -> list[CorpusEntry]:
-    corpus = REPO_ROOT / "scratch" / "real-logos"
-    if not corpus.exists():
-        return []
-
+def corpus_entries(corpus: Path) -> list[CorpusEntry]:
+    """Build paired current/optimizer entries from PNG files in a corpus directory."""
     skip_prefixes = (
         "cap",
         "cmp_",
@@ -93,9 +95,11 @@ def _real_logo_entries() -> list[CorpusEntry]:
         "vbird_",
         "zoom",
     )
+    if not corpus.exists():
+        return []
     pngs = [
         path for path in sorted(corpus.glob("*.png"))
-        if not path.stem.startswith(skip_prefixes)
+        if not path.name.startswith(".") and not path.stem.startswith(skip_prefixes)
     ]
     if not any(path.stem == "vbird" for path in pngs):
         vbird = corpus / "vbird.png"
@@ -136,46 +140,98 @@ def _input_filename(entry: CorpusEntry) -> str:
     return f"{entry.mode}-{entry.name}.png".replace("/", "_")
 
 
-def _gallery_options(options: Options, working_max_dim: int | None) -> Options:
-    if working_max_dim is None or options.working_max_dim is not None:
-        return options
-    return dataclasses.replace(options, working_max_dim=working_max_dim)
+def _entry_id(entry: CorpusEntry) -> str:
+    return f"{entry.mode}-{entry.name}".replace("/", "_")
 
 
-def generate_corpus_html(
-    output: Path,
-    entries: Iterable[CorpusEntry] | None = None,
+def _diagnostics_filename(entry: CorpusEntry) -> str:
+    return f"{_entry_id(entry)}.json"
+
+
+def _options_filename(entry: CorpusEntry) -> str:
+    return f"{_entry_id(entry)}.json"
+
+
+def _raw_svg_filename(entry: CorpusEntry) -> str:
+    return f"{_entry_id(entry)}.svg.txt"
+
+
+def _gallery_options(
+    options: Options,
+    working_max_dim: int | None,
     *,
-    working_max_dim: int | None = None,
-) -> Path:
-    output = Path(output)
-    if output.exists():
-        shutil.rmtree(output)
-    svg_dir = output / "svg"
-    input_dir = output / "input"
-    svg_dir.mkdir(parents=True, exist_ok=True)
-    input_dir.mkdir(parents=True, exist_ok=True)
+    cubic_paths: bool = False,
+) -> Options:
+    updates: dict[str, object] = {}
+    if working_max_dim is not None and options.working_max_dim is None:
+        updates["working_max_dim"] = working_max_dim
+    if cubic_paths:
+        updates["cubic_paths"] = True
+    if not updates:
+        return options
+    return dataclasses.replace(options, **updates)
 
-    cards: list[str] = []
+
+def _sorted_entries(entries: Iterable[CorpusEntry]) -> list[CorpusEntry]:
     mode_order = {"current": 0, "optimizer": 1}
-    for entry in sorted(entries or default_entries(), key=lambda item: (item.name, mode_order.get(item.mode, 99))):
-        image = np.asarray(entry.image_factory(), dtype=np.uint8)
-        input_name = _input_filename(entry)
-        input_path = input_dir / input_name
-        Image.fromarray(image).save(input_path)
+    return sorted(entries, key=lambda item: (item.name, mode_order.get(item.mode, 99)))
 
-        options = _gallery_options(entry.options, working_max_dim)
-        print(f"rendering {entry.mode}/{entry.name}", file=sys.stderr)
-        svg, report = idealize(image, options=options, report=True)
-        svg_name = _safe_filename(entry)
-        svg_path = svg_dir / svg_name
-        svg_path.write_text(svg)
 
-        rel_svg = Path("svg") / svg_name
-        rel_input = Path("input") / input_name
-        cards.append(
-            f"""
-    <article class="entry">
+def _manifest_payload(entries: list[CorpusEntry]) -> dict[str, Any]:
+    return {
+        "version": 2,
+        "entries": [
+            {
+                "id": _entry_id(entry),
+                "name": entry.name,
+                "mode": entry.mode,
+            }
+            for entry in entries
+        ],
+    }
+
+
+def _matches_filter(entry: CorpusEntry, selectors: set[str]) -> bool:
+    if not selectors:
+        return True
+    entry_id = _entry_id(entry)
+    return bool({
+        entry.name,
+        entry.mode,
+        f"{entry.mode}/{entry.name}",
+        entry_id,
+        f"{entry.mode}-{entry.name}",
+    } & selectors)
+
+
+def _write_index_if_needed(output: Path, entries: list[CorpusEntry], *, force: bool = False) -> None:
+    manifest_path = output / "corpus-manifest.json"
+    manifest = _manifest_payload(entries)
+    current_manifest = None
+    if manifest_path.exists():
+        current_manifest = json.loads(manifest_path.read_text())
+    if not force and current_manifest == manifest and (output / "index.html").exists():
+        return
+
+    cards = [_entry_card(entry) for entry in entries]
+    (output / "index.html").write_text(_html_document(cards))
+    manifest_path.write_text(json.dumps(manifest, indent=2, sort_keys=True))
+
+
+def _entry_card(entry: CorpusEntry) -> str:
+    svg_name = _safe_filename(entry)
+    input_name = _input_filename(entry)
+    raw_name = _raw_svg_filename(entry)
+    diagnostics_name = _diagnostics_filename(entry)
+    options_name = _options_filename(entry)
+
+    rel_svg = Path("svg") / svg_name
+    rel_input = Path("rendered-input") / input_name
+    rel_raw = Path("raw") / raw_name
+    rel_diagnostics = Path("diagnostics") / diagnostics_name
+    rel_options = Path("options") / options_name
+    return f"""
+    <article class="entry" id="{html.escape(_entry_id(entry))}">
       <header>
         <h2>{html.escape(entry.mode)} / {html.escape(entry.name)}</h2>
         <a href="{html.escape(str(rel_svg))}">{html.escape(str(rel_svg))}</a>
@@ -192,20 +248,59 @@ def generate_corpus_html(
       </section>
       <details>
         <summary>SVG</summary>
-        <pre><code>{html.escape(svg)}</code></pre>
+        <iframe class="code-frame" src="{html.escape(str(rel_raw))}" title="{html.escape(entry.name)} SVG source"></iframe>
       </details>
       <details>
         <summary>Diagnostics</summary>
-        <pre><code>{html.escape(_diagnostics_json(report))}</code></pre>
+        <iframe class="code-frame" src="{html.escape(str(rel_diagnostics))}" title="{html.escape(entry.name)} diagnostics"></iframe>
       </details>
       <details>
         <summary>Options</summary>
-        <pre><code>{html.escape(_options_json(options))}</code></pre>
+        <iframe class="code-frame" src="{html.escape(str(rel_options))}" title="{html.escape(entry.name)} options"></iframe>
       </details>
     </article>"""
-        )
 
-    (output / "index.html").write_text(_html_document(cards))
+
+def generate_corpus_html(
+    output: Path,
+    entries: Iterable[CorpusEntry] | None = None,
+    *,
+    working_max_dim: int | None = None,
+    cubic_paths: bool = False,
+    only: Iterable[str] | None = None,
+    rebuild_index: bool = False,
+) -> Path:
+    output = Path(output)
+    svg_dir = output / "svg"
+    input_dir = output / "rendered-input"
+    raw_dir = output / "raw"
+    diagnostics_dir = output / "diagnostics"
+    options_dir = output / "options"
+    svg_dir.mkdir(parents=True, exist_ok=True)
+    input_dir.mkdir(parents=True, exist_ok=True)
+    raw_dir.mkdir(parents=True, exist_ok=True)
+    diagnostics_dir.mkdir(parents=True, exist_ok=True)
+    options_dir.mkdir(parents=True, exist_ok=True)
+
+    all_entries = _sorted_entries(entries or default_entries())
+    _write_index_if_needed(output, all_entries, force=rebuild_index)
+
+    selectors = set(only or ())
+    for entry in [entry for entry in all_entries if _matches_filter(entry, selectors)]:
+        image = np.asarray(entry.image_factory(), dtype=np.uint8)
+        input_name = _input_filename(entry)
+        input_path = input_dir / input_name
+        Image.fromarray(image).save(input_path)
+
+        options = _gallery_options(entry.options, working_max_dim, cubic_paths=cubic_paths)
+        print(f"rendering {entry.mode}/{entry.name}", file=sys.stderr)
+        svg, report = idealize(image, options=options, report=True)
+        svg_name = _safe_filename(entry)
+        svg_path = svg_dir / svg_name
+        svg_path.write_text(svg)
+        (raw_dir / _raw_svg_filename(entry)).write_text(svg)
+        (diagnostics_dir / _diagnostics_filename(entry)).write_text(_diagnostics_json(report))
+        (options_dir / _options_filename(entry)).write_text(_options_json(options))
     return output / "index.html"
 
 
@@ -267,7 +362,8 @@ def _html_document(cards: list[str]) -> str:
     }}
     details {{ margin-top: 10px; }}
     summary {{ cursor: pointer; font-weight: 600; }}
-    pre {{
+    pre,
+    .code-frame {{
       max-height: 360px;
       overflow: auto;
       padding: 10px;
@@ -277,6 +373,13 @@ def _html_document(cards: list[str]) -> str:
       font-size: 12px;
       white-space: pre-wrap;
       overflow-wrap: anywhere;
+    }}
+    .code-frame {{
+      display: block;
+      box-sizing: border-box;
+      width: 100%;
+      height: 360px;
+      white-space: normal;
     }}
   </style>
 </head>
@@ -291,17 +394,44 @@ def _html_document(cards: list[str]) -> str:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Generate the vectormark SVG corpus gallery.")
-    parser.add_argument("--output", type=Path, default=Path("scratch/corpus-html"))
+    parser.add_argument("--output", type=Path, default=DEFAULT_CORPUS_OUTPUT)
+    parser.add_argument(
+        "--input-dir",
+        type=Path,
+        default=None,
+        help="Directory of corpus PNGs. Defaults to corpus/input, then scratch/real-logos.",
+    )
     parser.add_argument(
         "--working-max-dim",
         type=int,
         default=None,
         help="Opt-in downscale long side for faster gallery generation.",
     )
+    parser.add_argument(
+        "--cubic-paths",
+        action="store_true",
+        help="Opt in to cubic Bézier fitting for curved path runs.",
+    )
+    parser.add_argument(
+        "--only",
+        action="append",
+        default=[],
+        help="Render only matching entries. Accepts name, mode, mode/name, or mode-name. May be repeated.",
+    )
+    parser.add_argument(
+        "--rebuild-index",
+        action="store_true",
+        help="Rewrite index.html even when the corpus manifest is unchanged.",
+    )
     args = parser.parse_args()
+    entries = corpus_entries(args.input_dir) if args.input_dir is not None else None
     index = generate_corpus_html(
         args.output,
+        entries,
         working_max_dim=args.working_max_dim,
+        cubic_paths=args.cubic_paths,
+        only=args.only,
+        rebuild_index=args.rebuild_index,
     )
     print(index)
 
