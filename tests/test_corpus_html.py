@@ -73,6 +73,34 @@ def test_corpus_image_factory_composites_alpha_on_white(tmp_path):
     assert tuple(image[1, 1]) == (200, 30, 30)
 
 
+def test_source_manifest_entries_download_only_rendered_items(tmp_path):
+    source_a = tmp_path / "a.png"
+    source_b = tmp_path / "b.png"
+    Image.fromarray(_tiny_disk()).save(source_a)
+    Image.fromarray(_tiny_disk()).save(source_b)
+    manifest = tmp_path / "sources.json"
+    manifest.write_text(
+        """
+        {
+          "entries": [
+            {"name": "a", "url": "%s"},
+            {"name": "b", "url": "%s"}
+          ]
+        }
+        """ % (source_a.as_uri(), source_b.as_uri())
+    )
+    cache = tmp_path / "cache"
+    entries = corpus_html.source_manifest_entries(manifest, cache)
+
+    index = generate_corpus_html(tmp_path / "corpus", entries, only=["a"])
+
+    assert len(entries) == 4
+    assert (cache / "a.png").exists()
+    assert not (cache / "b.png").exists()
+    assert "current / a" in index.read_text()
+    assert "current / b" in index.read_text()
+
+
 def test_default_entries_use_corpus_input_and_include_vbird(tmp_path, monkeypatch):
     corpus = tmp_path / "corpus" / "input"
     legacy = tmp_path / "scratch" / "real-logos"

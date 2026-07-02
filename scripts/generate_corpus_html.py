@@ -11,6 +11,8 @@ import dataclasses
 import html
 import json
 import sys
+import urllib.parse
+import urllib.request
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from pathlib import Path
@@ -28,6 +30,8 @@ if str(REPO_ROOT) not in sys.path:
 
 DEFAULT_CORPUS_INPUT = REPO_ROOT / "corpus" / "input"
 DEFAULT_CORPUS_OUTPUT = Path("corpus")
+DEFAULT_CORPUS_MANIFEST = REPO_ROOT / "corpus" / "sources.json"
+DEFAULT_CORPUS_CACHE = REPO_ROOT / "corpus" / "cache"
 LEGACY_CORPUS_INPUT = REPO_ROOT / "scratch" / "real-logos"
 
 
@@ -42,11 +46,16 @@ class CorpusEntry:
 def default_entries() -> list[CorpusEntry]:
     """Verification corpus entries rendered by the gallery.
 
-    Prefer the checked-in/drop-in corpus directory, then the legacy untracked
-    real-logo corpus used for acceptance inspection. For each logo, render the
-    current default pipeline and the optimizer pipeline.
+    Prefer the local ignored URL manifest, then the local ignored drop-in corpus
+    directory, then the legacy untracked real-logo corpus used for acceptance
+    inspection. For each logo, render the current default pipeline and the
+    optimizer pipeline.
     Fall back to a tiny synthetic set when the local corpus is unavailable.
     """
+    entries = source_manifest_entries(DEFAULT_CORPUS_MANIFEST, DEFAULT_CORPUS_CACHE)
+    if entries:
+        return entries
+
     for corpus in (DEFAULT_CORPUS_INPUT, LEGACY_CORPUS_INPUT):
         entries = corpus_entries(corpus)
         if entries:
@@ -74,6 +83,87 @@ def _image_factory(path: Path) -> Callable[[], np.ndarray]:
             return _flatten_on_white(image)
 
     return _load
+
+
+def _cache_filename(name: str, url: str, filename: str | None = None) -> str:
+    if filename:
+        suffix = Path(filename).suffix
+    else:
+        suffix = Path(urllib.parse.urlparse(url).path).suffix
+    safe_name = name.replace("/", "_")
+    return f"{safe_name}{suffix or '.png'}"
+
+
+def _download_source(url: str, destination: Path, *, refresh: bool = False) -> Path:
+    if destination.exists() and not refresh:
+        return destination
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    tmp = destination.with_suffix(destination.suffix + ".tmp")
+    request = urllib.request.Request(url, headers={"User-Agent": "vectormark-corpus/1.0"})
+    with urllib.request.urlopen(request, timeout=30) as response:
+        tmp.write_bytes(response.read())
+    tmp.replace(destination)
+    return destination
+
+
+def _downloaded_image_factory(
+    name: str,
+    url: str,
+    cache_dir: Path,
+    *,
+    filename: str | None = None,
+    refresh: bool = False,
+) -> Callable[[], np.ndarray]:
+    cache_path = cache_dir / _cache_filename(name, url, filename)
+
+    def _load() -> np.ndarray:
+        return _image_factory(_download_source(url, cache_path, refresh=refresh))()
+
+    return _load
+
+
+def _source_items(manifest: Any) -> list[dict[str, str]]:
+    raw_entries = manifest.get("entries", manifest) if isinstance(manifest, dict) else manifest
+    if isinstance(raw_entries, dict):
+        return [{"name": str(name), "url": str(url)} for name, url in raw_entries.items()]
+    if not isinstance(raw_entries, list):
+        raise ValueError("source manifest must be a list, a name-to-url object, or an object with entries")
+
+    items: list[dict[str, str]] = []
+    for raw in raw_entries:
+        if not isinstance(raw, dict):
+            raise ValueError("source manifest entries must be objects")
+        if "name" not in raw or "url" not in raw:
+            raise ValueError("source manifest entries require name and url")
+        item = {"name": str(raw["name"]), "url": str(raw["url"])}
+        if "filename" in raw:
+            item["filename"] = str(raw["filename"])
+        items.append(item)
+    return items
+
+
+def source_manifest_entries(
+    manifest_path: Path,
+    cache_dir: Path,
+    *,
+    refresh: bool = False,
+) -> list[CorpusEntry]:
+    """Build paired entries from a local URL manifest, downloading images on demand."""
+    if not manifest_path.exists():
+        return []
+    manifest = json.loads(manifest_path.read_text())
+    entries: list[CorpusEntry] = []
+    for item in sorted(_source_items(manifest), key=lambda source: source["name"]):
+        factory = _downloaded_image_factory(
+            item["name"],
+            item["url"],
+            cache_dir,
+            filename=item.get("filename"),
+            refresh=refresh,
+        )
+        entries.append(CorpusEntry(item["name"], "current", factory, Options()))
+        entries.append(CorpusEntry(item["name"], "optimizer", factory, Options(optimizer=True)))
+    return entries
 
 
 def corpus_entries(corpus: Path) -> list[CorpusEntry]:
@@ -398,6 +488,23 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Generate the vectormark SVG corpus gallery.")
     parser.add_argument("--output", type=Path, default=DEFAULT_CORPUS_OUTPUT)
     parser.add_argument(
+        "--source-manifest",
+        type=Path,
+        default=None,
+        help="JSON manifest of corpus image URLs. Defaults to corpus/sources.json when present.",
+    )
+    parser.add_argument(
+        "--cache-dir",
+        type=Path,
+        default=DEFAULT_CORPUS_CACHE,
+        help="Directory for downloaded source images.",
+    )
+    parser.add_argument(
+        "--refresh-sources",
+        action="store_true",
+        help="Redownload source-manifest images even when cached.",
+    )
+    parser.add_argument(
         "--input-dir",
         type=Path,
         default=None,
@@ -426,7 +533,16 @@ def main() -> None:
         help="Rewrite index.html even when the corpus manifest is unchanged.",
     )
     args = parser.parse_args()
-    entries = corpus_entries(args.input_dir) if args.input_dir is not None else None
+    if args.source_manifest is not None:
+        entries = source_manifest_entries(
+            args.source_manifest,
+            args.cache_dir,
+            refresh=args.refresh_sources,
+        )
+    elif args.input_dir is not None:
+        entries = corpus_entries(args.input_dir)
+    else:
+        entries = None
     index = generate_corpus_html(
         args.output,
         entries,
