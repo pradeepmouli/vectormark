@@ -142,7 +142,9 @@ def test_simplify_pass_does_not_worsen_cutout_subpath_when_outer_improves():
 
     assert _command_count(simplified_d) < _command_count(f"{outer} {cutout}")
     assert "L183 110.5" in simplified_d
+    assert "L344.5 286" in simplified_d
     assert "Q240.66 46.53" not in simplified_d
+    assert "Q344.5 224.5 344.5 286" not in simplified_d
 
 
 def test_simplify_pass_drops_cutout_when_later_path_covers_it():

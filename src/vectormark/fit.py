@@ -144,7 +144,14 @@ def _curved_run_d(seg: np.ndarray, max_error: float, *, cubic: bool) -> str:
     return quadratic
 
 
-def fit_path(contour: np.ndarray, *, epsilon: float, max_error: float, cubic: bool = False) -> Shape:
+def fit_path(
+    contour: np.ndarray,
+    *,
+    epsilon: float,
+    max_error: float,
+    cubic: bool = False,
+    forced_corners: np.ndarray | None = None,
+) -> Shape:
     """Corner-split the contour; emit lines for straight runs, Béziers otherwise.
 
     ``cubic=False`` (default) fits each curved run with inflection-free
@@ -159,6 +166,8 @@ def fit_path(contour: np.ndarray, *, epsilon: float, max_error: float, cubic: bo
     corners = corner_indices(np.vstack([simp, simp[0]]), angle_threshold_deg=40)
     # map corner positions in `simp` back to indices in `ring`
     corner_pts = simp[corners] if corners else simp[[0]]
+    if forced_corners is not None and len(forced_corners):
+        corner_pts = np.vstack([corner_pts, np.asarray(forced_corners, dtype=float)])
     cut_idx = sorted({int(np.argmin(np.hypot(*(ring - cp).T))) for cp in corner_pts})
     if len(cut_idx) < 2:
         cut_idx = [0, len(ring) // 2]

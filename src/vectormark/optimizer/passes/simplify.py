@@ -37,6 +37,70 @@ def _subpath_d(tokens: list[tuple[str, list[float]]]) -> str:
     return " ".join(parts)
 
 
+def _forced_corners(tokens: list[tuple[str, list[float]]]) -> np.ndarray | None:
+    if not any(command in {"Q", "C", "A"} for command, _values in tokens):
+        return None
+    corners: list[tuple[float, float]] = []
+    for command, values in tokens:
+        if command == "M" and len(values) >= 2:
+            corners.append((float(values[0]), float(values[1])))
+        elif command == "L" and len(values) >= 2:
+            corners.append((float(values[0]), float(values[1])))
+    if not corners:
+        return None
+    return np.asarray(corners, dtype=float)
+
+
+def _point_line_distance(point: np.ndarray, start: np.ndarray, end: np.ndarray) -> float:
+    span = end - start
+    denom = float(np.dot(span, span))
+    if denom == 0.0:
+        return float(np.linalg.norm(point - start))
+    t = float(np.clip(np.dot(point - start, span) / denom, 0.0, 1.0))
+    return float(np.linalg.norm(point - (start + t * span)))
+
+
+def _curve_is_straight(points: list[np.ndarray], start: np.ndarray, end: np.ndarray, epsilon: float) -> bool:
+    return all(_point_line_distance(point, start, end) <= epsilon for point in points)
+
+
+def _normalized_subpath_d(tokens: list[tuple[str, list[float]]], *, epsilon: float) -> str:
+    parts: list[str] = []
+    current: np.ndarray | None = None
+    start: np.ndarray | None = None
+    for command, values in tokens:
+        if command == "M":
+            current = np.array(values[:2], dtype=float)
+            start = current.copy()
+            parts.append(f"M{_fmt(current[0])} {_fmt(current[1])}")
+        elif command == "L":
+            current = np.array(values[:2], dtype=float)
+            parts.append(f"L{_fmt(current[0])} {_fmt(current[1])}")
+        elif command == "Q" and current is not None:
+            control = np.array(values[:2], dtype=float)
+            end = np.array(values[2:4], dtype=float)
+            if _curve_is_straight([control], current, end, epsilon):
+                parts.append(f"L{_fmt(end[0])} {_fmt(end[1])}")
+            else:
+                parts.append(_subpath_d([(command, values)]))
+            current = end
+        elif command == "C" and current is not None:
+            control1 = np.array(values[:2], dtype=float)
+            control2 = np.array(values[2:4], dtype=float)
+            end = np.array(values[4:6], dtype=float)
+            if _curve_is_straight([control1, control2], current, end, epsilon):
+                parts.append(f"L{_fmt(end[0])} {_fmt(end[1])}")
+            else:
+                parts.append(_subpath_d([(command, values)]))
+            current = end
+        elif command == "Z":
+            parts.append("Z")
+            current = start
+        else:
+            parts.append(_subpath_d([(command, values)]))
+    return " ".join(parts)
+
+
 def _path_subpaths(shape: Shape) -> list[tuple[list[tuple[str, list[float]]], list[tuple[float, float]], float]]:
     subpaths = []
     for tokens in _parse_subpaths(str(shape.params.get("d", ""))):
@@ -181,16 +245,27 @@ def _simplified_subpath_d(
     cubic: bool,
 ) -> str:
     original = _subpath_d(tokens)
+    candidates = [_normalized_subpath_d(tokens, epsilon=epsilon)]
     rounded = _rounded_rect_path(points, epsilon=epsilon)
     if rounded is not None:
-        return rounded if _path_complexity_d(rounded) < _path_complexity_d(original) else original
+        candidates.append(rounded)
 
     contour = _closed_points(points)
-    if contour is None:
-        return original
+    if contour is not None:
+        candidates.append(
+            str(
+                fit_path(
+                    contour,
+                    epsilon=epsilon,
+                    max_error=max_error,
+                    cubic=cubic,
+                    forced_corners=_forced_corners(tokens),
+                ).params["d"]
+            )
+        )
 
-    fitted = str(fit_path(contour, epsilon=epsilon, max_error=max_error, cubic=cubic).params["d"])
-    return fitted if _path_complexity_d(fitted) < _path_complexity_d(original) else original
+    best = min(candidates, key=_path_complexity_d)
+    return best if _path_complexity_d(best) < _path_complexity_d(original) else original
 
 
 def _candidate_parts(
