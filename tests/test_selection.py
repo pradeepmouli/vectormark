@@ -6,10 +6,10 @@ from vectormark.selection import (
 )
 
 
-def test_known_strategies_has_all_ten_labels():
+def test_known_strategies_has_all_nine_labels():
     assert KNOWN_STRATEGIES == {
         "primitive", "trapezoid", "sym_polygon", "cap", "symmetric",
-        "polygon", "path", "holed_symmetric", "holed_path", "nofit",
+        "polygon", "path", "holed_symmetric", "holed_path",
     }
 
 

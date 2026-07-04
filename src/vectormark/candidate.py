@@ -58,3 +58,4 @@ class Candidate:
     source: str
     mirror: Axis | None = None
     strategy: str | None = None   # fitter provenance (slice 4b); None for occlusion/lens/gradient
+    region_label: int | None = None  # originating region label (None for occlusion/lens/gradient)

@@ -1,5 +1,5 @@
 import numpy as np
-from vectormark._fitcurve import fit_quadratic_beziers, qbezier
+from vectormark._fitcurve import cubic_inflects, fit_cubic_beziers, fit_quadratic_beziers, qbezier
 
 
 def test_fits_quarter_circle_within_tolerance():
@@ -29,3 +29,19 @@ def test_quadratic_fit_is_inflection_free():
         cross = d1[:, 0] * d2[1] - d1[:, 1] * d2[0]
         nz = cross[np.abs(cross) > 1e-9]
         assert nz.size == 0 or np.all(nz > 0) or np.all(nz < 0)  # no sign flip -> no inflection
+
+
+def test_cubic_fit_splits_internal_inflections():
+    pts = np.array([
+        [0.0, 0.0],
+        [8.0, 16.0],
+        [16.0, -16.0],
+        [24.0, 16.0],
+        [32.0, -16.0],
+        [40.0, 0.0],
+    ])
+
+    beziers = fit_cubic_beziers(pts, max_error=100.0)
+
+    assert len(beziers) > 1
+    assert all(cubic_inflects(ctrl) == [] for ctrl in beziers)

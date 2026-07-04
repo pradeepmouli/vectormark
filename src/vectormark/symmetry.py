@@ -2,10 +2,225 @@
 
 from __future__ import annotations
 
+from collections import namedtuple
+
 import numpy as np
 from scipy import ndimage as ndi
 
 from .types import Axis, Region
+
+Axis2D = namedtuple("Axis2D", "theta cx cy")
+
+
+def _perimeter(mask: np.ndarray) -> int:
+    """Boundary-pixel count: the one-pixel ring of `mask` minus its erosion."""
+    if not mask.any():
+        return 0
+    return int((mask & ~ndi.binary_erosion(mask)).sum())
+
+
+def reflection_off_count(fg_xy, axis: Axis2D, dist: np.ndarray, *, tol_px: float = 1.5) -> int:
+    """Count foreground points whose reflection across `axis` lands farther than
+    `tol_px` outside the shape (background distance transform `dist`). Resampling
+    free: reflects coordinates, looks up the distance transform — no raster rotate."""
+    xs, ys = fg_xy
+    dx, dy = np.cos(axis.theta), np.sin(axis.theta)
+    vx, vy = xs - axis.cx, ys - axis.cy
+    t = vx * dx + vy * dy
+    rx = axis.cx + (2.0 * t * dx - vx)
+    ry = axis.cy + (2.0 * t * dy - vy)
+    h, w = dist.shape
+    ri = np.rint(ry).astype(int)
+    ci = np.rint(rx).astype(int)
+    in_bounds = (ri >= 0) & (ri < h) & (ci >= 0) & (ci < w)
+    off = int((~in_bounds).sum())
+    if in_bounds.any():
+        off += int((dist[ri[in_bounds], ci[in_bounds]] > tol_px).sum())
+    return off
+
+
+K_BAND = 0.3   # off-count / perimeter floor: off <= 30 % of the boundary length.
+               # Genuine symmetric regions: 0.00 (flat bands) – 0.27 (asana petals).
+               # False over-fires rejected here: icloud cloud ~0.78, pokeball outer ~0.58.
+               # Set tight enough to block those while safely above the genuine cluster.
+
+
+def _fg_xy(mask):
+    ys, xs = np.nonzero(mask)
+    return xs, ys
+
+
+def sym_off_ratio(mask: np.ndarray, axis: Axis2D) -> float:
+    """Self-reflection off-count / perimeter of `mask` across `axis`.
+
+    Returns 0.0 for an empty mask.  Used in `region_is_self_symmetric` and surfaced
+    in pipeline sym_diags so over-fires are visible without re-running detection.
+    """
+    if not mask.any():
+        return 0.0
+    dist = ndi.distance_transform_edt(~mask)
+    off = reflection_off_count(_fg_xy(mask), axis, dist)
+    peri = _perimeter(mask)
+    return off / peri if peri > 0 else (0.0 if off == 0 else float("inf"))
+
+
+def region_is_self_symmetric(region, axis: Axis2D, *, max_off_ratio: float = K_BAND) -> bool:
+    return sym_off_ratio(region.mask, axis) <= max_off_ratio
+
+
+def regions_mirror_pair(a, b, axis: Axis2D, *, max_off_ratio: float = K_BAND) -> bool:
+    if getattr(a, "color_hex", None) != getattr(b, "color_hex", None):
+        return False
+    aa, ab = int(a.mask.sum()), int(b.mask.sum())
+    if aa == 0 or ab == 0 or min(aa, ab) / max(aa, ab) < 0.9:
+        return False
+    dist_b = ndi.distance_transform_edt(~b.mask)
+    off = reflection_off_count(_fg_xy(a.mask), axis, dist_b)
+    peri_a = _perimeter(a.mask)
+    ratio = off / peri_a if peri_a > 0 else (0.0 if off == 0 else float("inf"))
+    return ratio <= max_off_ratio
+
+
+AxisProposal = namedtuple("AxisProposal", "theta cx cy weight")
+
+
+def _centroid(mask):
+    ys, xs = np.nonzero(mask)
+    return float(xs.mean()), float(ys.mean())
+
+
+def propose_axes(
+    regions,
+    *,
+    theta_steps: int = 12,
+    straddle_off_ratio: float = K_BAND,
+    pair_off_ratio: float = K_BAND,
+):
+    props: list[AxisProposal] = []
+    ordered = sorted(regions, key=lambda r: r.label)
+    # self-axes
+    for r in ordered:
+        if not r.mask.any():
+            continue
+        cx, cy = _centroid(r.mask)
+        area = int(r.mask.sum())
+        for theta in np.linspace(0.0, np.pi, theta_steps, endpoint=False):
+            if region_is_self_symmetric(r, Axis2D(float(theta), cx, cy), max_off_ratio=straddle_off_ratio):
+                props.append(AxisProposal(float(theta), cx, cy, area))
+    # pair-bisectors
+    h, w = ordered[0].mask.shape if ordered else (1, 1)
+    diag = float(np.hypot(h, w))
+    cents = {r.label: _centroid(r.mask) for r in ordered}
+    areas = {r.label: int(r.mask.sum()) for r in ordered}
+    for i, a in enumerate(ordered):
+        for b in ordered[i + 1:]:
+            if a.color_hex != b.color_hex:
+                continue
+            aa, ab = areas[a.label], areas[b.label]
+            if aa == 0 or ab == 0 or min(aa, ab) / max(aa, ab) < 0.9:
+                continue
+            (ax, ay), (bx, by) = cents[a.label], cents[b.label]
+            if np.hypot(bx - ax, by - ay) > 0.5 * diag:
+                continue
+            theta = (np.arctan2(by - ay, bx - ax) + np.pi / 2) % np.pi
+            mx, my = (ax + bx) / 2.0, (ay + by) / 2.0
+            if regions_mirror_pair(a, b, Axis2D(float(theta), mx, my), max_off_ratio=pair_off_ratio):
+                props.append(AxisProposal(float(theta), mx, my, aa + ab))
+    return props
+
+
+def _offset(theta, cx, cy):
+    return cx * np.sin(theta) - cy * np.cos(theta)
+
+
+def cluster_axes(proposals, *, d_theta: float = 0.09, d_offset: float = 2.0, min_weight: int = 1):
+    items = sorted(proposals, key=lambda p: (p.theta, _offset(p.theta, p.cx, p.cy)))
+    clusters: list[list[AxisProposal]] = []
+    for p in items:
+        po = _offset(p.theta, p.cx, p.cy)
+        for c in clusters:
+            q = c[0]
+            if abs(p.theta - q.theta) <= d_theta and abs(po - _offset(q.theta, q.cx, q.cy)) <= d_offset:
+                c.append(p)
+                break
+        else:
+            clusters.append([p])
+    out = []
+    for c in clusters:
+        w = float(sum(p.weight for p in c))
+        if w < min_weight:
+            continue
+        tw = sum(p.weight for p in c)
+        theta = float(sum(p.theta * p.weight for p in c) / tw)
+        cx = float(sum(p.cx * p.weight for p in c) / tw)
+        cy = float(sum(p.cy * p.weight for p in c) / tw)
+        out.append((Axis2D(theta, cx, cy), w))
+    # equal support -> prefer the axis closest to vertical (canonical primary), then deterministic
+    out.sort(key=lambda aw: (-aw[1], abs(aw[0].theta - np.pi / 2), aw[0].theta, _offset(*aw[0])))
+    return out
+
+
+SymmetricGroup = namedtuple("SymmetricGroup", "axes straddlers pairs loners")
+
+
+def _threshold_to_off_ratio(value: float, default_value: float) -> float:
+    if default_value >= 1.0:
+        return 0.0
+    return K_BAND * max(0.0, 1.0 - float(value)) / max(1e-9, 1.0 - default_value)
+
+
+def detect_symmetry_groups(
+    regions,
+    *,
+    straddle_iou: float = 0.96,
+    pair_iou: float = 0.90,
+):
+    ordered = sorted(regions, key=lambda r: r.label)
+    straddle_off_ratio = _threshold_to_off_ratio(straddle_iou, STRADDLE_MIN_IOU)
+    pair_off_ratio = _threshold_to_off_ratio(pair_iou, 1.0 - SYM_TOL)
+    ranked = cluster_axes(propose_axes(
+        ordered,
+        straddle_off_ratio=straddle_off_ratio,
+        pair_off_ratio=pair_off_ratio,
+    ))
+    claimed: set[int] = set()
+    groups: list[dict] = []   # {"axes":[Axis2D], "straddlers":[], "pairs":[], "members":set}
+    for axis, _w in ranked:
+        avail = [r for r in ordered if r.label not in claimed]
+        straddlers = [
+            r for r in avail
+            if region_is_self_symmetric(r, axis, max_off_ratio=straddle_off_ratio)
+        ]
+        pairs = []
+        used = {r.label for r in straddlers}
+        rest = [r for r in avail if r.label not in used]
+        for i, a in enumerate(rest):
+            if a.label in used:
+                continue
+            for b in rest[i + 1:]:
+                if b.label in used:
+                    continue
+                if regions_mirror_pair(a, b, axis, max_off_ratio=pair_off_ratio):
+                    pairs.append((a, b)); used.add(a.label); used.add(b.label); break
+        members = {r.label for r in straddlers} | used
+        if straddlers or pairs:
+            claimed |= members
+            groups.append({"axes": [axis], "straddlers": straddlers, "pairs": pairs, "members": members})
+        else:
+            # axis claims no NEW regions: if some existing group's straddlers ALL also
+            # satisfy this axis, it is a secondary axis of that figure -> append.
+            for g in groups:
+                if g["straddlers"] and all(
+                    region_is_self_symmetric(r, axis, max_off_ratio=straddle_off_ratio)
+                    for r in g["straddlers"]
+                ):
+                    g["axes"].append(axis)
+                    break
+    result = [SymmetricGroup(tuple(g["axes"]), g["straddlers"], g["pairs"], []) for g in groups]
+    loners = [r for r in ordered if r.label not in claimed]
+    result.append(SymmetricGroup((), [], [], loners))
+    return result
+
 
 # One tolerance for "is this bilaterally symmetric?", shared by every acceptance site
 # so they cannot disagree. It is a reflection *mismatch* fraction: a shape counts as
@@ -14,6 +229,12 @@ from .types import Axis, Region
 # gate than for axis detection let near-symmetric *pointed* regions be force-mirrored
 # about an axis their apex misses, splitting the apex into a fork.
 SYM_TOL = 0.10
+
+# False straddlers (icloud ~0.904, telegram ~0.917) sit well below this threshold;
+# genuine self-symmetric marks (gdrive ~0.995, appstore ~0.966) sit at or above it.
+# Half-mirroring a SINGLE region erases its real asymmetry, so the straddle gate needs
+# a stricter bar than the pair gate (which matches two genuine mirror twins).
+STRADDLE_MIN_IOU = 0.96
 
 
 def _reflect_cols(mask: np.ndarray, axis_x: float) -> np.ndarray:
@@ -119,7 +340,8 @@ def _iou(a: np.ndarray, b: np.ndarray) -> float:
 
 def classify_regions(
     regions: list[Region], axis: Axis, *, pair_iou: float = 1.0 - SYM_TOL,
-    straddle_iou: float = 1.0 - SYM_TOL,
+    straddle_iou: float = STRADDLE_MIN_IOU,
+    diagnostics: list | None = None,
 ) -> tuple[list[Region], list[tuple[Region, Region]], list[Region]]:
     """Split regions into self-symmetric straddlers, mirror pairs, and lone
     asymmetric leftovers.
@@ -129,13 +351,13 @@ def classify_regions(
     `<use>`-mirrored, and a loner is fit as-is with no symmetry (forcing the
     half-outline mirror onto a genuinely asymmetric region would distort it).
 
-    Both the straddle gate and the pair gate use the SAME symmetry bar `detect_axis`
-    uses (reflection IoU >= 1 - SYM_TOL). Loosening either admits coincidental
-    matches: a near-symmetric pointed region forks under half-mirror, and two
-    merely-similar regions (e.g. a "B" and an "R") get `<use>`-mirrored — substituting
-    one with the mirror of the other. Below the bar, both fall through to loners
-    (fit as-is) instead. (Corpus check: genuine mirror-twin pairs score IoU >= 0.96;
-    false pairs sit at <= 0.74, so the bar cleanly separates them.)"""
+    The straddle gate uses a STRICTER bar (STRADDLE_MIN_IOU = 0.96) than the pair
+    gate (1 - SYM_TOL = 0.90). Half-mirroring a single region erases its real
+    asymmetry; false straddlers (icloud ~0.90, telegram ~0.917) fall below 0.96.
+    The pair gate is looser because misclassifying a pair just shows the wrong
+    region mirrored, which is less destructive than erasing asymmetry. Below either
+    bar, regions fall through to loners (fit as-is). (Corpus check: genuine
+    mirror-twin pairs score IoU >= 0.96; false pairs sit at <= 0.74.)"""
     straddlers: list[Region] = []
     pairs: list[tuple[Region, Region]] = []
     loners: list[Region] = []
@@ -144,9 +366,12 @@ def classify_regions(
         if r.label in used:
             continue
         self_refl = _reflect_cols(r.mask, axis.x)
-        if _iou(r.mask, self_refl) >= straddle_iou:
+        self_iou = _iou(r.mask, self_refl)
+        if self_iou >= straddle_iou:
             straddlers.append(r)
             used.add(r.label)
+            if diagnostics is not None:
+                diagnostics.append((r.label, round(float(self_iou), 4), "straddler"))
             continue
         # find a partner whose mask matches r's reflection
         partner = None
@@ -163,7 +388,13 @@ def classify_regions(
                 canon, mirror = partner, r
             pairs.append((canon, mirror))
             used.update({r.label, partner.label})
+            if diagnostics is not None:
+                diagnostics.append((r.label, round(float(self_iou), 4), "pair"))
+                partner_refl = _reflect_cols(partner.mask, axis.x)
+                diagnostics.append((partner.label, round(float(_iou(partner.mask, partner_refl)), 4), "pair"))
         else:
             loners.append(r)  # asymmetric and unpaired: fit as-is, no forced mirror
             used.add(r.label)
+            if diagnostics is not None:
+                diagnostics.append((r.label, round(float(self_iou), 4), "loner"))
     return straddlers, pairs, loners

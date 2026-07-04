@@ -1,8 +1,9 @@
 import numpy as np
+from unittest.mock import patch
 from vectormark.surface_merge import seam_is_soft, gradients_continuous, merge_surfaces
 from vectormark.fill_fit import fit_fill as _ff
 from vectormark.types import Region
-from vectormark.candidate import LinearGradientFill, RadialGradientFill
+from vectormark.candidate import FlatFill, LinearGradientFill, RadialGradientFill
 
 _AnyGradient = (LinearGradientFill, RadialGradientFill)
 
@@ -138,3 +139,57 @@ def test_two_distinct_flats_do_not_merge():
     filled = [(_region(0, a, "#C82828"), _ff(a, rgb, flat_hex="#C82828")),
               (_region(1, b, "#28A03C"), _ff(b, rgb, flat_hex="#28A03C"))]
     assert len(merge_surfaces(filled, rgb)) == 2
+
+
+def test_seam_cache_evicts_stale_entries_after_merge():
+    """Regression: after A absorbs X (rep=A), the stale (A.label, C.label)=False
+    cache entry must be evicted. Without eviction a later pass sees the stale False
+    and silently skips the valid A_new+C merge even though A's expanded mask IS
+    adjacent to C.
+
+    Layout (H=40, W=48):
+      A [label=0, cols  0-23, area=960] | X [label=2, cols 24-31, area=320] | C [label=1, cols 32-47, area=640]
+      A and C are not adjacent; A and X are adjacent; X and C are adjacent.
+
+    Sort (descending area): [A(960), C(640), X(320)] → scan (A,C) before (A,X).
+    Pass 1:
+      (A,C): seam_is_soft=False (not adjacent) → cached (0,1)=False  ← the stale entry
+      (A,X): seam_is_soft=True, fit_fill(A|X)=gradient → MERGE; rep=A; label 0 reused
+             with mask cols 0-31, now adjacent to C.
+             Correct fix: evict cache entries for labels {0,2} → (0,1) removed.
+    Pass 2:
+      (A_new, C): key (0,1). With fix: not in cache → fresh seam_is_soft=True → MERGE.
+                             Without fix: stale False → no merge (bug).
+    """
+    H, W = 40, 48
+    # Strong blue→red ramp so union regions have clearly detectable gradients.
+    rgb = _ramp(H, W, (0, 0, 255), (255, 0, 0))
+
+    mask_a = np.zeros((H, W), bool); mask_a[:, :24] = True    # label 0, area 960
+    mask_c = np.zeros((H, W), bool); mask_c[:, 32:48] = True  # label 1, area 640
+    mask_x = np.zeros((H, W), bool); mask_x[:, 24:32] = True  # label 2, area 320
+
+    # Seed all three as flat so path A (seam_is_soft cache) is exercised throughout.
+    filled = [
+        (_region(0, mask_a, "#0000ff"), FlatFill(hex="#0000ff")),
+        (_region(1, mask_c, "#ff0000"), FlatFill(hex="#ff0000")),
+        (_region(2, mask_x, "#808080"), FlatFill(hex="#808080")),
+    ]
+
+    # fit_fill: return gradient iff the union spans both A's territory (cols <24) and
+    # the right side (cols ≥24), so A, X, and C individually stay flat while A|X and
+    # A|X|C are promoted to gradient.  Real gradient detection runs on qualifying masks.
+    def _controlled_fit_fill(mask, rgb_, *, flat_hex):
+        if mask[:, :24].any() and mask[:, 24:].any():
+            return _ff(mask, rgb_, flat_hex=flat_hex)
+        return FlatFill(hex=flat_hex)
+
+    with patch("vectormark.surface_merge.fit_fill", _controlled_fit_fill):
+        out = merge_surfaces(filled, rgb)
+
+    assert len(out) == 1, (
+        f"expected 1 merged region, got {len(out)}; "
+        "likely cause: stale seam_cache entry (A.label, C.label)=False was not evicted "
+        "after the A|X merge, blocking the valid A_new+C merge in pass 2"
+    )
+    assert isinstance(out[0][1], _AnyGradient)

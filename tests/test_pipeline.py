@@ -1,6 +1,9 @@
 import numpy as np
 from PIL import Image
-from vectormark.pipeline import Options, _segment_image, idealize
+from vectormark.candidate import FlatFill, LinearGradientFill
+from vectormark.fit import Shape
+from vectormark.optimizer.vector_region import VectorRegion
+from vectormark.pipeline import Options, _render_optimizer_body, _segment_image, idealize
 from tests._render import render_svg, ssim
 
 
@@ -46,6 +49,142 @@ def test_symmetric_holed_region_emits_exactly_symmetric():
     # and it still renders recognizably to the source (a thin ring is harsh on
     # SSIM, so this is a sanity floor, not a fidelity assertion)
     assert ssim(render_svg(svg, w, h), img) >= 0.90
+
+
+def _evenodd_source(obj_id: int, *, fill: str = "#111111", z: int = 0) -> VectorRegion:
+    return VectorRegion(
+        obj_id,
+        Shape(
+            "path",
+            {
+                "d": "M0 0 L20 0 L20 20 L0 20 Z M5 5 L15 5 L15 15 L5 15 Z",
+                "fill_rule": "evenodd",
+            },
+        ),
+        FlatFill(fill),
+        z,
+    )
+
+
+def test_optimizer_body_preserves_evenodd_when_flattening_use():
+    source = _evenodd_source(10)
+    clone = VectorRegion(
+        20,
+        Shape("use", {"href_obj_id": 10, "transform": (1.0, 0.0, 0.0, 1.0, 24.0, 0.0)}),
+        FlatFill("#111111"),
+        0,
+        footprint=source.footprint,
+    )
+
+    body, _defs = _render_optimizer_body([clone, source], flatten=True)
+
+    assert body[0].count('fill-rule="evenodd"') == 1
+    assert body[1].count('fill-rule="evenodd"') == 1
+
+
+def test_optimizer_body_preserves_evenodd_when_inlining_recolored_use():
+    source = _evenodd_source(10, fill="#111111")
+    clone = VectorRegion(
+        20,
+        Shape(
+            "use",
+            {
+                "href_obj_id": 10,
+                "transform": (1.0, 0.0, 0.0, 1.0, 24.0, 0.0),
+                "fill": "#222222",
+            },
+        ),
+        FlatFill("#222222"),
+        0,
+        footprint=source.footprint,
+    )
+
+    body, _defs = _render_optimizer_body([clone, source])
+
+    assert body[0].startswith('<path id="s10"')
+    assert 'fill="#111111"' in body[0]
+    assert body[1].startswith('<path fill="#222222"')
+    assert 'fill-rule="evenodd"' in body[1]
+
+
+def test_optimizer_body_inlines_gradient_use_to_preserve_global_paint_space():
+    fill = LinearGradientFill(
+        {"x1": 0.0, "y1": 0.0, "x2": 0.0, "y2": 40.0},
+        [(0.0, "#ff0000"), (1.0, "#0000ff")],
+    )
+    source = VectorRegion(
+        10,
+        Shape("path", {"d": "M0 20 L20 20 L20 40 L0 40 Z"}),
+        fill,
+        0,
+    )
+    mirror = VectorRegion(
+        20,
+        Shape("use", {"href_obj_id": 10, "transform": (1.0, 0.0, 0.0, -1.0, 0.0, 40.0)}),
+        fill,
+        0.1,
+        footprint=source.footprint,
+    )
+
+    body, defs = _render_optimizer_body([source, mirror])
+    svg_body = "".join(body)
+
+    assert len(defs) == 1
+    assert "<use" not in svg_body
+    assert svg_body.count("<path") == 2
+    assert svg_body.count('fill="url(#g0)"') == 2
+
+
+def test_optimizer_body_inlines_same_fill_use_to_keep_output_concrete():
+    fill = FlatFill("#111111")
+    source = VectorRegion(
+        10,
+        Shape("path", {"d": "M0 0 L20 0 L20 20 L0 20 Z"}),
+        fill,
+        0,
+    )
+    clone = VectorRegion(
+        20,
+        Shape("use", {"href_obj_id": 10, "transform": (1.0, 0.0, 0.0, 1.0, 24.0, 0.0)}),
+        fill,
+        0.1,
+        footprint=source.footprint,
+    )
+
+    body, _defs = _render_optimizer_body([source, clone])
+
+    assert body[0].startswith('<path id="s10"')
+    assert body[1].startswith('<path fill="#111111"')
+    assert "<use" not in "".join(body)
+
+
+def test_optimizer_body_renders_by_z_then_id():
+    low_source = VectorRegion(
+        10,
+        Shape("rect", {"x": 0.0, "y": 0.0, "w": 10.0, "h": 10.0}),
+        FlatFill("#111111"),
+        0,
+    )
+    low_use = VectorRegion(
+        99,
+        Shape("use", {"href_obj_id": 10, "transform": (1.0, 0.0, 0.0, 1.0, 12.0, 0.0)}),
+        FlatFill("#111111"),
+        0,
+        footprint=low_source.footprint,
+    )
+    high_cover = VectorRegion(
+        2,
+        Shape("rect", {"x": 0.0, "y": 0.0, "w": 30.0, "h": 30.0}),
+        FlatFill("#333333"),
+        1,
+    )
+
+    body, _defs = _render_optimizer_body([high_cover, low_use, low_source])
+
+    assert 'fill="#111111"' in body[0]
+    assert body[1].startswith('<path')
+    assert 'fill="#111111"' in body[1]
+    assert 'fill="#333333"' in body[2]
 
 
 def test_area_filter_is_scale_independent():
@@ -248,6 +387,24 @@ def test_multicomponent_selection_addresses_global_sn():
     policy = SelectionPolicy(by_id={"s1": ElementSelection(force="holed_symmetric")})
     with pytest.warns(UserWarning, match="s1"):
         idealize(img, options=Options(selection=policy))
+
+
+def test_conditioning_default_off_large_input_full_res():
+    """With working_max_dim=None (new default), a >768 image is vectorized at full resolution."""
+    arr = np.full((200, 1000, 3), 255, dtype=np.uint8)
+    arr[50:150, 100:900] = (30, 100, 220)               # blue rect on white
+    svg = idealize(arr)                                  # Options() → working_max_dim=None
+    assert 'viewBox="0 0 1000 200"' in svg, "large input must use full-res viewBox by default"
+
+
+def test_conditioning_applies_when_explicitly_set():
+    """With working_max_dim explicitly set, a >threshold image is downscaled for vectorization."""
+    arr = np.full((200, 1000, 3), 255, dtype=np.uint8)
+    arr[50:150, 100:900] = (30, 100, 220)
+    svg = idealize(arr, options=Options(working_max_dim=512))
+    # width/height rewritten to original; viewBox reflects conditioned resolution
+    assert 'width="1000" height="200"' in svg
+    assert 'viewBox="0 0 1000 200"' not in svg, "conditioned input must NOT use original viewBox"
 
 
 def test_rgba_file_input_composites_on_white(tmp_path):

@@ -1,0 +1,327 @@
+{
+  "vbird": {
+    "svg_sha": "4bcbbe4c9f88fdf6784218bb45ed16f59bb4686a5a3d1446bb5a43619c079975",
+    "axes": [],
+    "decisions": []
+  },
+  "apple_music": {
+    "svg_sha": "5f150320dedd84e7ad58b3447dce1cf78200613bea3c3883513b93eb90681403",
+    "axes": [],
+    "decisions": []
+  },
+  "appstore": {
+    "svg_sha": "836781fbe3335b9e928ceb1d95334649f79bb3e60bb96eb60404cf198fd13418",
+    "axes": [
+      [
+        248.0,
+        0.0,
+        248.0,
+        499.0
+      ]
+    ],
+    "decisions": [
+      [
+        1,
+        "straddler"
+      ]
+    ]
+  },
+  "asana": {
+    "svg_sha": "f9e813cfa8cb06f1accb2d698a66103f37b63030e9fd396ff17dc89445ca88ed",
+    "axes": [],
+    "decisions": []
+  },
+  "burger_king": {
+    "svg_sha": "84215ae0044f4b1efcaa04d472f481ec05d3921dbcb89495c8e4e6bcc8d04174",
+    "axes": [
+      [
+        352.0,
+        12.0,
+        352.0,
+        754.0
+      ]
+    ],
+    "decisions": [
+      [
+        1,
+        "loner"
+      ],
+      [
+        2,
+        "loner"
+      ],
+      [
+        3,
+        "loner"
+      ],
+      [
+        4,
+        "loner"
+      ],
+      [
+        5,
+        "loner"
+      ],
+      [
+        6,
+        "loner"
+      ],
+      [
+        7,
+        "loner"
+      ],
+      [
+        8,
+        "loner"
+      ],
+      [
+        9,
+        "loner"
+      ],
+      [
+        10,
+        "loner"
+      ],
+      [
+        11,
+        "loner"
+      ],
+      [
+        16,
+        "straddler"
+      ],
+      [
+        30,
+        "straddler"
+      ]
+    ]
+  },
+  "dropbox": {
+    "svg_sha": "a2b512b5da585f26010b7f7d98f205f7736b9bab3309051825c1c6a5dd23fd3c",
+    "axes": [
+      [
+        246.5,
+        0.0,
+        246.5,
+        459.0
+      ]
+    ],
+    "decisions": [
+      [
+        1,
+        "straddler"
+      ],
+      [
+        2,
+        "straddler"
+      ]
+    ]
+  },
+  "firefox": {
+    "svg_sha": "9f54ff6d0083e9410fb668542a69072ef25ad37eb9b7844c12ad7c060d4e9fa5",
+    "axes": [],
+    "decisions": []
+  },
+  "gdrive": {
+    "svg_sha": "3dc29bb60a66b7e681f4635815b1298d521503148ee2bfb28f1262eb5e9391e0",
+    "axes": [
+      [
+        249.5,
+        0.0,
+        249.5,
+        446.0
+      ]
+    ],
+    "decisions": [
+      [
+        1,
+        "loner"
+      ],
+      [
+        2,
+        "straddler"
+      ],
+      [
+        3,
+        "loner"
+      ],
+      [
+        4,
+        "straddler"
+      ],
+      [
+        5,
+        "loner"
+      ],
+      [
+        6,
+        "loner"
+      ]
+    ]
+  },
+  "icloud": {
+    "svg_sha": "a6edb47c552ae0070242b6249b72e93d4b9a97eab8d1c280f1968b7ec27cfccc",
+    "axes": [
+      [
+        250.0,
+        5.0,
+        250.0,
+        322.0
+      ]
+    ],
+    "decisions": [
+      [
+        2,
+        "loner"
+      ]
+    ]
+  },
+  "instagram": {
+    "svg_sha": "32595141725a3b28a1d1ebb0f2ae3388c8cd75fb1204fde855d8db925f6a8726",
+    "axes": [
+      [
+        249.5,
+        4.0,
+        249.5,
+        495.0
+      ]
+    ],
+    "decisions": [
+      [
+        10,
+        "straddler"
+      ],
+      [
+        22,
+        "straddler"
+      ],
+      [
+        26,
+        "loner"
+      ]
+    ]
+  },
+  "mastercard": {
+    "svg_sha": "22aa631a14cb8f4def7880d346b96d79cc9b7f2b155df302236f93ed775f56af",
+    "axes": [
+      [
+        249.5,
+        0.0,
+        249.5,
+        387.0
+      ]
+    ],
+    "decisions": [
+      [
+        1,
+        "loner"
+      ],
+      [
+        3,
+        "loner"
+      ]
+    ]
+  },
+  "microsoft": {
+    "svg_sha": "19aaa3cd6ec00a6bf25e256b0880de4613898024680346ddb04f7a2758c4fd1e",
+    "axes": [],
+    "decisions": []
+  },
+  "photoshop": {
+    "svg_sha": "19bdb5cd02bcb3837f3754d74f35fb78b105d1155dbb67ea06b840811578e158",
+    "axes": [],
+    "decisions": []
+  },
+  "pinterest": {
+    "svg_sha": "f577df18092a12c6efdd1849c7e7f48bd272d48aa057298e38ff013c437dc166",
+    "axes": [],
+    "decisions": []
+  },
+  "pokeball": {
+    "svg_sha": "8bdb64fdaf430a795a96f7e1eb82d80aba0f3423563efef7e46dc3e00e902716",
+    "axes": [
+      [
+        382.0,
+        0.0,
+        382.0,
+        765.0
+      ]
+    ],
+    "decisions": [
+      [
+        1,
+        "loner"
+      ],
+      [
+        3,
+        "loner"
+      ],
+      [
+        4,
+        "straddler"
+      ]
+    ]
+  },
+  "sketch": {
+    "svg_sha": "a3ff6de38170d13063e004945f5f3fe456724f779c262336a4b48d01f7644977",
+    "axes": [
+      [
+        249.0,
+        0.0,
+        249.0,
+        450.0
+      ]
+    ],
+    "decisions": [
+      [
+        1,
+        "pair"
+      ],
+      [
+        2,
+        "pair"
+      ],
+      [
+        3,
+        "straddler"
+      ],
+      [
+        4,
+        "pair"
+      ],
+      [
+        5,
+        "pair"
+      ],
+      [
+        6,
+        "straddler"
+      ]
+    ]
+  },
+  "slack": {
+    "svg_sha": "0593aba31d33b38829de60c691b5c4bdff76f6898dbfc2fb98e6c6acb0d7daae",
+    "axes": [],
+    "decisions": []
+  },
+  "telegram": {
+    "svg_sha": "e7485c8d19718b1a528a43462d51a60d8a63f0370f92be13422f0c2182f331eb",
+    "axes": [],
+    "decisions": []
+  },
+  "vimeo": {
+    "svg_sha": "a7b91ed3af3acd894ae0028fb3423ae4742c4c18feac0c2d6dde428af995b052",
+    "axes": [],
+    "decisions": []
+  },
+  "visa": {
+    "svg_sha": "f088f87de3b4cb840704dc59ab81212c737b5f6db689560405438e9b242490a8",
+    "axes": [],
+    "decisions": []
+  },
+  "daikonic": {
+    "svg_sha": "6a0a5d2e688200186b3d9803006c759d3efd9e7f9687ca299f6c86f90953d4a5",
+    "axes": [],
+    "decisions": []
+  }
+}
