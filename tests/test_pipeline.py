@@ -135,6 +135,29 @@ def test_optimizer_body_inlines_gradient_use_to_preserve_global_paint_space():
     assert svg_body.count('fill="url(#g0)"') == 2
 
 
+def test_optimizer_body_inlines_same_fill_use_to_keep_output_concrete():
+    fill = FlatFill("#111111")
+    source = VectorRegion(
+        10,
+        Shape("path", {"d": "M0 0 L20 0 L20 20 L0 20 Z"}),
+        fill,
+        0,
+    )
+    clone = VectorRegion(
+        20,
+        Shape("use", {"href_obj_id": 10, "transform": (1.0, 0.0, 0.0, 1.0, 24.0, 0.0)}),
+        fill,
+        0.1,
+        footprint=source.footprint,
+    )
+
+    body, _defs = _render_optimizer_body([source, clone])
+
+    assert body[0].startswith('<path id="s10"')
+    assert body[1].startswith('<path fill="#111111"')
+    assert "<use" not in "".join(body)
+
+
 def test_optimizer_body_renders_by_z_then_id():
     low_source = VectorRegion(
         10,

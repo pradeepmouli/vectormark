@@ -36,6 +36,14 @@ def test_reflection_off_count_large_for_wrong_axis():
     assert reflection_off_count(fg_xy, axis, dist) > _perimeter(m)
 
 
+def test_reflection_off_count_treats_out_of_bounds_reflections_as_off_shape():
+    fg_xy = (np.array([0]), np.array([1]))
+    dist = np.zeros((3, 3), dtype=float)
+    axis = Axis2D(theta=np.pi / 2, cx=2.0, cy=1.0)
+
+    assert reflection_off_count(fg_xy, axis, dist) == 1
+
+
 def _region(mask, label=1):
     return Region(label=label, mask=mask, color_hex="#000000")
 

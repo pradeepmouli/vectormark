@@ -39,18 +39,19 @@ def _child_from_scene_item(
     *,
     id: int,
     shape_hw: tuple[int, int],
+    z_offset: float = 0.0,
 ) -> VectorRegion:
     if isinstance(item, ScenePrimitive):
         shape = _shape_from_scene_primitive(item)
         fill = FlatFill(item.color_hex)
-        z = float(item.z)
+        z = z_offset + float(item.z)
         raster = rasterize(to_polygon(shape), shape_hw)
         color_hex = item.color_hex
     else:
         shape = item
         color_hex = str(item.params["color_hex"])
         fill = FlatFill(color_hex)
-        z = float(item.params.get("z", 0))
+        z = z_offset + float(item.params.get("z", 0))
         raster = rasterize(to_polygon(shape), shape_hw)
 
     return VectorRegion(
@@ -68,6 +69,8 @@ def _child_from_scene_item(
 def occlusion_pass(
     objects: list[VectorRegion],
     masks: dict[int, np.ndarray],
+    *,
+    no_symmetry: bool = False,
 ) -> list[Proposal]:
     leaves = [obj for obj in sorted(objects, key=lambda current: int(current.id)) if obj.is_leaf]
     trace_regions = [_as_trace_region(obj) for obj in leaves]
@@ -80,7 +83,7 @@ def occlusion_pass(
     for region in region_by_id.values():
         if region.mask.shape == shape_hw:
             silhouette |= region.mask
-    axis = detect_axis(silhouette)
+    axis = None if no_symmetry else detect_axis(silhouette)
     adjacency = region_adjacency(list(region_by_id.values()))
     seen: set[int] = set()
     proposals: list[Proposal] = []
@@ -110,6 +113,7 @@ def occlusion_pass(
         if len(consumed_ids) < 2:
             continue
 
+        base_z = min(float(obj.z) for obj in leaves if int(obj.id) in consumed_ids)
         children: list[VectorRegion] = []
         primitive_id_index = 0
         for item in reconstructed:
@@ -119,12 +123,12 @@ def occlusion_pass(
             else:
                 child_id = next_id
                 next_id += 1
-            children.append(_child_from_scene_item(item, id=child_id, shape_hw=shape_hw))
+            children.append(_child_from_scene_item(item, id=child_id, shape_hw=shape_hw, z_offset=base_z))
 
         branch = VectorRegion.branch(
             id=consumed_ids[0],
             children=children,
-            z=min(float(obj.z) for obj in leaves if obj.id in consumed_ids),
+            z=base_z,
             raster=np.logical_or.reduce([region_by_id[obj_id].mask for obj_id in consumed_ids]),
             diagnostics={
                 "occlusion": {

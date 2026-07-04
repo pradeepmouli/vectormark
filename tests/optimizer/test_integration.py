@@ -10,6 +10,8 @@ from vectormark.optimizer.framework import optimize
 from vectormark.optimizer.gate import rasterize
 from vectormark.optimizer.passes.compound import split_compound_pass
 from vectormark.optimizer.passes.primitives import primitives_pass
+import vectormark.optimizer.passes.occlusion as occlusion_module
+import vectormark.optimizer.passes.primitives as primitives_module
 from vectormark.optimizer.vector_region import VectorRegion, to_polygon
 from vectormark.optimizer.passes.symmetry import symmetry_pass
 from vectormark.pipeline import Options, _optimizer_passes, _prefer_optimizer_svg, _render_optimizer_body, idealize
@@ -138,6 +140,60 @@ def test_optimizer_recolored_clone_keeps_target_fill_without_use_override():
 def test_optimizer_no_symmetry_skips_symmetry_pass():
     assert symmetry_pass in _optimizer_passes(Options(optimizer=True))
     assert symmetry_pass not in _optimizer_passes(Options(optimizer=True, no_symmetry=True))
+
+
+def test_optimizer_threads_epsilon_into_primitives_pass(monkeypatch):
+    seen: list[float] = []
+
+    def _recording_recognize(points, *, epsilon):
+        seen.append(epsilon)
+        return None
+
+    monkeypatch.setattr(primitives_module, "recognize_primitive", _recording_recognize)
+    obj = VectorRegion(
+        1,
+        Shape("path", {"d": "M0 0 L20 0 L20 20 L0 20 Z"}),
+        FlatFill("#111111"),
+        0,
+    )
+    pass_fn = _optimizer_passes(Options(optimizer=True, epsilon=0.25))[0]
+
+    pass_fn([obj], {obj.id: rasterize(obj.footprint, (32, 32))})
+
+    assert seen == [0.25]
+
+
+def test_optimizer_no_symmetry_threads_into_occlusion_pass(monkeypatch):
+    seen_axes = []
+
+    def _recording_reconstruct_scene(regions, axis, shape_hw):
+        seen_axes.append(axis)
+        return [], regions
+
+    monkeypatch.setattr(occlusion_module, "reconstruct_scene", _recording_reconstruct_scene)
+    left = VectorRegion(
+        1,
+        Shape("path", {"d": "M0 0 L10 0 L10 10 L0 10 Z"}),
+        FlatFill("#111111"),
+        0,
+        raster=np.pad(np.ones((10, 10), dtype=bool), ((0, 22), (0, 22))),
+    )
+    right = VectorRegion(
+        2,
+        Shape("path", {"d": "M10 0 L20 0 L20 10 L10 10 Z"}),
+        FlatFill("#111111"),
+        1,
+        raster=np.pad(np.ones((10, 10), dtype=bool), ((0, 22), (10, 12))),
+    )
+    masks = {
+        left.id: left.raster,
+        right.id: right.raster,
+    }
+    pass_fn = _optimizer_passes(Options(optimizer=True, no_symmetry=True))[1]
+
+    pass_fn([left, right], masks)
+
+    assert seen_axes == [None]
 
 
 def test_optimizer_pipeline_does_not_mirror_asymmetric_single_object():

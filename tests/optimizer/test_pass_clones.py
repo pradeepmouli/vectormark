@@ -11,6 +11,7 @@ from vectormark.fit import Shape
 from vectormark.optimizer.framework import optimize
 from vectormark.optimizer.vector_region import VectorRegion
 from vectormark.optimizer.passes.clones import clones_pass
+import vectormark.optimizer.passes.clones as clones_module
 
 
 def _mask_for_polygon(poly: Polygon, shape_hw: tuple[int, int] = (96, 96)) -> np.ndarray:
@@ -141,6 +142,26 @@ def test_clones_pass_skips_non_flat_fill_clone_proposals():
     assert clones_pass(objects, masks) == []
     out = optimize(objects, masks, [clones_pass])
     assert [obj.current.kind for obj in out] == ["path", "path"]
+
+
+def test_clones_pass_does_not_chain_targets_as_canonicals(monkeypatch):
+    canonical = _square(1, center=(18.0, 18.0), fill=FlatFill("#112233"))
+    middle = _square(2, center=(42.0, 18.0), fill=FlatFill("#112233"))
+    target = _square(3, center=(66.0, 18.0), fill=FlatFill("#112233"))
+
+    def _nontransitive_match(canonical_flat, target_flat):
+        pair = (round(canonical_flat.centroid.x), round(target_flat.centroid.x))
+        if pair in {(18, 42), (42, 66)}:
+            return (1.0, 0.0, 0.0, 1.0, target_flat.centroid.x - canonical_flat.centroid.x, 0.0), target_flat
+        return None
+
+    monkeypatch.setattr(clones_module, "_best_transform", _nontransitive_match)
+    objects = [canonical, middle, target]
+    masks = {obj.id: _mask_for_polygon(obj.footprint) for obj in objects}
+
+    proposals = clones_pass(objects, masks)
+
+    assert [proposal.obj_ids for proposal in proposals] == [(2,)]
 
 
 def test_optimizer_object_svg_resolves_clone_href_to_emitted_id():

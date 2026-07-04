@@ -10,6 +10,7 @@ from vectormark.optimizer.gate import rasterize
 from vectormark.optimizer.vector_region import VectorRegion
 from vectormark.optimizer.passes.simplify import simplify_pass
 from vectormark.pipeline import Options, _optimizer_passes
+import vectormark.optimizer.passes.simplify as simplify_module
 
 
 def _command_count(d: str) -> int:
@@ -167,6 +168,29 @@ def test_simplify_pass_drops_cutout_when_later_path_covers_it():
     assert by_id[2].current.params["d"] == hole
 
 
+def test_simplify_pass_keeps_referenced_source_subpaths():
+    outer = _dense_rounded_rect_d(8.0, 8.0, 88.0, 88.0, 18.0, samples=12)
+    hole = "M35 35 L50 35 L42 50 Z"
+    source = _obj_from_path(Shape("path", {"d": f"{outer} {hole}", "fill_rule": "evenodd"}), obj_id=1)
+    cover = VectorRegion(2, Shape("path", {"d": hole}), FlatFill("#FFFFFF"), 1)
+    clone = VectorRegion(
+        3,
+        Shape("use", {"href_obj_id": 1, "transform": (1.0, 0.0, 0.0, 1.0, 110.0, 0.0)}),
+        FlatFill("#000000"),
+        2,
+        footprint=source.footprint,
+    )
+
+    proposals = simplify_pass(
+        [source, cover, clone],
+        {source.id: _mask_for_obj(source), cover.id: _mask_for_obj(cover), clone.id: _mask_for_obj(clone)},
+        epsilon=1.0,
+        max_error=1.0,
+    )
+
+    assert all(1 not in proposal.obj_ids for proposal in proposals)
+
+
 def test_simplify_pass_collapses_long_straight_line_runs():
     top = " ".join(f"L{x} 10" for x in range(12, 71, 2))
     d = f"M10 10 {top} L70 40 L10 40 Z"
@@ -178,6 +202,26 @@ def test_simplify_pass_collapses_long_straight_line_runs():
     assert "L70 10" in simplified_d
     assert "L70 40" in simplified_d
     assert "L10 40" in simplified_d
+
+
+def test_simplified_path_shape_threads_samples_to_subpath_sampling(monkeypatch):
+    seen: list[int] = []
+    original = simplify_module._sample_subpath
+
+    def _recording_sample(tokens, *, samples):
+        seen.append(samples)
+        return original(tokens, samples=samples)
+
+    monkeypatch.setattr(simplify_module, "_sample_subpath", _recording_sample)
+
+    simplify_module._simplified_path_shape(
+        Shape("path", {"d": "M0 0 L20 0 L20 20 L0 20 Z"}),
+        epsilon=1.0,
+        max_error=1.0,
+        samples=7,
+    )
+
+    assert seen == [7]
 
 
 def test_simplify_pass_reduces_sampled_smooth_arc_to_curves():

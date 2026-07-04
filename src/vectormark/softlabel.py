@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: MIT
 """Antialiasing-aware soft label field: recover per-region sub-pixel coverage from the
 pre-quantization RGB + palette, so contour extraction is smooth and seams are shared.
-Pure numpy; no pipeline imports."""
+No pipeline imports."""
 
 from __future__ import annotations
 
@@ -17,10 +17,14 @@ def alpha_unmix(rgb: np.ndarray, c_a: np.ndarray, c_b: np.ndarray) -> np.ndarray
     """Coverage of color A in a two-color blend V = α·c_a + (1−α)·c_b.
     α = clip((V−c_b)·(c_a−c_b)/|c_a−c_b|², 0, 1). α=1 ⇒ pure c_a. Vectorized over leading
     dims of `rgb` (last axis = channels)."""
-    rgb = np.asarray(rgb, float); c_a = np.asarray(c_a, float); c_b = np.asarray(c_b, float)
+    rgb = np.asarray(rgb, float)
+    c_a = np.asarray(c_a, float)
+    c_b = np.asarray(c_b, float)
     d = c_a - c_b
-    denom = float(d @ d) or 1.0
-    return np.clip(((rgb - c_b) @ d) / denom, 0.0, 1.0)
+    denom = np.sum(d * d, axis=-1)
+    denom = np.where(denom == 0.0, 1.0, denom)
+    numer = np.sum((rgb - c_b) * d, axis=-1)
+    return np.clip(numer / denom, 0.0, 1.0)
 
 
 def _oklab_dist(rgb: np.ndarray, palette: np.ndarray) -> np.ndarray:
@@ -63,10 +67,9 @@ def soft_label_field(rgb: np.ndarray, palette: np.ndarray) -> np.ndarray:
     # boundary band (not interior): unmix the two locally-dominant colors
     if band.any():
         by, bx = np.where(band)
-        ca = palette[n0[by, bx]]; cb = palette[n1[by, bx]]
-        a = np.empty(len(by))
-        for i in range(len(by)):
-            a[i] = alpha_unmix(rgb[by[i], bx[i]], ca[i], cb[i])
+        ca = palette[n0[by, bx]]
+        cb = palette[n1[by, bx]]
+        a = alpha_unmix(rgb[by, bx], ca, cb)
         L[by, bx, n0[by, bx]] = a
         L[by, bx, n1[by, bx]] = 1.0 - a
 

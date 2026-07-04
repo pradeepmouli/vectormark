@@ -778,7 +778,15 @@ def _optimizer_passes(opt: Options):
     """Pass order for the experimental geometry optimizer."""
     from .optimizer.passes import clones_pass, occlusion_pass, primitives_pass, simplify_pass, split_compound_pass, symmetry_pass
 
-    passes = [primitives_pass, occlusion_pass, clones_pass]
+    def _configured_primitives_pass(objects, masks):
+        return primitives_pass(objects, masks, epsilon=opt.epsilon)
+
+    def _configured_occlusion_pass(objects, masks):
+        return occlusion_pass(objects, masks, no_symmetry=opt.no_symmetry)
+
+    _configured_primitives_pass.__name__ = "primitives_pass"
+    _configured_occlusion_pass.__name__ = "occlusion_pass"
+    passes = [_configured_primitives_pass, _configured_occlusion_pass, clones_pass]
 
     def _configured_simplify_pass(objects, masks):
         return simplify_pass(
@@ -792,7 +800,7 @@ def _optimizer_passes(opt: Options):
     _configured_simplify_pass.__name__ = "simplify_pass"
     passes.append(_configured_simplify_pass)
     passes.append(split_compound_pass)
-    passes.append(primitives_pass)
+    passes.append(_configured_primitives_pass)
     if not opt.no_symmetry:
         passes.append(symmetry_pass)
     return passes

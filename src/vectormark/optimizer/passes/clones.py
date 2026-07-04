@@ -154,9 +154,12 @@ def clones_pass(
     proposals: list[Proposal] = []
     for bucket in sorted(by_bucket):
         group = by_bucket[bucket]
+        queued_targets: set[int] = set()
         for index, (target_obj, target_flat, target_desc, target_fill_hex) in enumerate(group):
             matched = False
             for canonical_obj, canonical_flat, canonical_desc, _canonical_fill_hex in group[:index]:
+                if canonical_obj.id in queued_targets:
+                    continue
                 if _canonical_fill_hex != target_fill_hex:
                     continue
                 if not _within_ratio(canonical_desc[0], target_desc[0], _AREA_RATIO_TOL):
@@ -192,6 +195,7 @@ def clones_pass(
                         ],
                     )
                 )
+                queued_targets.add(int(target_obj.id))
                 matched = True
                 break
             if matched:

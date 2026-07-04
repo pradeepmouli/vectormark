@@ -30,9 +30,13 @@ def reflection_off_count(fg_xy, axis: Axis2D, dist: np.ndarray, *, tol_px: float
     rx = axis.cx + (2.0 * t * dx - vx)
     ry = axis.cy + (2.0 * t * dy - vy)
     h, w = dist.shape
-    ri = np.clip(np.rint(ry).astype(int), 0, h - 1)
-    ci = np.clip(np.rint(rx).astype(int), 0, w - 1)
-    return int((dist[ri, ci] > tol_px).sum())
+    ri = np.rint(ry).astype(int)
+    ci = np.rint(rx).astype(int)
+    in_bounds = (ri >= 0) & (ri < h) & (ci >= 0) & (ci < w)
+    off = int((~in_bounds).sum())
+    if in_bounds.any():
+        off += int((dist[ri[in_bounds], ci[in_bounds]] > tol_px).sum())
+    return off
 
 
 K_BAND = 0.3   # off-count / perimeter floor: off <= 30 % of the boundary length.

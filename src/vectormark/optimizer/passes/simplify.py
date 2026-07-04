@@ -101,10 +101,14 @@ def _normalized_subpath_d(tokens: list[tuple[str, list[float]]], *, epsilon: flo
     return " ".join(parts)
 
 
-def _path_subpaths(shape: Shape) -> list[tuple[list[tuple[str, list[float]]], list[tuple[float, float]], float]]:
+def _path_subpaths(
+    shape: Shape,
+    *,
+    samples: int = 24,
+) -> list[tuple[list[tuple[str, list[float]]], list[tuple[float, float]], float]]:
     subpaths = []
     for tokens in _parse_subpaths(str(shape.params.get("d", ""))):
-        points = _sample_subpath(tokens, samples=24)
+        points = _sample_subpath(tokens, samples=samples)
         if len(points) < 3:
             continue
         subpaths.append((tokens, points, _ring_area(points)))
@@ -343,7 +347,7 @@ def _simplified_path_shape(
     if not d:
         return None
 
-    subpaths = _path_subpaths(shape)
+    subpaths = _path_subpaths(shape, samples=samples)
     if not subpaths:
         return None
     parts = _candidate_parts(
@@ -397,6 +401,18 @@ def _covering_later_ids(
     return cover_ids
 
 
+def _referenced_source_ids(objects: list[VectorRegion]) -> set[int]:
+    referenced: set[int] = set()
+    for obj in objects:
+        if not obj.is_leaf or obj.current is None or obj.current.kind != "use":
+            continue
+        href_obj_id = obj.current.params.get("href_obj_id")
+        if href_obj_id is None:
+            continue
+        referenced.add(int(href_obj_id))
+    return referenced
+
+
 def simplify_pass(
     objects: list[VectorRegion],
     masks: dict[int, np.ndarray],
@@ -407,8 +423,11 @@ def simplify_pass(
     cubic: bool = False,
 ) -> list[Proposal]:
     proposals: list[Proposal] = []
+    referenced_source_ids = _referenced_source_ids(objects)
     for obj in sorted(objects, key=lambda current: int(current.id)):
         if not obj.is_leaf or obj.current is None:
+            continue
+        if int(obj.id) in referenced_source_ids:
             continue
         if isinstance(obj.footprint, MultiPolygon) or not _simplifiable_polygon(obj.footprint):
             continue
