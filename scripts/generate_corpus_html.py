@@ -302,7 +302,7 @@ def _idealize_optimizer_with_trace_cache(
         report = _optimizer_report(
             objects,
             options,
-            fallback_reason="optimized output is structurally larger than trace baseline",
+            fallback_reason="optimized output has more path segments than trace baseline",
         )
     if (working.shape[1], working.shape[0]) != (orig_w, orig_h):
         svg = _set_svg_output_size(svg, orig_w, orig_h)

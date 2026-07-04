@@ -812,13 +812,14 @@ def _svg_path_segment_count(svg: str) -> int:
 
 
 def _prefer_optimizer_svg(trace_svg: str, optimized_svg: str) -> bool:
-    """Use optimized output when path geometry is no more complex and bytes shrink."""
+    """Use optimized output when path geometry is simpler; bytes only break ties."""
     trace_path_segments = _svg_path_segment_count(trace_svg)
     optimized_path_segments = _svg_path_segment_count(optimized_svg)
-    return (
-        optimized_path_segments <= trace_path_segments
-        and len(optimized_svg.encode()) <= len(trace_svg.encode())
-    )
+    if optimized_path_segments < trace_path_segments:
+        return True
+    if optimized_path_segments > trace_path_segments:
+        return False
+    return len(optimized_svg.encode()) <= len(trace_svg.encode())
 
 
 def _optimizer_report(objects, opt: Options, *, fallback_reason: str | None = None) -> IdealizeReport:
@@ -897,7 +898,7 @@ def _idealize_optimizer(arr: np.ndarray, opt: Options, width: int, height: int) 
     return trace_svg, _optimizer_report(
         objects,
         opt,
-        fallback_reason="optimized output is structurally larger than trace baseline",
+        fallback_reason="optimized output has more path segments than trace baseline",
     )
 
 

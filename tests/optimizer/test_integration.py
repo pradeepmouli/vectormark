@@ -108,8 +108,13 @@ def test_optimizer_prefer_ignores_non_path_element_count_but_not_path_segments()
     many_primitives = '<svg><circle r="1"/><circle r="2"/><use href="#s0"/></svg>'
     simple_long_path = '<svg><path d="M1000.123 1000.456 L2000.789 2000.123 Z"/></svg>'
     more_path_segments = '<svg><path d="M0 0 L1 0 L2 0 L3 0 L4 0 Z"/></svg>'
+    fewer_path_segments_more_bytes = (
+        '<svg><path d="M1000.123 1000.456 L2000.789 2000.123 '
+        'L3000.456 3000.789 Z"/></svg>'
+    )
 
     assert _prefer_optimizer_svg(trace, many_primitives)
+    assert _prefer_optimizer_svg(trace, fewer_path_segments_more_bytes)
     assert not _prefer_optimizer_svg(simple_long_path, more_path_segments)
 
 
