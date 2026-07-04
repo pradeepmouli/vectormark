@@ -37,6 +37,13 @@ def _shape_bounds(obj: VectorRegion) -> tuple[float, float, float, float] | None
     return float(minx), float(miny), float(maxx), float(maxy)
 
 
+def _regions_close(a: VectorRegion, b: VectorRegion, *, tol: float) -> bool:
+    try:
+        return float(a.footprint.distance(b.footprint)) <= tol
+    except Exception:
+        return False
+
+
 def _overlap(a0: float, a1: float, b0: float, b1: float) -> tuple[float, float] | None:
     lo = max(a0, b0)
     hi = min(a1, b1)
@@ -50,10 +57,7 @@ def _candidate_for_pair(a: VectorRegion, b: VectorRegion, *, tol: float) -> _Sea
         return None
     if a.current.kind == "use" or b.current.kind == "use":
         return None
-    try:
-        if float(a.footprint.distance(b.footprint)) > tol:
-            return None
-    except Exception:
+    if not _regions_close(a, b, tol=tol):
         return None
 
     a_bounds = _shape_bounds(a)
@@ -352,19 +356,53 @@ def _replacement(
     )
 
 
-def _leaf_refs(objects: list[VectorRegion]) -> list[_LeafRef]:
-    refs: list[_LeafRef] = []
+def _leaf_pairs_between(
+    a_owner: VectorRegion,
+    a_region: VectorRegion,
+    b_owner: VectorRegion,
+    b_region: VectorRegion,
+    *,
+    tol: float,
+) -> list[tuple[_LeafRef, _LeafRef]]:
+    if not _regions_close(a_region, b_region, tol=tol):
+        return []
+    if a_region.is_leaf and b_region.is_leaf:
+        return [(_LeafRef(owner=a_owner, leaf=a_region), _LeafRef(owner=b_owner, leaf=b_region))]
 
-    def visit(owner: VectorRegion, current: VectorRegion) -> None:
-        if current.is_leaf:
-            refs.append(_LeafRef(owner=owner, leaf=current))
-            return
-        for child in current.children:
-            visit(owner, child)
+    pairs: list[tuple[_LeafRef, _LeafRef]] = []
+    if a_region.is_branch and b_region.is_branch:
+        for a_child in a_region.children:
+            for b_child in b_region.children:
+                pairs.extend(_leaf_pairs_between(a_owner, a_child, b_owner, b_child, tol=tol))
+        return pairs
 
-    for obj in sorted(objects, key=lambda current: (float(current.z), int(current.id))):
-        visit(obj, obj)
-    return refs
+    if a_region.is_branch:
+        for a_child in a_region.children:
+            pairs.extend(_leaf_pairs_between(a_owner, a_child, b_owner, b_region, tol=tol))
+        return pairs
+
+    for b_child in b_region.children:
+        pairs.extend(_leaf_pairs_between(a_owner, a_region, b_owner, b_child, tol=tol))
+    return pairs
+
+
+def _leaf_pairs_within(
+    owner: VectorRegion,
+    region: VectorRegion,
+    *,
+    tol: float,
+) -> list[tuple[_LeafRef, _LeafRef]]:
+    if region.is_leaf:
+        return []
+
+    pairs: list[tuple[_LeafRef, _LeafRef]] = []
+    children = list(region.children)
+    for index, a_child in enumerate(children):
+        for b_child in children[index + 1:]:
+            pairs.extend(_leaf_pairs_between(owner, a_child, owner, b_child, tol=tol))
+    for child in children:
+        pairs.extend(_leaf_pairs_within(owner, child, tol=tol))
+    return pairs
 
 
 def _replace_leaf(root: VectorRegion, leaf_id: int, replacement: VectorRegion) -> VectorRegion:
@@ -377,53 +415,84 @@ def _replace_leaf(root: VectorRegion, leaf_id: int, replacement: VectorRegion) -
     return root.with_children(children)
 
 
+def _replace_leaves(root: VectorRegion, replacements_by_leaf_id: dict[int, VectorRegion]) -> VectorRegion:
+    if root.is_leaf:
+        return replacements_by_leaf_id.get(int(root.id), root)
+    children = [
+        _replace_leaves(child, replacements_by_leaf_id)
+        for child in root.children
+    ]
+    return root.with_children(children)
+
+
+def _proposal_from_leaf_pair(a_ref: _LeafRef, b_ref: _LeafRef) -> Proposal | None:
+    a = a_ref.leaf
+    if a.current is None:
+        return None
+    b = b_ref.leaf
+    if b.current is None:
+        return None
+    candidate = _candidate_for_pair(a, b, tol=_SEAM_TOL)
+    if candidate is None:
+        return None
+    a_shape = _rewrite_shape_side(
+        a.current,
+        side=candidate.a_side,
+        candidate=candidate,
+        side_value=candidate.a_value,
+        tol=_SEAM_TOL,
+    )
+    b_shape = _rewrite_shape_side(
+        b.current,
+        side=candidate.b_side,
+        candidate=candidate,
+        side_value=candidate.b_value,
+        tol=_SEAM_TOL,
+    )
+    if a_shape is None or b_shape is None:
+        return None
+    a_shape, b_shape, vertices_changed = _true_up_path_vertices(a_shape, b_shape, tol=_SEAM_TOL)
+    selected = "vertex_midpoint" if vertices_changed or candidate.axis == "vertices" else "midpoint"
+    a_replacement = _replacement(a, a_shape, b.id, candidate, selected=selected)
+    b_replacement = _replacement(b, b_shape, a.id, candidate, selected=selected)
+
+    if int(a_ref.owner.id) == int(b_ref.owner.id):
+        owner = _replace_leaves(
+            a_ref.owner,
+            {
+                int(a.id): a_replacement,
+                int(b.id): b_replacement,
+            },
+        )
+        return Proposal((int(a_ref.owner.id),), [owner])
+
+    owner_replacements: dict[int, VectorRegion] = {
+        int(a_ref.owner.id): _replace_leaf(a_ref.owner, a.id, a_replacement),
+        int(b_ref.owner.id): _replace_leaf(b_ref.owner, b.id, b_replacement),
+    }
+    return Proposal(
+        tuple(sorted(owner_replacements)),
+        [owner_replacements[obj_id] for obj_id in sorted(owner_replacements)],
+    )
+
+
 def seams_pass(
     objects: list[VectorRegion],
     masks: dict[int, np.ndarray],
 ) -> list[Proposal]:
-    refs = _leaf_refs(objects)
+    owners = sorted(objects, key=lambda current: (float(current.z), int(current.id)))
     proposals: list[Proposal] = []
-    for index, a_ref in enumerate(refs):
-        a = a_ref.leaf
-        if a.current is None:
-            continue
-        for b_ref in refs[index + 1:]:
-            b = b_ref.leaf
-            if int(a_ref.owner.id) == int(b_ref.owner.id):
-                continue
-            if b.current is None:
-                continue
-            candidate = _candidate_for_pair(a, b, tol=_SEAM_TOL)
-            if candidate is None:
-                continue
-            a_shape = _rewrite_shape_side(
-                a.current,
-                side=candidate.a_side,
-                candidate=candidate,
-                side_value=candidate.a_value,
-                tol=_SEAM_TOL,
-            )
-            b_shape = _rewrite_shape_side(
-                b.current,
-                side=candidate.b_side,
-                candidate=candidate,
-                side_value=candidate.b_value,
-                tol=_SEAM_TOL,
-            )
-            if a_shape is None or b_shape is None:
-                continue
-            a_shape, b_shape, vertices_changed = _true_up_path_vertices(a_shape, b_shape, tol=_SEAM_TOL)
-            selected = "vertex_midpoint" if vertices_changed or candidate.axis == "vertices" else "midpoint"
-            a_replacement = _replacement(a, a_shape, b.id, candidate, selected=selected)
-            b_replacement = _replacement(b, b_shape, a.id, candidate, selected=selected)
-            owner_replacements: dict[int, VectorRegion] = {
-                int(a_ref.owner.id): _replace_leaf(a_ref.owner, a.id, a_replacement),
-                int(b_ref.owner.id): _replace_leaf(b_ref.owner, b.id, b_replacement),
-            }
-            proposals.append(
-                Proposal(
-                    tuple(sorted(owner_replacements)),
-                    [owner_replacements[obj_id] for obj_id in sorted(owner_replacements)],
-                )
-            )
+    for owner in owners:
+        for a_ref, b_ref in _leaf_pairs_within(owner, owner, tol=_SEAM_TOL):
+            proposal = _proposal_from_leaf_pair(a_ref, b_ref)
+            if proposal is not None:
+                proposals.append(proposal)
+
+    for owner_index, a_owner in enumerate(owners):
+        for b_owner in owners[owner_index + 1:]:
+            leaf_pairs = _leaf_pairs_between(a_owner, a_owner, b_owner, b_owner, tol=_SEAM_TOL)
+            for a_ref, b_ref in leaf_pairs:
+                proposal = _proposal_from_leaf_pair(a_ref, b_ref)
+                if proposal is not None:
+                    proposals.append(proposal)
     return proposals

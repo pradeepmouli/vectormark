@@ -5,6 +5,7 @@ from vectormark.fit import Shape
 from vectormark.optimizer.framework import optimize
 from vectormark.optimizer.gate import rasterize
 from vectormark.optimizer.passes.seams import seams_pass
+import vectormark.optimizer.passes.seams as seams_module
 from vectormark.optimizer.vector_region import VectorRegion, to_polygon
 from vectormark.pipeline import Options, _optimizer_passes
 
@@ -111,6 +112,83 @@ def test_seams_pass_snaps_branch_child_against_sibling_region():
     child = by_id[10].children[0]
     assert "L49.8 10 L49.8 70" in child.current.params["d"]
     assert by_id[2].current.params["d"].startswith("M49.8 10")
+
+
+def test_seams_pass_checks_composite_adjacency_before_descending(monkeypatch):
+    left_near = VectorRegion(
+        1,
+        Shape("path", {"d": "M10 10 L49.2 10 L49.2 70 L10 70 Z"}),
+        FlatFill("#111111"),
+        0,
+    )
+    left_far = VectorRegion(
+        3,
+        Shape("path", {"d": "M10 100 L30 100 L30 120 L10 120 Z"}),
+        FlatFill("#333333"),
+        0.1,
+    )
+    right_near = VectorRegion(
+        2,
+        Shape("path", {"d": "M50.4 10 L90 10 L90 70 L50.4 70 Z"}),
+        FlatFill("#222222"),
+        1,
+    )
+    right_far = VectorRegion(
+        4,
+        Shape("path", {"d": "M100 100 L120 100 L120 120 L100 120 Z"}),
+        FlatFill("#444444"),
+        1.1,
+    )
+    left_branch = VectorRegion.branch(id=10, children=[left_near, left_far], z=0)
+    right_branch = VectorRegion.branch(id=20, children=[right_near, right_far], z=1)
+    checked_pairs: list[tuple[int, int]] = []
+    original_regions_close = seams_module._regions_close
+
+    def _recording_regions_close(a, b, *, tol):
+        checked_pairs.append((int(a.id), int(b.id)))
+        return original_regions_close(a, b, tol=tol)
+
+    monkeypatch.setattr(seams_module, "_regions_close", _recording_regions_close)
+
+    seams_pass(
+        [left_branch, right_branch],
+        {
+            10: rasterize(left_branch.footprint, (140, 140)),
+            20: rasterize(right_branch.footprint, (140, 140)),
+        },
+    )
+
+    assert checked_pairs.index((10, 20)) < checked_pairs.index((1, 2))
+    assert (1, 2) in checked_pairs
+
+
+def test_seams_pass_recursively_snaps_adjacent_children_within_composite_region():
+    left = VectorRegion(
+        1,
+        Shape("path", {"d": "M10 10 L49.2 10 L49.2 70 L10 70 Z"}),
+        FlatFill("#111111"),
+        0,
+    )
+    right = VectorRegion(
+        2,
+        Shape("path", {"d": "M50.4 10 L90 10 L90 70 L50.4 70 Z"}),
+        FlatFill("#222222"),
+        1,
+    )
+    branch = VectorRegion.branch(id=10, children=[left, right], z=0)
+    left_trace = Shape("path", {"d": "M10 10 L49.8 10 L49.8 70 L10 70 Z"})
+    right_trace = Shape("path", {"d": "M49.8 10 L90 10 L90 70 L49.8 70 Z"})
+
+    out = optimize(
+        [branch],
+        {10: _mask(left_trace) | _mask(right_trace)},
+        [seams_pass],
+    )
+
+    out_branch = out[0]
+    by_child_id = {child.id: child for child in out_branch.children}
+    assert "L49.8 10 L49.8 70" in by_child_id[1].current.params["d"]
+    assert by_child_id[2].current.params["d"].startswith("M49.8 10")
 
 
 def test_optimizer_runs_seams_after_symmetry_before_render_inlining():
