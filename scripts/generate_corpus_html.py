@@ -8,8 +8,10 @@ from __future__ import annotations
 
 import argparse
 import dataclasses
+import hashlib
 import html
 import json
+import pickle
 import sys
 import urllib.parse
 import urllib.request
@@ -207,9 +209,9 @@ def corpus_entries(corpus: Path) -> list[CorpusEntry]:
     return entries
 
 
-def _diagnostics_json(report: Any) -> str:
+def _diagnostics_payload(report: Any) -> dict[str, Any]:
     diagnostics = report.diagnostics.to_dict() if report.diagnostics is not None else None
-    payload = {
+    return {
         "strategies": dict(report.strategies),
         "gradients": report.gradients,
         "elements": report.elements,
@@ -217,11 +219,94 @@ def _diagnostics_json(report: Any) -> str:
         "symmetry": report.symmetry,
         "diagnostics": diagnostics,
     }
+
+
+def _diagnostics_json(report: Any) -> str:
+    payload = _diagnostics_payload(report)
     return json.dumps(payload, indent=2, sort_keys=True)
 
 
 def _options_json(options: Options) -> str:
     return json.dumps(dataclasses.asdict(options), indent=2, sort_keys=True, default=repr)
+
+
+def _trace_cache_key(entry: CorpusEntry, image: np.ndarray, options: Options) -> str:
+    arr = np.ascontiguousarray(image, dtype=np.uint8)
+    payload = {
+        "version": 1,
+        "entry": entry.name,
+        "shape": arr.shape,
+        "dtype": str(arr.dtype),
+        "options": dataclasses.asdict(options),
+    }
+    digest = hashlib.sha256()
+    digest.update(json.dumps(payload, sort_keys=True, default=repr).encode("utf-8"))
+    digest.update(arr.tobytes())
+    return digest.hexdigest()[:20]
+
+
+def _trace_cache_path(cache_dir: Path, entry: CorpusEntry, image: np.ndarray, options: Options) -> Path:
+    safe_name = entry.name.replace("/", "_")
+    return cache_dir / f"trace-{safe_name}-{_trace_cache_key(entry, image, options)}.pkl"
+
+
+def _load_or_create_trace(cache_path: Path, image: np.ndarray, options: Options):
+    from vectormark.optimizer.trace import trace_regions
+
+    if cache_path.exists():
+        payload = pickle.loads(cache_path.read_bytes())
+        if payload.get("version") == 1:
+            return payload["objects"], payload["masks"]
+
+    objects, masks = trace_regions(image, options)
+    cache_path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = cache_path.with_suffix(cache_path.suffix + ".tmp")
+    tmp.write_bytes(pickle.dumps({"version": 1, "objects": objects, "masks": masks}))
+    tmp.replace(cache_path)
+    return objects, masks
+
+
+def _idealize_optimizer_with_trace_cache(
+    image: np.ndarray,
+    *,
+    options: Options,
+    entry: CorpusEntry,
+    cache_dir: Path,
+):
+    from vectormark.emit import render_svg_doc
+    from vectormark.optimizer.framework import optimize
+    from vectormark.pipeline import (
+        _condition_input,
+        _optimizer_passes,
+        _optimizer_report,
+        _prefer_optimizer_svg,
+        _render_optimizer_body,
+        _set_svg_output_size,
+    )
+
+    orig_h, orig_w = image.shape[:2]
+    working = _condition_input(np.asarray(image, dtype=np.uint8), options.working_max_dim)
+    h0, w0 = working.shape[:2]
+    cache_path = _trace_cache_path(cache_dir, entry, working, options)
+    objects, masks = _load_or_create_trace(cache_path, working, options)
+    optimized = optimize(objects, masks, _optimizer_passes(options))
+    trace_body, trace_defs = _render_optimizer_body(objects, flatten=options.flatten)
+    trace_svg = render_svg_doc(w0, h0, trace_body, trace_defs)
+    optimized_body, optimized_defs = _render_optimizer_body(optimized, flatten=options.flatten)
+    optimized_svg = render_svg_doc(w0, h0, optimized_body, optimized_defs)
+    if _prefer_optimizer_svg(trace_svg, optimized_svg):
+        svg = optimized_svg
+        report = _optimizer_report(optimized, options)
+    else:
+        svg = trace_svg
+        report = _optimizer_report(
+            objects,
+            options,
+            fallback_reason="optimized output is structurally larger than trace baseline",
+        )
+    if (working.shape[1], working.shape[0]) != (orig_w, orig_h):
+        svg = _set_svg_output_size(svg, orig_w, orig_h)
+    return svg, report
 
 
 def _safe_filename(entry: CorpusEntry) -> str:
@@ -238,6 +323,10 @@ def _entry_id(entry: CorpusEntry) -> str:
 
 def _diagnostics_filename(entry: CorpusEntry) -> str:
     return f"{_entry_id(entry)}.json"
+
+
+def _diagnostics_summary_filename(entry: CorpusEntry) -> str:
+    return f"{_entry_id(entry)}.html"
 
 
 def _options_filename(entry: CorpusEntry) -> str:
@@ -283,6 +372,112 @@ def _manifest_payload(entries: list[CorpusEntry]) -> dict[str, Any]:
     }
 
 
+def _fmt_scalar(value: Any) -> str:
+    if isinstance(value, float):
+        return f"{value:.3f}".rstrip("0").rstrip(".")
+    if isinstance(value, (list, tuple)):
+        return ", ".join(_fmt_scalar(item) for item in value)
+    if value is None:
+        return ""
+    return str(value)
+
+
+def _summary_table(headers: list[str], rows: list[list[Any]]) -> str:
+    if not rows:
+        return "<p class=\"empty\">none</p>"
+    head = "".join(f"<th>{html.escape(header)}</th>" for header in headers)
+    body = []
+    for row in rows:
+        body.append(
+            "<tr>"
+            + "".join(f"<td>{html.escape(_fmt_scalar(value))}</td>" for value in row)
+            + "</tr>"
+        )
+    return f"<table><thead><tr>{head}</tr></thead><tbody>{''.join(body)}</tbody></table>"
+
+
+def _diagnostics_summary_html(report: Any) -> str:
+    payload = _diagnostics_payload(report)
+    diagnostics = payload.get("diagnostics") or {}
+    stats = diagnostics.get("stats") or {}
+    optimizer_regions = diagnostics.get("optimizer_regions") or []
+    optimizer_objects = diagnostics.get("optimizer_objects") or []
+    legacy_regions = diagnostics.get("regions") or []
+
+    stat_rows = [[key, value] for key, value in sorted(stats.items())]
+    strategy_rows = [[key, value] for key, value in sorted((payload.get("strategies") or {}).items())]
+    region_rows = [
+        [
+            region.get("id"),
+            region.get("z"),
+            region.get("kind"),
+            region.get("children"),
+            json.dumps(region.get("diagnostics") or {}, sort_keys=True),
+        ]
+        for region in optimizer_regions
+    ]
+    object_rows = [
+        [
+            obj.get("id"),
+            obj.get("z"),
+            obj.get("shape"),
+            obj.get("fill"),
+            obj.get("bounds"),
+            obj.get("area"),
+        ]
+        for obj in optimizer_objects
+    ]
+    legacy_region_rows = [
+        [
+            region.get("id"),
+            region.get("area"),
+            region.get("color_hex"),
+            (region.get("strategies") or {}).get("geom"),
+            region.get("symmetry"),
+        ]
+        for region in legacy_regions
+    ]
+
+    return f"""<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <style>
+    body {{
+      margin: 0;
+      color: #161616;
+      font: 12px/1.45 system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    }}
+    h3 {{ margin: 12px 0 6px; font-size: 13px; }}
+    h3:first-child {{ margin-top: 0; }}
+    table {{ width: 100%; border-collapse: collapse; }}
+    th, td {{
+      padding: 4px 6px;
+      border: 1px solid #e2e2dc;
+      text-align: left;
+      vertical-align: top;
+    }}
+    th {{ background: #f2f2ee; font-weight: 600; }}
+    td {{ overflow-wrap: anywhere; }}
+    .empty {{ margin: 0; color: #666; }}
+  </style>
+</head>
+<body>
+  <h3>Stats</h3>
+  {_summary_table(["metric", "value"], stat_rows)}
+  <h3>Strategies</h3>
+  {_summary_table(["strategy", "count"], strategy_rows)}
+  <h3>Optimizer Regions</h3>
+  {_summary_table(["id", "z", "kind", "children", "diagnostics"], region_rows)}
+  <h3>Optimizer Objects</h3>
+  {_summary_table(["id", "z", "shape", "fill", "bounds", "area"], object_rows)}
+  <h3>Trace Regions</h3>
+  {_summary_table(["id", "area", "color", "shape", "symmetry"], legacy_region_rows)}
+</body>
+</html>
+"""
+
+
 def _matches_filter(entry: CorpusEntry, selectors: set[str]) -> bool:
     if not selectors:
         return True
@@ -315,12 +510,14 @@ def _entry_card(entry: CorpusEntry) -> str:
     input_name = _input_filename(entry)
     raw_name = _raw_svg_filename(entry)
     diagnostics_name = _diagnostics_filename(entry)
+    diagnostics_summary_name = _diagnostics_summary_filename(entry)
     options_name = _options_filename(entry)
 
     rel_svg = Path("svg") / svg_name
     rel_input = Path("rendered-input") / input_name
     rel_raw = Path("raw") / raw_name
     rel_diagnostics = Path("diagnostics") / diagnostics_name
+    rel_diagnostics_summary = Path("diagnostic-summary") / diagnostics_summary_name
     rel_options = Path("options") / options_name
     return f"""
     <article class="entry" id="{html.escape(_entry_id(entry))}">
@@ -344,6 +541,7 @@ def _entry_card(entry: CorpusEntry) -> str:
       </details>
       <details>
         <summary>Diagnostics</summary>
+        <iframe class="summary-frame" src="{html.escape(str(rel_diagnostics_summary))}" title="{html.escape(entry.name)} diagnostics summary"></iframe>
         <iframe class="code-frame" src="{html.escape(str(rel_diagnostics))}" title="{html.escape(entry.name)} diagnostics"></iframe>
       </details>
       <details>
@@ -367,12 +565,16 @@ def generate_corpus_html(
     input_dir = output / "rendered-input"
     raw_dir = output / "raw"
     diagnostics_dir = output / "diagnostics"
+    diagnostics_summary_dir = output / "diagnostic-summary"
     options_dir = output / "options"
+    trace_cache_dir = output / "cache"
     svg_dir.mkdir(parents=True, exist_ok=True)
     input_dir.mkdir(parents=True, exist_ok=True)
     raw_dir.mkdir(parents=True, exist_ok=True)
     diagnostics_dir.mkdir(parents=True, exist_ok=True)
+    diagnostics_summary_dir.mkdir(parents=True, exist_ok=True)
     options_dir.mkdir(parents=True, exist_ok=True)
+    trace_cache_dir.mkdir(parents=True, exist_ok=True)
 
     all_entries = _sorted_entries(entries or default_entries())
     _write_index_if_needed(output, all_entries, force=rebuild_index)
@@ -386,12 +588,21 @@ def generate_corpus_html(
 
         options = _gallery_options(entry.options, working_max_dim, cubic_paths=cubic_paths)
         print(f"rendering {entry.mode}/{entry.name}", file=sys.stderr)
-        svg, report = idealize(image, options=options, report=True)
+        if options.optimizer:
+            svg, report = _idealize_optimizer_with_trace_cache(
+                image,
+                options=options,
+                entry=entry,
+                cache_dir=trace_cache_dir,
+            )
+        else:
+            svg, report = idealize(image, options=options, report=True)
         svg_name = _safe_filename(entry)
         svg_path = svg_dir / svg_name
         svg_path.write_text(svg)
         (raw_dir / _raw_svg_filename(entry)).write_text(svg)
         (diagnostics_dir / _diagnostics_filename(entry)).write_text(_diagnostics_json(report))
+        (diagnostics_summary_dir / _diagnostics_summary_filename(entry)).write_text(_diagnostics_summary_html(report))
         (options_dir / _options_filename(entry)).write_text(_options_json(options))
     return output / "index.html"
 
@@ -455,7 +666,8 @@ def _html_document(cards: list[str]) -> str:
     details {{ margin-top: 10px; }}
     summary {{ cursor: pointer; font-weight: 600; }}
     pre,
-    .code-frame {{
+    .code-frame,
+    .summary-frame {{
       max-height: 360px;
       overflow: auto;
       padding: 10px;
@@ -466,12 +678,18 @@ def _html_document(cards: list[str]) -> str:
       white-space: pre-wrap;
       overflow-wrap: anywhere;
     }}
-    .code-frame {{
+    .code-frame,
+    .summary-frame {{
       display: block;
       box-sizing: border-box;
       width: 100%;
       height: 360px;
       white-space: normal;
+    }}
+    .summary-frame {{
+      height: 260px;
+      margin-bottom: 8px;
+      background: white;
     }}
   </style>
 </head>

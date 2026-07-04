@@ -69,7 +69,7 @@ def optimizer_objects_to_svg(objects, fills: dict[int, str] | None = None) -> li
     from .optimizer.vector_region import leaves
 
     objects = leaves(objects)
-    ordered = sorted(objects, key=lambda obj: (int(obj.id), int(obj.z)))
+    ordered = sorted(objects, key=lambda obj: (float(obj.z), int(obj.id)))
     id_map = {int(obj.id): f"s{idx}" for idx, obj in enumerate(ordered)}
     body: list[str] = []
     for obj in ordered:

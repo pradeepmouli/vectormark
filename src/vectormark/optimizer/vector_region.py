@@ -206,7 +206,7 @@ class VectorRegion:
     raster: np.ndarray = field(compare=False)
     footprint: Polygon | MultiPolygon | object = field(compare=False)
     fill: Fill | None
-    z: int
+    z: float
     original: Shape | None
     current: Shape | None
     children: tuple["VectorRegion", ...]
@@ -220,7 +220,7 @@ class VectorRegion:
         id: int,
         current: Shape | None,
         fill: Fill | None,
-        z: int = 0,
+        z: float = 0,
         footprint: Polygon | MultiPolygon | object | None = None,
         *,
         raster: np.ndarray | None = None,
@@ -248,7 +248,7 @@ class VectorRegion:
         object.__setattr__(self, "raster", np.asarray(raster, dtype=bool).copy())
         object.__setattr__(self, "footprint", footprint)
         object.__setattr__(self, "fill", fill)
-        object.__setattr__(self, "z", int(z))
+        object.__setattr__(self, "z", float(z))
         object.__setattr__(self, "original", original)
         object.__setattr__(self, "current", current)
         object.__setattr__(self, "children", child_tuple)
@@ -264,7 +264,7 @@ class VectorRegion:
         id: int,
         shape: Shape,
         fill: Fill,
-        z: int,
+        z: float,
         raster: np.ndarray | None = None,
         footprint: Polygon | MultiPolygon | object | None = None,
         source_label: int | None = None,
@@ -292,7 +292,7 @@ class VectorRegion:
         *,
         id: int,
         children: Sequence["VectorRegion"],
-        z: int = 0,
+        z: float = 0,
         raster: np.ndarray | None = None,
         footprint: Polygon | MultiPolygon | object | None = None,
         fill: Fill | None = None,
@@ -338,7 +338,7 @@ class VectorRegion:
         footprint: Polygon | MultiPolygon | object | None = None,
         raster: np.ndarray | None = None,
         fill: Fill | None = None,
-        z: int | None = None,
+        z: float | None = None,
         diagnostics: Mapping[str, Any] | None = None,
     ) -> "VectorRegion":
         if not self.is_leaf:

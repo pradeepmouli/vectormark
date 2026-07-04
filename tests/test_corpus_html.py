@@ -3,7 +3,11 @@ from PIL import Image
 
 import scripts.generate_corpus_html as corpus_html
 from scripts.generate_corpus_html import CorpusEntry, generate_corpus_html
+from vectormark.candidate import FlatFill
+from vectormark.fit import Shape
 from vectormark import Options
+from vectormark.optimizer import trace as trace_module
+from vectormark.optimizer.vector_region import VectorRegion, to_polygon
 
 
 def _tiny_disk():
@@ -31,6 +35,7 @@ def test_generate_corpus_html_writes_render_svg_and_diagnostics(tmp_path):
     png = index.parent / "rendered-input" / "optimizer-tiny_disk.png"
     raw = index.parent / "raw" / "optimizer-tiny_disk.svg.txt"
     diagnostics = index.parent / "diagnostics" / "optimizer-tiny_disk.json"
+    diagnostics_summary = index.parent / "diagnostic-summary" / "optimizer-tiny_disk.html"
     options = index.parent / "options" / "optimizer-tiny_disk.json"
 
     assert "optimizer / tiny_disk" in html
@@ -39,12 +44,15 @@ def test_generate_corpus_html_writes_render_svg_and_diagnostics(tmp_path):
     assert "<summary>SVG</summary>" in html
     assert "<summary>Diagnostics</summary>" in html
     assert 'src="raw/optimizer-tiny_disk.svg.txt"' in html
+    assert 'src="diagnostic-summary/optimizer-tiny_disk.html"' in html
     assert 'src="diagnostics/optimizer-tiny_disk.json"' in html
     assert 'src="options/optimizer-tiny_disk.json"' in html
     assert png.exists()
     assert svg.startswith("<svg ")
     assert raw.read_text() == svg
     assert '"elements"' in diagnostics.read_text()
+    assert "Optimizer Objects" in diagnostics_summary.read_text()
+    assert "<td>circle</td>" in diagnostics_summary.read_text()
     assert '"optimizer": true' in options.read_text()
 
 
@@ -58,6 +66,34 @@ def test_generate_corpus_html_can_opt_into_cubic_paths(tmp_path):
     options = index.parent / "options" / "optimizer-tiny_disk.json"
 
     assert '"cubic_paths": true' in options.read_text()
+
+
+def test_generate_corpus_html_reuses_optimizer_trace_cache(tmp_path, monkeypatch):
+    trace_calls = 0
+
+    def _fake_trace_regions(arr, opt):
+        nonlocal trace_calls
+        trace_calls += 1
+        shape = Shape("circle", {"cx": 24.0, "cy": 24.0, "r": 12.0})
+        region = VectorRegion(
+            0,
+            shape,
+            FlatFill("#c81e1e"),
+            0,
+            footprint=to_polygon(shape),
+            raster=np.any(arr != 255, axis=2),
+        )
+        return [region], {0: region.raster}
+
+    monkeypatch.setattr(trace_module, "trace_regions", _fake_trace_regions)
+    output = tmp_path / "corpus"
+    entries = [CorpusEntry("tiny_disk", "optimizer", _tiny_disk, Options(optimizer=True))]
+
+    generate_corpus_html(output, entries)
+    generate_corpus_html(output, entries, only=["tiny_disk"])
+
+    assert trace_calls == 1
+    assert any((output / "cache").glob("trace-tiny_disk-*.pkl"))
 
 
 def test_corpus_image_factory_composites_alpha_on_white(tmp_path):

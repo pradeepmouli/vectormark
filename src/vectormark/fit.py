@@ -118,12 +118,39 @@ def _fmt(v: float) -> str:
     return f"{v:.2f}".rstrip("0").rstrip(".")
 
 
+def _append_quadratic_run(d: str, seg: np.ndarray, max_error: float) -> str:
+    for b in fit_quadratic_beziers(seg, max_error):
+        d += f"Q{_fmt(b[1][0])} {_fmt(b[1][1])} {_fmt(b[2][0])} {_fmt(b[2][1])} "
+    return d
+
+
+def _append_cubic_run(d: str, seg: np.ndarray, max_error: float) -> str:
+    run = rdp(seg, PATH_DENOISE_EPS) if len(seg) > 2 else seg
+    for b in fit_cubic_beziers(run, max_error):
+        d += (
+            f"C{_fmt(b[1][0])} {_fmt(b[1][1])} {_fmt(b[2][0])} {_fmt(b[2][1])} "
+            f"{_fmt(b[3][0])} {_fmt(b[3][1])} "
+        )
+    return d
+
+
+def _curved_run_d(seg: np.ndarray, max_error: float, *, cubic: bool) -> str:
+    quadratic = _append_quadratic_run("", seg, max_error)
+    if not cubic:
+        return quadratic
+    cubic_d = _append_cubic_run("", seg, max_error)
+    if len(cubic_d.encode()) < len(quadratic.encode()):
+        return cubic_d
+    return quadratic
+
+
 def fit_path(contour: np.ndarray, *, epsilon: float, max_error: float, cubic: bool = False) -> Shape:
     """Corner-split the contour; emit lines for straight runs, Béziers otherwise.
 
     ``cubic=False`` (default) fits each curved run with inflection-free
-    quadratics — robust against the quantization staircase. ``cubic=True``
-    fits denoised cubics instead (for complex contours); see PATH_DENOISE_EPS.
+    quadratics — robust against the quantization staircase. ``cubic=True`` still
+    tries quadratics first and only keeps denoised, inflection-guarded cubics
+    when they produce shorter path data; see PATH_DENOISE_EPS.
     """
     pts = np.asarray(contour, dtype=float)
     closed = np.allclose(pts[0], pts[-1])
@@ -145,15 +172,7 @@ def fit_path(contour: np.ndarray, *, epsilon: float, max_error: float, cubic: bo
             continue
         if _segment_is_straight(seg, epsilon):
             d += f"L{_fmt(seg[-1][0])} {_fmt(seg[-1][1])} "
-        elif cubic:
-            run = rdp(seg, PATH_DENOISE_EPS) if len(seg) > 2 else seg
-            for b in fit_cubic_beziers(run, max_error):
-                d += (
-                    f"C{_fmt(b[1][0])} {_fmt(b[1][1])} {_fmt(b[2][0])} {_fmt(b[2][1])} "
-                    f"{_fmt(b[3][0])} {_fmt(b[3][1])} "
-                )
         else:
-            for b in fit_quadratic_beziers(seg, max_error):
-                d += f"Q{_fmt(b[1][0])} {_fmt(b[1][1])} {_fmt(b[2][0])} {_fmt(b[2][1])} "
+            d += _curved_run_d(seg, max_error, cubic=cubic)
     d += "Z"
     return Shape("path", {"d": d})

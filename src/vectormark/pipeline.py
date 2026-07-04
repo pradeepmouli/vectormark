@@ -704,14 +704,40 @@ def _idealize_rectified(arr: np.ndarray, opt: Options, rho: float, w0: int, h0: 
 
 def _render_optimizer_body(objects, *, flatten: bool = False) -> tuple[list[str], list[str]]:
     """Serialize optimized objects, resolving object-id based <use> references."""
-    from .optimizer.vector_region import leaves
+    from .optimizer.vector_region import VectorRegion
 
     defs: list[str] = []
-    objects = leaves(objects)
-    ordered = sorted(objects, key=lambda obj: (int(obj.z), int(obj.id)))
-    id_map = {int(obj.id): f"s{idx}" for idx, obj in enumerate(ordered)}
-    object_by_id = {int(obj.id): obj for obj in ordered}
+    fill_cache: dict[str, str] = {}
     body: list[str] = []
+
+    def _child_label(parent_label: str, child: VectorRegion) -> str:
+        return f"{parent_label}-{int(child.id)}"
+
+    def _render_items(regions: list[VectorRegion]):
+        items = []
+
+        def visit(region: VectorRegion, label: str, scope_ids: dict[int, str], scope_objects: dict[int, VectorRegion]) -> None:
+            if region.is_leaf:
+                items.append((region, label, scope_ids, scope_objects))
+                return
+            children = sorted(region.children, key=lambda child: (float(child.z), int(child.id)))
+            child_scope_ids = {int(child.id): _child_label(label, child) for child in children}
+            child_scope_objects = {int(child.id): child for child in children}
+            for child in children:
+                visit(child, child_scope_ids[int(child.id)], child_scope_ids, child_scope_objects)
+
+        top = sorted(regions, key=lambda obj: (float(obj.z), int(obj.id)))
+        top_scope_ids = {int(obj.id): f"s{int(obj.id)}" for obj in top}
+        top_scope_objects = {int(obj.id): obj for obj in top}
+        for obj in top:
+            visit(obj, top_scope_ids[int(obj.id)], top_scope_ids, top_scope_objects)
+        return sorted(items, key=lambda item: (float(item[0].z), item[1]))
+
+    def _resolved_fill(fill_obj: Fill) -> str:
+        key = repr(fill_obj)
+        if key not in fill_cache:
+            fill_cache[key] = resolve_fill(fill_obj, defs)
+        return fill_cache[key]
 
     def _inlined_use_shape(source_shape: Shape, transform) -> Shape:
         params = {
@@ -723,56 +749,74 @@ def _render_optimizer_body(objects, *, flatten: bool = False) -> tuple[list[str]
             params["fill_rule"] = rule
         return Shape("use", params)
 
-    for obj in ordered:
+    for obj, elem_id, scope_ids, scope_objects in _render_items(list(objects)):
         assert obj.current is not None
         assert obj.fill is not None
-        fill = resolve_fill(obj.fill, defs)
-        shape = resolve_use_shape(obj.current, id_map)
+        fill = _resolved_fill(obj.fill)
+        shape = resolve_use_shape(obj.current, scope_ids)
         if flatten:
             if shape.kind == "use":
-                source = object_by_id[int(obj.current.params["href_obj_id"])]
+                source = scope_objects[int(obj.current.params["href_obj_id"])]
                 shape = _inlined_use_shape(source.current, shape.params["transform"])
                 fill = str(obj.current.params.get("fill", fill))
             body.append(path_svg(shape_to_path_d(shape), fill, fill_rule_for(shape)))
             continue
 
         if shape.kind == "use":
-            source = object_by_id[int(obj.current.params["href_obj_id"])]
-            source_fill = resolve_fill(source.fill, defs)
+            source = scope_objects[int(obj.current.params["href_obj_id"])]
+            assert source.fill is not None
             use_fill = str(obj.current.params.get("fill", fill))
-            if use_fill != source_fill:
-                shape = _inlined_use_shape(source.current, shape.params["transform"])
-                body.append(path_svg(shape_to_path_d(shape), use_fill, fill_rule_for(shape)))
-                continue
+            shape = _inlined_use_shape(source.current, shape.params["transform"])
+            body.append(path_svg(shape_to_path_d(shape), use_fill, fill_rule_for(shape)))
+            continue
 
-        body.append(shape_to_svg(shape, fill, id_map[int(obj.id)]))
+        body.append(shape_to_svg(shape, fill, elem_id))
     return body, defs
 
 
 def _optimizer_passes(opt: Options):
     """Pass order for the experimental geometry optimizer."""
-    from .optimizer.passes import clones_pass, occlusion_pass, primitives_pass, simplify_pass, symmetry_pass
+    from .optimizer.passes import clones_pass, occlusion_pass, primitives_pass, simplify_pass, split_compound_pass, symmetry_pass
 
     passes = [primitives_pass, occlusion_pass, clones_pass]
+
+    def _configured_simplify_pass(objects, masks):
+        return simplify_pass(
+            objects,
+            masks,
+            epsilon=opt.epsilon,
+            max_error=opt.max_error,
+            cubic=opt.cubic_paths,
+        )
+
+    _configured_simplify_pass.__name__ = "simplify_pass"
+    passes.append(_configured_simplify_pass)
+    passes.append(split_compound_pass)
+    passes.append(primitives_pass)
     if not opt.no_symmetry:
         passes.append(symmetry_pass)
-    passes.append(simplify_pass)
     return passes
 
 
 _SVG_ELEMENT_RE = re.compile(r"<(path|circle|ellipse|rect|polygon|use)\b")
+_SVG_PATH_D_RE = re.compile(r"<path\b[^>]*\bd=\"([^\"]*)\"")
+_SVG_PATH_COMMAND_RE = re.compile(r"[MLQCAZ]")
 
 
 def _svg_element_count(svg: str) -> int:
     return len(_SVG_ELEMENT_RE.findall(svg))
 
 
+def _svg_path_segment_count(svg: str) -> int:
+    return sum(len(_SVG_PATH_COMMAND_RE.findall(d)) for d in _SVG_PATH_D_RE.findall(svg))
+
+
 def _prefer_optimizer_svg(trace_svg: str, optimized_svg: str) -> bool:
-    """Use optimized output only when it is not structurally larger."""
-    trace_elements = _svg_element_count(trace_svg)
-    optimized_elements = _svg_element_count(optimized_svg)
+    """Use optimized output when path geometry is no more complex and bytes shrink."""
+    trace_path_segments = _svg_path_segment_count(trace_svg)
+    optimized_path_segments = _svg_path_segment_count(optimized_svg)
     return (
-        optimized_elements <= trace_elements
+        optimized_path_segments <= trace_path_segments
         and len(optimized_svg.encode()) <= len(trace_svg.encode())
     )
 
@@ -785,15 +829,15 @@ def _optimizer_report(objects, opt: Options, *, fallback_reason: str | None = No
     region_diags = []
     object_diags = []
     flat_objects = leaves(objects)
-    for region in sorted(objects, key=lambda item: (int(item.z), int(item.id))):
+    for region in sorted(objects, key=lambda item: (float(item.z), int(item.id))):
         region_diags.append({
             "id": int(region.id),
-            "z": int(region.z),
+            "z": float(region.z),
             "kind": "leaf" if region.is_leaf else "branch",
             "children": len(region.children),
             "diagnostics": _to_json_safe(dict(region.diagnostics)),
         })
-    for obj in sorted(flat_objects, key=lambda item: (int(item.id), int(item.z))):
+    for obj in sorted(flat_objects, key=lambda item: (float(item.z), int(item.id))):
         assert obj.current is not None
         strategy = f"optimizer_{obj.current.kind}"
         strategies[strategy] = strategies.get(strategy, 0) + 1
@@ -802,7 +846,7 @@ def _optimizer_report(objects, opt: Options, *, fallback_reason: str | None = No
         bounds = tuple(float(v) for v in getattr(obj.footprint, "bounds", (0.0, 0.0, 0.0, 0.0)))
         object_diags.append({
             "id": int(obj.id),
-            "z": int(obj.z),
+            "z": float(obj.z),
             "shape": obj.current.kind,
             "fill": _fill_kind(obj.fill) if obj.fill is not None else "none",
             "bounds": bounds,

@@ -25,8 +25,8 @@ def _proposal_key(proposal: Proposal) -> tuple[int, ...]:
     return tuple(sorted(int(obj_id) for obj_id in proposal.obj_ids))
 
 
-def _object_key(obj: VectorRegion) -> tuple[int, int]:
-    return (int(obj.id), int(obj.z))
+def _object_key(obj: VectorRegion) -> tuple[float, int]:
+    return (float(obj.z), int(obj.id))
 
 
 def _shape_key(obj: VectorRegion) -> tuple[object, ...]:

@@ -82,6 +82,7 @@ def test_fit_path_of_dome_uses_curve():
     shape = fit_path(c, epsilon=1.0, max_error=0.8)
     # curved top -> inflection-free quadratic arcs (Q), never cubic (C) by default
     assert shape.kind == "path" and "Q" in shape.params["d"] and "C" not in shape.params["d"]
-    # opt-in cubic flag flips emission to cubics (C), no quadratics
+    # opt-in cubic flag still tries quadratics first and only keeps C when shorter
     cshape = fit_path(c, epsilon=1.0, max_error=0.8, cubic=True)
-    assert cshape.kind == "path" and "C" in cshape.params["d"] and "Q" not in cshape.params["d"]
+    assert cshape.kind == "path"
+    assert len(cshape.params["d"].encode()) <= len(shape.params["d"].encode())

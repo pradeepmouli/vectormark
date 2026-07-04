@@ -43,14 +43,14 @@ def _child_from_scene_item(
     if isinstance(item, ScenePrimitive):
         shape = _shape_from_scene_primitive(item)
         fill = FlatFill(item.color_hex)
-        z = int(item.z)
+        z = float(item.z)
         raster = rasterize(to_polygon(shape), shape_hw)
         color_hex = item.color_hex
     else:
         shape = item
         color_hex = str(item.params["color_hex"])
         fill = FlatFill(color_hex)
-        z = int(item.params.get("z", 0))
+        z = float(item.params.get("z", 0))
         raster = rasterize(to_polygon(shape), shape_hw)
 
     return VectorRegion(
@@ -124,7 +124,7 @@ def occlusion_pass(
         branch = VectorRegion.branch(
             id=consumed_ids[0],
             children=children,
-            z=min(int(obj.z) for obj in leaves if obj.id in consumed_ids),
+            z=min(float(obj.z) for obj in leaves if obj.id in consumed_ids),
             raster=np.logical_or.reduce([region_by_id[obj_id].mask for obj_id in consumed_ids]),
             diagnostics={
                 "occlusion": {

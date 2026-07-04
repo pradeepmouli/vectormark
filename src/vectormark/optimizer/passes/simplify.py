@@ -153,23 +153,95 @@ def _rounded_rect_path(points: list[tuple[float, float]], *, epsilon: float) -> 
     return " ".join(parts)
 
 
-def _candidate_shape(shape: Shape, outer_d: str, subpaths, outer_index: int, *, preserve_subpaths: bool = True) -> Shape:
-    parts = [outer_d]
-    if preserve_subpaths:
-        parts.extend(_subpath_d(tokens) for i, (tokens, _points, _area) in enumerate(subpaths) if i != outer_index)
+def _candidate_shape(
+    shape: Shape,
+    parts: list[str],
+    *,
+    preserve_fill_rule: bool = True,
+) -> Shape:
     params = {"d": " ".join(parts)}
-    if preserve_subpaths and shape.params.get("fill_rule"):
+    if preserve_fill_rule and shape.params.get("fill_rule"):
         params["fill_rule"] = shape.params["fill_rule"]
     return Shape("path", params)
 
 
-def _is_improvement(original: Shape, candidate: Shape) -> bool:
-    original_d = str(original.params.get("d", ""))
-    candidate_d = str(candidate.params.get("d", ""))
+def _ordered_subpath_indices(subpaths) -> list[int]:
+    if not subpaths:
+        return []
+    outer_index = max(range(len(subpaths)), key=lambda i: subpaths[i][2])
+    return [outer_index, *(i for i in range(len(subpaths)) if i != outer_index)]
+
+
+def _simplified_subpath_d(
+    tokens: list[tuple[str, list[float]]],
+    points: list[tuple[float, float]],
+    *,
+    epsilon: float,
+    max_error: float,
+    cubic: bool,
+) -> str:
+    rounded = _rounded_rect_path(points, epsilon=epsilon)
+    if rounded is not None:
+        return rounded
+
+    contour = _closed_points(points)
+    if contour is None:
+        return _subpath_d(tokens)
+
+    return str(fit_path(contour, epsilon=epsilon, max_error=max_error, cubic=cubic).params["d"])
+
+
+def _candidate_parts(
+    subpaths,
+    *,
+    epsilon: float,
+    max_error: float,
+    cubic: bool,
+    preserve_subpaths: bool,
+) -> list[str]:
+    indices = _ordered_subpath_indices(subpaths)
+    if not preserve_subpaths:
+        indices = indices[:1]
+    parts: list[str] = []
+    for index in indices:
+        tokens, points, _area = subpaths[index]
+        parts.append(
+            _simplified_subpath_d(
+                tokens,
+                points,
+                epsilon=epsilon,
+                max_error=max_error,
+                cubic=cubic,
+            )
+        )
+    return parts
+
+
+def _path_complexity(shape: Shape) -> tuple[int, int] | None:
+    if shape.kind != "path":
+        return None
+    d = str(shape.params.get("d", ""))
+    return _command_count(d), len(d.encode())
+
+
+def _is_improvement(current: Shape, candidate: Shape, *, original: Shape | None = None) -> bool:
+    candidate_complexity = _path_complexity(candidate)
+    current_complexity = _path_complexity(current)
+    if candidate_complexity is None or current_complexity is None:
+        return False
+    if candidate == current:
+        return False
+    if not (
+        candidate_complexity[0] < current_complexity[0]
+        and candidate_complexity[1] < current_complexity[1]
+    ):
+        return False
+    original_complexity = _path_complexity(original) if original is not None else None
+    if original_complexity is None:
+        return True
     return (
-        _command_count(candidate_d) < _command_count(original_d)
-        and len(candidate_d.encode()) < len(original_d.encode())
-        and candidate != original
+        candidate_complexity[0] <= original_complexity[0]
+        and candidate_complexity[1] <= original_complexity[1]
     )
 
 
@@ -180,6 +252,8 @@ def _simplified_path_shape(
     max_error: float,
     samples: int,
     preserve_subpaths: bool = True,
+    cubic: bool = False,
+    original: Shape | None = None,
 ) -> Shape | None:
     if shape.kind != "path":
         return None
@@ -191,22 +265,17 @@ def _simplified_path_shape(
     subpaths = _path_subpaths(shape)
     if not subpaths:
         return None
-    outer_index = max(range(len(subpaths)), key=lambda i: subpaths[i][2])
-    _outer_tokens, outer_points, _outer_area = subpaths[outer_index]
-
-    rounded = _rounded_rect_path(outer_points, epsilon=epsilon)
-    if rounded is not None:
-        candidate = _candidate_shape(shape, rounded, subpaths, outer_index, preserve_subpaths=preserve_subpaths)
-        if _is_improvement(shape, candidate):
-            return candidate
-
-    contour = _closed_points(outer_points)
-    if contour is None:
+    parts = _candidate_parts(
+        subpaths,
+        epsilon=epsilon,
+        max_error=max_error,
+        cubic=cubic,
+        preserve_subpaths=preserve_subpaths,
+    )
+    if not parts:
         return None
-
-    simplified = fit_path(contour, epsilon=epsilon, max_error=max_error)
-    candidate = _candidate_shape(shape, str(simplified.params["d"]), subpaths, outer_index, preserve_subpaths=preserve_subpaths)
-    if not _is_improvement(shape, candidate):
+    candidate = _candidate_shape(shape, parts, preserve_fill_rule=preserve_subpaths)
+    if not _is_improvement(shape, candidate, original=original):
         return None
     return candidate
 
@@ -232,7 +301,7 @@ def _covering_later_ids(
 
     covered = np.zeros_like(added, dtype=bool)
     cover_ids: list[int] = []
-    for other in sorted(objects, key=lambda item: (int(item.z), int(item.id))):
+    for other in sorted(objects, key=lambda item: (float(item.z), int(item.id))):
         if other.id == obj.id or other.id not in masks or other.z <= obj.z:
             continue
         other_mask = np.asarray(masks[other.id], dtype=bool)
@@ -254,6 +323,7 @@ def simplify_pass(
     epsilon: float = 1.5,
     max_error: float = 1.0,
     samples: int = 16,
+    cubic: bool = False,
 ) -> list[Proposal]:
     proposals: list[Proposal] = []
     for obj in sorted(objects, key=lambda current: int(current.id)):
@@ -268,6 +338,8 @@ def simplify_pass(
                 max_error=max_error,
                 samples=samples,
                 preserve_subpaths=False,
+                cubic=cubic,
+                original=obj.original,
             )
             if solid is not None:
                 cover_ids = _covering_later_ids(obj, solid, objects, masks)
@@ -282,6 +354,8 @@ def simplify_pass(
             epsilon=epsilon,
             max_error=max_error,
             samples=samples,
+            cubic=cubic,
+            original=obj.original,
         )
         if simplified is None:
             continue

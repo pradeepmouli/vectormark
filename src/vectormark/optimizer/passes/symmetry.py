@@ -22,6 +22,8 @@ _AREA_RATIO_TOL = 0.03
 _PERIMETER_RATIO_TOL = 0.03
 _PAIR_RESIDUAL_TOL = 0.02
 _SELF_RESIDUAL_TOL = 0.02
+_SELF_AXIS_OVERLAP = 0.75
+_SELF_MIRROR_Z_OFFSET = 0.1
 _PATH_COMMAND = re.compile(r"[MLQCAZ]")
 
 
@@ -137,10 +139,12 @@ def _half_plane(flat: Polygon | MultiPolygon, axis: Axis2D) -> Polygon:
     ny = ux
     cx = float(axis.cx)
     cy = float(axis.cy)
+    seam_x = nx * _SELF_AXIS_OVERLAP
+    seam_y = ny * _SELF_AXIS_OVERLAP
     return Polygon(
         [
-            (cx - ux * span, cy - uy * span),
-            (cx + ux * span, cy + uy * span),
+            (cx - ux * span - seam_x, cy - uy * span - seam_y),
+            (cx + ux * span - seam_x, cy + uy * span - seam_y),
             (cx + ux * span + nx * span, cy + uy * span + ny * span),
             (cx - ux * span + nx * span, cy - uy * span + ny * span),
         ]
@@ -382,7 +386,7 @@ def symmetry_pass(
                             },
                         ),
                         fill=obj.fill,
-                        z=obj.z,
+                        z=float(obj.z) + _SELF_MIRROR_Z_OFFSET,
                         footprint=reflected_half,
                     ),
                 ],

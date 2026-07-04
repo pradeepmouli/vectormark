@@ -1,6 +1,6 @@
 import numpy as np
 from PIL import Image
-from vectormark.candidate import FlatFill
+from vectormark.candidate import FlatFill, LinearGradientFill
 from vectormark.fit import Shape
 from vectormark.optimizer.vector_region import VectorRegion
 from vectormark.pipeline import Options, _render_optimizer_body, _segment_image, idealize
@@ -101,10 +101,38 @@ def test_optimizer_body_preserves_evenodd_when_inlining_recolored_use():
 
     body, _defs = _render_optimizer_body([clone, source])
 
-    assert body[0].startswith('<path id="s0"')
+    assert body[0].startswith('<path id="s10"')
     assert 'fill="#111111"' in body[0]
     assert body[1].startswith('<path fill="#222222"')
     assert 'fill-rule="evenodd"' in body[1]
+
+
+def test_optimizer_body_inlines_gradient_use_to_preserve_global_paint_space():
+    fill = LinearGradientFill(
+        {"x1": 0.0, "y1": 0.0, "x2": 0.0, "y2": 40.0},
+        [(0.0, "#ff0000"), (1.0, "#0000ff")],
+    )
+    source = VectorRegion(
+        10,
+        Shape("path", {"d": "M0 20 L20 20 L20 40 L0 40 Z"}),
+        fill,
+        0,
+    )
+    mirror = VectorRegion(
+        20,
+        Shape("use", {"href_obj_id": 10, "transform": (1.0, 0.0, 0.0, -1.0, 0.0, 40.0)}),
+        fill,
+        0.1,
+        footprint=source.footprint,
+    )
+
+    body, defs = _render_optimizer_body([source, mirror])
+    svg_body = "".join(body)
+
+    assert len(defs) == 1
+    assert "<use" not in svg_body
+    assert svg_body.count("<path") == 2
+    assert svg_body.count('fill="url(#g0)"') == 2
 
 
 def test_optimizer_body_renders_by_z_then_id():
@@ -131,7 +159,8 @@ def test_optimizer_body_renders_by_z_then_id():
     body, _defs = _render_optimizer_body([high_cover, low_use, low_source])
 
     assert 'fill="#111111"' in body[0]
-    assert body[1].startswith('<use')
+    assert body[1].startswith('<path')
+    assert 'fill="#111111"' in body[1]
     assert 'fill="#333333"' in body[2]
 
 

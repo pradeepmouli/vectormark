@@ -9,6 +9,7 @@ from vectormark.optimizer.framework import optimize
 from vectormark.optimizer.gate import rasterize
 from vectormark.optimizer.vector_region import VectorRegion
 from vectormark.optimizer.passes.simplify import simplify_pass
+from vectormark.pipeline import Options, _optimizer_passes
 
 
 def _command_count(d: str) -> int:
@@ -27,17 +28,29 @@ def _mask_for_obj(obj: VectorRegion, shape_hw: tuple[int, int] = (96, 96)) -> np
     return rasterize(obj.footprint, shape_hw)
 
 
-def _optimized_obj(obj: VectorRegion, *, epsilon: float = 1.5, max_error: float = 1.0) -> VectorRegion:
+def _optimized_obj(
+    obj: VectorRegion,
+    *,
+    epsilon: float = 1.5,
+    max_error: float = 1.0,
+    cubic: bool = False,
+) -> VectorRegion:
     out = optimize(
         [obj],
         {obj.id: _mask_for_obj(obj)},
-        [lambda objects, masks: simplify_pass(objects, masks, epsilon=epsilon, max_error=max_error)],
+        [lambda objects, masks: simplify_pass(objects, masks, epsilon=epsilon, max_error=max_error, cubic=cubic)],
     )
     return out[0]
 
 
-def _optimized_d(obj: VectorRegion, *, epsilon: float = 1.5, max_error: float = 1.0) -> str:
-    return str(_optimized_obj(obj, epsilon=epsilon, max_error=max_error).current.params["d"])
+def _optimized_d(
+    obj: VectorRegion,
+    *,
+    epsilon: float = 1.5,
+    max_error: float = 1.0,
+    cubic: bool = False,
+) -> str:
+    return str(_optimized_obj(obj, epsilon=epsilon, max_error=max_error, cubic=cubic).current.params["d"])
 
 
 def _dense_rounded_rect_d(x0: float, y0: float, x1: float, y1: float, radius: float, *, samples: int = 10) -> str:
@@ -139,6 +152,64 @@ def test_simplify_pass_reduces_sampled_smooth_arc_to_curves():
 
     assert _command_count(simplified_d) < _command_count(d)
     assert "Q" in simplified_d
+
+
+def test_simplify_pass_tries_quadratics_before_cubics():
+    arc_points = []
+    cx, cy, radius = 40.0, 40.0, 25.0
+    for theta in np.linspace(math.pi, 0.0, 33):
+        x = cx + radius * math.cos(float(theta))
+        y = cy - radius * math.sin(float(theta))
+        arc_points.append((x, y))
+
+    commands = [f"M{arc_points[0][0]} {arc_points[0][1]}"]
+    commands.extend(f"L{x} {y}" for x, y in arc_points[1:])
+    commands.extend(["L65 40", "L15 40", "Z"])
+    d = " ".join(commands)
+    obj = _obj_from_d(d)
+
+    quadratic_d = _optimized_d(obj, epsilon=1.0, max_error=1.0, cubic=False)
+    cubic_enabled_d = _optimized_d(obj, epsilon=1.0, max_error=1.0, cubic=True)
+
+    assert _command_count(cubic_enabled_d) < _command_count(d)
+    assert _command_count(cubic_enabled_d) <= _command_count(quadratic_d)
+    assert len(cubic_enabled_d.encode()) <= len(quadratic_d.encode())
+    assert "Q" in cubic_enabled_d
+
+
+def test_optimizer_passes_forward_cubic_path_option_to_simplify():
+    arc_points = []
+    cx, cy, radius = 40.0, 40.0, 25.0
+    for theta in np.linspace(math.pi, 0.0, 33):
+        x = cx + radius * math.cos(float(theta))
+        y = cy - radius * math.sin(float(theta))
+        arc_points.append((x, y))
+    commands = [f"M{arc_points[0][0]} {arc_points[0][1]}"]
+    commands.extend(f"L{x} {y}" for x, y in arc_points[1:])
+    commands.extend(["L65 40", "L15 40", "Z"])
+    d = " ".join(commands)
+    obj = _obj_from_d(d)
+    simplify_quadratic = _optimizer_passes(Options(optimizer=True, cubic_paths=False))[-1]
+    simplify_cubic = _optimizer_passes(Options(optimizer=True, cubic_paths=True))[-1]
+
+    quadratic_proposals = simplify_quadratic([obj], {obj.id: _mask_for_obj(obj)})
+    cubic_proposals = simplify_cubic([obj], {obj.id: _mask_for_obj(obj)})
+
+    assert quadratic_proposals
+    assert cubic_proposals
+    quadratic_d = str(quadratic_proposals[0].new_objects[0].current.params["d"])
+    cubic_enabled_d = str(cubic_proposals[0].new_objects[0].current.params["d"])
+    assert len(cubic_enabled_d.encode()) <= len(quadratic_d.encode())
+
+
+def test_simplify_pass_rejects_paths_more_complex_than_original_trace():
+    current = Shape("path", {"d": _dense_rounded_rect_d(8.0, 8.0, 88.0, 88.0, 18.0, samples=12)})
+    original = Shape("path", {"d": "M8 8 L88 8 L88 88 L8 88 Z"})
+    obj = VectorRegion(1, current, FlatFill("#000000"), 0, original=original)
+
+    proposals = simplify_pass([obj], {obj.id: _mask_for_obj(obj)}, epsilon=1.0, max_error=1.0)
+
+    assert proposals == []
 
 
 def test_optimize_gate_rejects_simplification_that_drops_real_bump():
