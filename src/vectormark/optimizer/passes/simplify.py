@@ -180,15 +180,17 @@ def _simplified_subpath_d(
     max_error: float,
     cubic: bool,
 ) -> str:
+    original = _subpath_d(tokens)
     rounded = _rounded_rect_path(points, epsilon=epsilon)
     if rounded is not None:
-        return rounded
+        return rounded if _path_complexity_d(rounded) < _path_complexity_d(original) else original
 
     contour = _closed_points(points)
     if contour is None:
-        return _subpath_d(tokens)
+        return original
 
-    return str(fit_path(contour, epsilon=epsilon, max_error=max_error, cubic=cubic).params["d"])
+    fitted = str(fit_path(contour, epsilon=epsilon, max_error=max_error, cubic=cubic).params["d"])
+    return fitted if _path_complexity_d(fitted) < _path_complexity_d(original) else original
 
 
 def _candidate_parts(
@@ -221,6 +223,10 @@ def _path_complexity(shape: Shape) -> tuple[int, int] | None:
     if shape.kind != "path":
         return None
     d = str(shape.params.get("d", ""))
+    return _path_complexity_d(d)
+
+
+def _path_complexity_d(d: str) -> tuple[int, int]:
     return _command_count(d), len(d.encode())
 
 
