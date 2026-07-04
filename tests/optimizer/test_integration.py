@@ -10,7 +10,7 @@ from vectormark.optimizer.framework import optimize
 from vectormark.optimizer.gate import rasterize
 from vectormark.optimizer.passes.compound import split_compound_pass
 from vectormark.optimizer.passes.primitives import primitives_pass
-from vectormark.optimizer.vector_region import VectorRegion
+from vectormark.optimizer.vector_region import VectorRegion, to_polygon
 from vectormark.optimizer.passes.symmetry import symmetry_pass
 from vectormark.pipeline import Options, _optimizer_passes, _prefer_optimizer_svg, _render_optimizer_body, idealize
 
@@ -257,7 +257,7 @@ def test_optimizer_orders_branch_mirror_before_sibling_covers():
     assert body[2].startswith('<circle id="s1-3"')
 
 
-def test_compound_split_turns_cutout_subpaths_into_child_regions():
+def test_compound_split_keeps_uncovered_cutout_subpaths_subtractive():
     outer = "M0 0 L100 0 L100 100 L0 100 Z"
     hole = shape_to_path_d(Shape("circle", {"cx": 70.0, "cy": 50.0, "r": 12.0}))
     speck = "M10 10 L10.5 10 L10 10.5 Z"
@@ -271,11 +271,74 @@ def test_compound_split_turns_cutout_subpaths_into_child_regions():
     )
 
     assert len(out) == 1
+    assert out[0].current == shape
+
+
+def test_compound_split_keeps_disjoint_subpaths_parent_filled():
+    left = "M0 50 L30 0 L40 50 Z"
+    center = "M50 50 L80 0 L110 50 Z"
+    right = "M120 50 L150 0 L160 50 Z"
+    shape = Shape("path", {"d": f"{center} {left} {right}", "fill_rule": "evenodd"})
+    region = VectorRegion(1, shape, FlatFill("#FDAD00"), 0)
+    source_mask = (
+        rasterize(to_polygon(Shape("path", {"d": left})), (80, 180))
+        | rasterize(to_polygon(Shape("path", {"d": center})), (80, 180))
+        | rasterize(to_polygon(Shape("path", {"d": right})), (80, 180))
+    )
+
+    out = optimize(
+        [region],
+        {region.id: source_mask},
+        [split_compound_pass],
+    )
+
+    assert len(out) == 1
+    branch = out[0]
+    assert branch.is_branch
+    assert len(branch.children) == 3
+    assert [child.fill for child in branch.children] == [region.fill, region.fill, region.fill]
+
+
+def test_compound_split_uses_source_mask_not_containment_for_child_fill():
+    outer = "M0 0 L100 0 L100 100 L0 100 Z"
+    inner = "M30 30 L70 30 L70 70 L30 70 Z"
+    shape = Shape("path", {"d": f"{outer} {inner}", "fill_rule": "evenodd"})
+    region = VectorRegion(1, shape, FlatFill("#FDAD00"), 0)
+    source_mask = rasterize(to_polygon(Shape("path", {"d": outer})), (120, 120))
+
+    out = optimize(
+        [region],
+        {region.id: source_mask},
+        [split_compound_pass],
+    )
+
+    assert len(out) == 1
     branch = out[0]
     assert branch.is_branch
     assert len(branch.children) == 2
-    assert branch.children[0].fill == region.fill
-    assert branch.children[1].fill == FlatFill("#FFFFFF")
-    assert branch.children[0].z < branch.children[1].z
-    assert branch.children[0].current.kind == "path"
-    assert branch.children[1].current.kind == "circle"
+    assert [child.fill for child in branch.children] == [region.fill, region.fill]
+
+
+def test_compound_split_carries_visible_region_fill_for_uncovered_subpath():
+    outer = "M0 0 L100 0 L100 100 L0 100 Z"
+    inner = "M30 30 L70 30 L70 70 L30 70 Z"
+    shape = Shape("path", {"d": f"{outer} {inner}", "fill_rule": "evenodd"})
+    region = VectorRegion(1, shape, FlatFill("#FDAD00"), 1)
+    source_mask = rasterize(to_polygon(shape), (120, 120))
+    visible = VectorRegion(
+        2,
+        Shape("path", {"d": inner}),
+        FlatFill("#0055CC"),
+        0,
+        raster=rasterize(to_polygon(Shape("path", {"d": inner})), (120, 120)),
+    )
+
+    out = optimize(
+        [visible, region],
+        {region.id: source_mask, visible.id: visible.raster},
+        [split_compound_pass],
+    )
+
+    branch = next(obj for obj in out if obj.id == region.id)
+    assert branch.is_branch
+    assert [child.fill for child in branch.children] == [region.fill, visible.fill]

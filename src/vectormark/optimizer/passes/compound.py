@@ -3,7 +3,7 @@ from __future__ import annotations
 import numpy as np
 from shapely.geometry import Polygon
 
-from ...candidate import FlatFill, LinearGradientFill
+from ...candidate import Fill, FlatFill, LinearGradientFill
 from ...fit import Shape
 from ..framework import Proposal
 from ..gate import rasterize
@@ -35,14 +35,62 @@ def _subpath_area(tokens: list[tuple[str, list[float]]]) -> float:
     return float(_ring_area(points))
 
 
+def _source_coverage(child_raster: np.ndarray, source_mask: np.ndarray | None) -> float:
+    if source_mask is None:
+        return 1.0
+    child_area = int(np.count_nonzero(child_raster))
+    if child_area == 0:
+        return 0.0
+    return float(np.count_nonzero(child_raster & source_mask) / child_area)
+
+
+def _fill_from_render_evidence(
+    child_raster: np.ndarray,
+    *,
+    source: VectorRegion,
+    source_mask: np.ndarray | None,
+    objects: list[VectorRegion],
+    masks: dict[int, np.ndarray],
+) -> tuple[Fill | None, float, int | None]:
+    source_coverage = _source_coverage(child_raster, source_mask)
+    if source_coverage >= 0.5:
+        assert source.fill is not None
+        return source.fill, source_coverage, source.id
+
+    child_area = int(np.count_nonzero(child_raster))
+    best_fill: Fill | None = None
+    best_coverage = 0.0
+    best_id: int | None = None
+    best_z = float("-inf")
+    if child_area == 0:
+        return best_fill, best_coverage, best_id
+
+    for candidate in objects:
+        if candidate.id == source.id or candidate.fill is None:
+            continue
+        candidate_mask = masks.get(candidate.id)
+        if candidate_mask is None:
+            candidate_mask = candidate.raster
+        if candidate_mask.shape != child_raster.shape:
+            continue
+        coverage = float(np.count_nonzero(child_raster & candidate_mask) / child_area)
+        if coverage > best_coverage or (coverage == best_coverage and float(candidate.z) > best_z):
+            best_fill = candidate.fill
+            best_coverage = coverage
+            best_id = candidate.id
+            best_z = float(candidate.z)
+
+    if best_coverage >= 0.5:
+        return best_fill, best_coverage, best_id
+    return None, best_coverage, best_id
+
+
 def split_compound_pass(
     objects: list[VectorRegion],
     masks: dict[int, np.ndarray],
 ) -> list[Proposal]:
     proposals: list[Proposal] = []
     next_id = max((int(obj.id) for obj in objects), default=-1) + 1
-    shape_hw = next(iter(masks.values())).shape if masks else None
-
     for obj in sorted(objects, key=lambda current: int(current.id)):
         if not obj.is_leaf or obj.current is None or obj.current.kind != "path":
             continue
@@ -55,7 +103,7 @@ def split_compound_pass(
         if len(subpaths) < 2:
             continue
 
-        areas = [_subpath_area(tokens) for tokens in subpaths]
+        areas = [abs(_subpath_area(tokens)) for tokens in subpaths]
         max_area = max(areas, default=0.0)
         if max_area <= 0.0:
             continue
@@ -67,21 +115,43 @@ def split_compound_pass(
         if len(kept) < 2:
             continue
 
+        source_mask = masks.get(obj.id)
+        if source_mask is None:
+            source_mask = obj.raster
+        shape_hw = source_mask.shape if source_mask is not None else None
+
+        footprints: list[Polygon] = []
+        for _subpath_index, tokens, _area in kept:
+            footprint = to_polygon(_subpath_shape(tokens))
+            if not isinstance(footprint, Polygon) or footprint.is_empty:
+                break
+            footprints.append(footprint)
+        if len(footprints) != len(kept):
+            continue
+
         children: list[VectorRegion] = []
         for output_index, (_subpath_index, tokens, _area) in enumerate(kept):
             child_id = obj.id if output_index == 0 else next_id
             if output_index != 0:
                 next_id += 1
             shape = _subpath_shape(tokens)
-            footprint = to_polygon(shape)
-            if isinstance(footprint, Polygon) and footprint.is_empty:
-                continue
+            footprint = footprints[output_index]
             raster = rasterize(footprint, shape_hw) if shape_hw is not None else obj.raster
+            child_fill, fill_coverage, fill_source_id = _fill_from_render_evidence(
+                raster,
+                source=obj,
+                source_mask=source_mask,
+                objects=objects,
+                masks=masks,
+            )
+            if child_fill is None:
+                children = []
+                break
             children.append(
                 VectorRegion(
                     child_id,
                     shape,
-                    obj.fill if output_index == 0 else FlatFill("#FFFFFF"),
+                    child_fill,
                     float(obj.z) + (_SOURCE_Z_OFFSET if output_index == 0 else _COVER_Z_OFFSET + output_index * 0.01),
                     footprint=footprint,
                     raster=raster,
@@ -94,6 +164,8 @@ def split_compound_pass(
                             "source_id": int(obj.id),
                             "subpath_index": int(_subpath_index),
                             "subpaths": len(subpaths),
+                            "fill_coverage": fill_coverage,
+                            "fill_source_id": None if fill_source_id is None else int(fill_source_id),
                         }
                     },
                 )
