@@ -98,7 +98,12 @@ def _gate_mask(
         mask = mask.copy()
         for obj_id in proposal_ids:
             other = originals[obj_id]
-            if other.z > original.z:
+            overlaps_replacement = False
+            try:
+                overlaps_replacement = float(replacement.footprint.intersection(other.footprint).area) > 0.0
+            except Exception:
+                overlaps_replacement = False
+            if other.z > original.z and overlaps_replacement:
                 mask |= np.asarray(current_masks[obj_id], dtype=bool)
     return mask
 

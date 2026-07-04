@@ -776,7 +776,15 @@ def _render_optimizer_body(objects, *, flatten: bool = False) -> tuple[list[str]
 
 def _optimizer_passes(opt: Options):
     """Pass order for the experimental geometry optimizer."""
-    from .optimizer.passes import clones_pass, occlusion_pass, primitives_pass, simplify_pass, split_compound_pass, symmetry_pass
+    from .optimizer.passes import (
+        clones_pass,
+        occlusion_pass,
+        primitives_pass,
+        seams_pass,
+        simplify_pass,
+        split_compound_pass,
+        symmetry_pass,
+    )
 
     def _configured_primitives_pass(objects, masks):
         return primitives_pass(objects, masks, epsilon=opt.epsilon)
@@ -803,6 +811,7 @@ def _optimizer_passes(opt: Options):
     passes.append(_configured_primitives_pass)
     if not opt.no_symmetry:
         passes.append(symmetry_pass)
+    passes.append(seams_pass)
     return passes
 
 

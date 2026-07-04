@@ -279,8 +279,16 @@ def test_optimizer_passes_forward_cubic_path_option_to_simplify():
     commands.extend(["L65 40", "L15 40", "Z"])
     d = " ".join(commands)
     obj = _obj_from_d(d)
-    simplify_quadratic = _optimizer_passes(Options(optimizer=True, cubic_paths=False))[-1]
-    simplify_cubic = _optimizer_passes(Options(optimizer=True, cubic_paths=True))[-1]
+    simplify_quadratic = next(
+        pass_fn
+        for pass_fn in _optimizer_passes(Options(optimizer=True, cubic_paths=False))
+        if getattr(pass_fn, "__name__", "") == "simplify_pass"
+    )
+    simplify_cubic = next(
+        pass_fn
+        for pass_fn in _optimizer_passes(Options(optimizer=True, cubic_paths=True))
+        if getattr(pass_fn, "__name__", "") == "simplify_pass"
+    )
 
     quadratic_proposals = simplify_quadratic([obj], {obj.id: _mask_for_obj(obj)})
     cubic_proposals = simplify_cubic([obj], {obj.id: _mask_for_obj(obj)})
