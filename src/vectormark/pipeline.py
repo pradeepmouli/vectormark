@@ -704,7 +704,7 @@ def _idealize_rectified(arr: np.ndarray, opt: Options, rho: float, w0: int, h0: 
 
 def _render_optimizer_body(objects, *, flatten: bool = False) -> tuple[list[str], list[str]]:
     """Serialize optimized objects, resolving object-id based <use> references."""
-    from .optimizer.vector_region import VectorRegion
+    from .optimizer.vector_region import VectorRegion, _parse_subpaths
 
     defs: list[str] = []
     fill_cache: dict[str, str] = {}
@@ -712,26 +712,6 @@ def _render_optimizer_body(objects, *, flatten: bool = False) -> tuple[list[str]
 
     def _child_label(parent_label: str, child: VectorRegion) -> str:
         return f"{parent_label}-{int(child.id)}"
-
-    def _render_items(regions: list[VectorRegion]):
-        items = []
-
-        def visit(region: VectorRegion, label: str, scope_ids: dict[int, str], scope_objects: dict[int, VectorRegion]) -> None:
-            if region.is_leaf:
-                items.append((region, label, scope_ids, scope_objects))
-                return
-            children = sorted(region.children, key=lambda child: (float(child.z), int(child.id)))
-            child_scope_ids = {int(child.id): _child_label(label, child) for child in children}
-            child_scope_objects = {int(child.id): child for child in children}
-            for child in children:
-                visit(child, child_scope_ids[int(child.id)], child_scope_ids, child_scope_objects)
-
-        top = sorted(regions, key=lambda obj: (float(obj.z), int(obj.id)))
-        top_scope_ids = {int(obj.id): f"s{int(obj.id)}" for obj in top}
-        top_scope_objects = {int(obj.id): obj for obj in top}
-        for obj in top:
-            visit(obj, top_scope_ids[int(obj.id)], top_scope_ids, top_scope_objects)
-        return sorted(items, key=lambda item: (float(item[0].z), item[1]))
 
     def _resolved_fill(fill_obj: Fill) -> str:
         key = repr(fill_obj)
@@ -748,6 +728,216 @@ def _render_optimizer_body(objects, *, flatten: bool = False) -> tuple[list[str]
         if rule is not None:
             params["fill_rule"] = rule
         return Shape("use", params)
+
+    def _end_point(command: str, values: list[float], start: tuple[float, float]) -> tuple[float, float]:
+        if command in {"M", "L"}:
+            return float(values[0]), float(values[1])
+        if command == "Q":
+            return float(values[2]), float(values[3])
+        if command == "C":
+            return float(values[4]), float(values[5])
+        if command == "A":
+            return float(values[5]), float(values[6])
+        return start
+
+    def _subpath_segments(subpath: list[tuple[str, list[float]]]):
+        if not subpath or subpath[0][0] != "M":
+            return []
+        start = (float(subpath[0][1][0]), float(subpath[0][1][1]))
+        current = start
+        segments = []
+        for command, values in subpath[1:]:
+            end = _end_point(command, values, start)
+            segments.append({"start": current, "end": end, "command": command, "values": list(values)})
+            current = end
+        return segments
+
+    def _pt_close(a: tuple[float, float], b: tuple[float, float], tol: float = 1e-6) -> bool:
+        return abs(a[0] - b[0]) <= tol and abs(a[1] - b[1]) <= tol
+
+    def _same_segment(a, b) -> bool:
+        return (
+            (_pt_close(a["start"], b["start"]) and _pt_close(a["end"], b["end"]))
+            or (_pt_close(a["start"], b["end"]) and _pt_close(a["end"], b["start"]))
+        )
+
+    def _chain_without_segment(segments: list[dict], index: int) -> list[dict]:
+        return [segments[i] for i in [*range(index + 1, len(segments)), *range(0, index)]]
+
+    def _reverse_segment(segment: dict) -> dict | None:
+        command = str(segment["command"])
+        values = list(segment["values"])
+        start = segment["start"]
+        end = segment["end"]
+        if command in {"L", "Z"}:
+            return {"start": end, "end": start, "command": "L", "values": [start[0], start[1]]}
+        if command == "Q":
+            return {"start": end, "end": start, "command": "Q", "values": [values[0], values[1], start[0], start[1]]}
+        if command == "C":
+            return {
+                "start": end,
+                "end": start,
+                "command": "C",
+                "values": [values[2], values[3], values[0], values[1], start[0], start[1]],
+            }
+        return None
+
+    def _reverse_chain(chain: list[dict]) -> list[dict] | None:
+        reversed_segments = [_reverse_segment(segment) for segment in reversed(chain)]
+        if any(segment is None for segment in reversed_segments):
+            return None
+        return [segment for segment in reversed_segments if segment is not None]
+
+    def _segment_d(segment: dict) -> str:
+        command = str(segment["command"])
+        values = list(segment["values"])
+        if command == "Z":
+            command = "L"
+            values = [segment["end"][0], segment["end"][1]]
+        return f"{command}{' '.join(_fmt(float(value)) for value in values)}"
+
+    def _emit_chain(chain: list[dict]) -> str | None:
+        if not chain:
+            return None
+        cleaned = [
+            segment for segment in chain
+            if not _pt_close(segment["start"], segment["end"])
+        ]
+        if not cleaned:
+            return None
+        parts = [f"M{_fmt(cleaned[0]['start'][0])} {_fmt(cleaned[0]['start'][1])}"]
+        parts.extend(_segment_d(segment) for segment in cleaned)
+        parts.append("Z")
+        return " ".join(parts)
+
+    def _join_chains(a_chain: list[dict], b_chain: list[dict]) -> list[dict] | None:
+        variants = [b_chain]
+        reversed_b = _reverse_chain(b_chain)
+        if reversed_b is not None:
+            variants.append(reversed_b)
+        chains_a = [a_chain]
+        reversed_a = _reverse_chain(a_chain)
+        if reversed_a is not None:
+            chains_a.append(reversed_a)
+        for left in chains_a:
+            for right in variants:
+                if not left or not right:
+                    continue
+                if _pt_close(left[-1]["end"], right[0]["start"]) and _pt_close(right[-1]["end"], left[0]["start"]):
+                    return [*left, *right]
+        return None
+
+    def _stitch_subpath_pair(a_subpath, b_subpath) -> str | None:
+        a_segments = _subpath_segments(a_subpath)
+        b_segments = _subpath_segments(b_subpath)
+        matches: list[tuple[float, int, int]] = []
+        for a_index, a_segment in enumerate(a_segments):
+            for b_index, b_segment in enumerate(b_segments):
+                if not _same_segment(a_segment, b_segment):
+                    continue
+                length = float(np.hypot(a_segment["end"][0] - a_segment["start"][0], a_segment["end"][1] - a_segment["start"][1]))
+                matches.append((length, a_index, b_index))
+        if not matches:
+            return None
+        _length, a_index, b_index = max(matches, key=lambda item: item[0])
+        chain = _join_chains(_chain_without_segment(a_segments, a_index), _chain_without_segment(b_segments, b_index))
+        return _emit_chain(chain) if chain is not None else None
+
+    def _stitched_self_symmetry_shape(source_shape: Shape, mirror_shape: Shape) -> Shape | None:
+        source_subpaths = _parse_subpaths(shape_to_path_d(source_shape))
+        mirror_subpaths = _parse_subpaths(shape_to_path_d(mirror_shape))
+        if len(source_subpaths) != len(mirror_subpaths):
+            return None
+        parts: list[str] = []
+        for source_subpath, mirror_subpath in zip(source_subpaths, mirror_subpaths, strict=True):
+            part = _stitch_subpath_pair(source_subpath, mirror_subpath)
+            if part is None:
+                return None
+            parts.append(part)
+        return Shape("path", {"d": " ".join(parts)})
+
+    def _combined_self_symmetry_region(region: VectorRegion) -> VectorRegion | None:
+        symmetry = region.diagnostics.get("symmetry")
+        if not isinstance(symmetry, Mapping) or symmetry.get("mode") != "self":
+            return None
+        children = sorted(region.children, key=lambda child: (float(child.z), int(child.id)))
+        if len(children) != 2 or any(not child.is_leaf or child.current is None for child in children):
+            return None
+        if children[0].fill is None or any(child.fill != children[0].fill for child in children):
+            return None
+        scope_objects = {int(child.id): child for child in children}
+        source_shape = children[0].current
+        mirror_shape = children[1].current
+        if mirror_shape is not None and mirror_shape.kind == "use":
+            source = scope_objects.get(int(mirror_shape.params.get("href_obj_id", -1)))
+            if source is not None and source.current is not None:
+                mirror_shape = _inlined_use_shape(source.current, mirror_shape.params["transform"])
+        if source_shape is not None and mirror_shape is not None:
+            stitched_shape = _stitched_self_symmetry_shape(source_shape, mirror_shape)
+            if stitched_shape is not None:
+                return VectorRegion(
+                    region.id,
+                    stitched_shape,
+                    children[0].fill,
+                    region.z,
+                    footprint=region.footprint,
+                    raster=region.raster,
+                    source_label=region.source_label,
+                    color_hex=region.color_hex,
+                    diagnostics=region.diagnostics,
+                )
+        parts: list[str] = []
+        fill_rule = None
+        for child in children:
+            assert child.current is not None
+            shape = child.current
+            if shape.kind == "use":
+                source = scope_objects.get(int(shape.params.get("href_obj_id", -1)))
+                if source is None or source.current is None:
+                    return None
+                shape = _inlined_use_shape(source.current, shape.params["transform"])
+            rule = fill_rule_for(shape)
+            if rule is not None:
+                fill_rule = rule
+            parts.append(shape_to_path_d(shape))
+        params: dict[str, object] = {"d": " ".join(parts)}
+        if fill_rule is not None:
+            params["fill_rule"] = fill_rule
+        return VectorRegion(
+            region.id,
+            Shape("path", params),
+            children[0].fill,
+            region.z,
+            footprint=region.footprint,
+            raster=region.raster,
+            source_label=region.source_label,
+            color_hex=region.color_hex,
+            diagnostics=region.diagnostics,
+        )
+
+    def _render_items(regions: list[VectorRegion]):
+        items = []
+
+        def visit(region: VectorRegion, label: str, scope_ids: dict[int, str], scope_objects: dict[int, VectorRegion]) -> None:
+            if region.is_leaf:
+                items.append((region, label, scope_ids, scope_objects))
+                return
+            combined = _combined_self_symmetry_region(region)
+            if combined is not None:
+                items.append((combined, label, scope_ids, scope_objects))
+                return
+            children = sorted(region.children, key=lambda child: (float(child.z), int(child.id)))
+            child_scope_ids = {int(child.id): _child_label(label, child) for child in children}
+            child_scope_objects = {int(child.id): child for child in children}
+            for child in children:
+                visit(child, child_scope_ids[int(child.id)], child_scope_ids, child_scope_objects)
+
+        top = sorted(regions, key=lambda obj: (float(obj.z), int(obj.id)))
+        top_scope_ids = {int(obj.id): f"s{int(obj.id)}" for obj in top}
+        top_scope_objects = {int(obj.id): obj for obj in top}
+        for obj in top:
+            visit(obj, top_scope_ids[int(obj.id)], top_scope_ids, top_scope_objects)
+        return sorted(items, key=lambda item: (float(item[0].z), item[1]))
 
     for obj, elem_id, scope_ids, scope_objects in _render_items(list(objects)):
         assert obj.current is not None
@@ -792,9 +982,29 @@ def _optimizer_passes(opt: Options):
     def _configured_occlusion_pass(objects, masks):
         return occlusion_pass(objects, masks, no_symmetry=opt.no_symmetry)
 
+    def _configured_symmetry_pass(objects, masks):
+        return symmetry_pass(
+            objects,
+            masks,
+            epsilon=opt.epsilon,
+            max_error=opt.max_error,
+            cubic=opt.cubic_paths,
+        )
+
+    def _configured_seams_pass(objects, masks):
+        return seams_pass(
+            objects,
+            masks,
+            epsilon=opt.epsilon,
+            max_error=opt.max_error,
+            cubic=opt.cubic_paths,
+        )
+
     _configured_primitives_pass.__name__ = "primitives_pass"
     _configured_occlusion_pass.__name__ = "occlusion_pass"
-    passes = [_configured_primitives_pass, _configured_occlusion_pass, clones_pass]
+    _configured_symmetry_pass.__name__ = "symmetry_pass"
+    _configured_seams_pass.__name__ = "seams_pass"
+    passes = [_configured_primitives_pass, _configured_occlusion_pass]
 
     def _configured_simplify_pass(objects, masks):
         return simplify_pass(
@@ -806,12 +1016,27 @@ def _optimizer_passes(opt: Options):
         )
 
     _configured_simplify_pass.__name__ = "simplify_pass"
+
+    def _configured_linelet_simplify_pass(objects, masks):
+        return simplify_pass(
+            objects,
+            masks,
+            epsilon=opt.epsilon,
+            max_error=opt.max_error,
+            cubic=opt.cubic_paths,
+            linelet_only=True,
+        )
+
+    _configured_linelet_simplify_pass.__name__ = "simplify_pass"
     passes.append(_configured_simplify_pass)
     passes.append(split_compound_pass)
     passes.append(_configured_primitives_pass)
     if not opt.no_symmetry:
-        passes.append(symmetry_pass)
-    passes.append(seams_pass)
+        passes.append(_configured_symmetry_pass)
+    passes.append(_configured_seams_pass)
+    passes.append(clones_pass)
+    passes.append(_configured_linelet_simplify_pass)
+    passes.append(_configured_seams_pass)
     return passes
 
 
@@ -829,14 +1054,10 @@ def _svg_path_segment_count(svg: str) -> int:
 
 
 def _prefer_optimizer_svg(trace_svg: str, optimized_svg: str) -> bool:
-    """Use optimized output when path geometry is simpler; bytes only break ties."""
+    """Use optimized output unless it has more path segments."""
     trace_path_segments = _svg_path_segment_count(trace_svg)
     optimized_path_segments = _svg_path_segment_count(optimized_svg)
-    if optimized_path_segments < trace_path_segments:
-        return True
-    if optimized_path_segments > trace_path_segments:
-        return False
-    return len(optimized_svg.encode()) <= len(trace_svg.encode())
+    return optimized_path_segments <= trace_path_segments
 
 
 def _optimizer_report(objects, opt: Options, *, fallback_reason: str | None = None) -> IdealizeReport:
@@ -869,6 +1090,7 @@ def _optimizer_report(objects, opt: Options, *, fallback_reason: str | None = No
             "fill": _fill_kind(obj.fill) if obj.fill is not None else "none",
             "bounds": bounds,
             "area": float(getattr(obj.footprint, "area", 0.0)),
+            "diagnostics": _to_json_safe(dict(obj.diagnostics)),
         })
     diag = ReportDiag({
         "options": _to_json_safe(opt),
@@ -910,13 +1132,10 @@ def _idealize_optimizer(arr: np.ndarray, opt: Options, width: int, height: int) 
     trace_svg = render_svg_doc(width, height, trace_body, trace_defs)
     optimized_body, optimized_defs = _render_optimizer_body(optimized, flatten=opt.flatten)
     optimized_svg = render_svg_doc(width, height, optimized_body, optimized_defs)
-    if _prefer_optimizer_svg(trace_svg, optimized_svg):
-        return optimized_svg, _optimizer_report(optimized, opt)
-    return trace_svg, _optimizer_report(
-        objects,
-        opt,
-        fallback_reason="optimized output has more path segments than trace baseline",
-    )
+    fallback_reason = None
+    if not _prefer_optimizer_svg(trace_svg, optimized_svg):
+        fallback_reason = "optimized output has more path segments than trace baseline"
+    return optimized_svg, _optimizer_report(optimized, opt, fallback_reason=fallback_reason)
 
 
 def _flatten_on_white(im: Image.Image) -> np.ndarray:

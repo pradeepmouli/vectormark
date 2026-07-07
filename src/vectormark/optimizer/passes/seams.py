@@ -4,12 +4,16 @@ from dataclasses import dataclass
 
 import numpy as np
 
-from ...fit import Shape, _fmt
+from ..._fitcurve import cbezier, cubic_inflects, fit_quadratic_beziers
+from ...fit import Shape, _curve_controls_are_straight, _fmt
 from ..framework import Proposal
+from ..shape_transform import bake_shape_transform
 from ..vector_region import VectorRegion, _parse_subpaths, to_polygon
+from .simplify import _simplified_path_shape
 
 
-_SEAM_TOL = 1.25
+_SEAM_TOL = 2.0
+_JUNCTION_TOL = 6.5
 
 
 @dataclass(frozen=True)
@@ -28,6 +32,25 @@ class _SeamCandidate:
 class _LeafRef:
     owner: VectorRegion
     leaf: VectorRegion
+
+
+@dataclass(frozen=True)
+class _LeafUpdate:
+    shape: Shape
+    paired_with: int
+    candidate: _SeamCandidate
+    selected: str
+
+
+@dataclass(frozen=True)
+class _CoordinateRef:
+    key: tuple[int, int]
+    subpath_index: int
+    token_index: int
+    x_index: int
+    y_index: int
+    x: float
+    y: float
 
 
 def _shape_bounds(obj: VectorRegion) -> tuple[float, float, float, float] | None:
@@ -122,9 +145,9 @@ def _rewrite_path_side(
             if command in {"M", "L"}:
                 coord_indexes = ((0, 1),)
             elif command == "Q":
-                coord_indexes = ((0, 1), (2, 3))
+                coord_indexes = ((2, 3),)
             elif command == "C":
-                coord_indexes = ((0, 1), (2, 3), (4, 5))
+                coord_indexes = ((4, 5),)
             elif command == "A":
                 coord_indexes = ((5, 6),)
             else:
@@ -269,9 +292,9 @@ def _coordinate_indexes(command: str) -> tuple[tuple[int, int], ...]:
     if command in {"M", "L"}:
         return ((0, 1),)
     if command == "Q":
-        return ((0, 1), (2, 3))
+        return ((2, 3),)
     if command == "C":
-        return ((0, 1), (2, 3), (4, 5))
+        return ((4, 5),)
     if command == "A":
         return ((5, 6),)
     return ()
@@ -286,10 +309,128 @@ def _path_coordinate_refs(tokens: list[list[tuple[str, list[float]]]]):
     return refs
 
 
+def _path_endpoint_refs(
+    key: tuple[int, int],
+    tokens: list[list[tuple[str, list[float]]]],
+) -> list[_CoordinateRef]:
+    refs: list[_CoordinateRef] = []
+    for subpath_index, subpath in enumerate(tokens):
+        for token_index, (command, values) in enumerate(subpath):
+            for x_idx, y_idx in _coordinate_indexes(command):
+                refs.append(
+                    _CoordinateRef(
+                        key,
+                        subpath_index,
+                        token_index,
+                        x_idx,
+                        y_idx,
+                        float(values[x_idx]),
+                        float(values[y_idx]),
+                    )
+                )
+    return refs
+
+
 def _shape_from_tokens(shape: Shape, tokens: list[list[tuple[str, list[float]]]]) -> Shape:
     params = dict(shape.params)
     params["d"] = " ".join(_subpath_d(subpath) for subpath in tokens)
     return Shape("path", params)
+
+
+def _cleanup_linelets(
+    shape: Shape,
+    *,
+    epsilon: float,
+    max_error: float,
+    cubic: bool,
+) -> Shape:
+    simplified = _simplified_path_shape(
+        shape,
+        epsilon=epsilon,
+        max_error=max_error,
+        samples=16,
+        cubic=cubic,
+        linelet_only=True,
+    )
+    return simplified or shape
+
+
+def _cleanup_inflecting_cubics(shape: Shape, *, max_error: float, line_epsilon: float) -> Shape:
+    if shape.kind != "path":
+        return shape
+    subpaths = _parse_subpaths(str(shape.params.get("d", "")))
+    if not subpaths:
+        return shape
+    changed = False
+    rewritten: list[list[tuple[str, list[float]]]] = []
+    for subpath in subpaths:
+        current: np.ndarray | None = None
+        start: np.ndarray | None = None
+        out_subpath: list[tuple[str, list[float]]] = []
+        for command, values in subpath:
+            if command == "M":
+                current = np.array(values[:2], dtype=float)
+                start = current.copy()
+                out_subpath.append((command, list(values)))
+                continue
+            if command == "Z":
+                current = start
+                out_subpath.append((command, list(values)))
+                continue
+            if command == "C" and current is not None:
+                ctrl = np.array(
+                    [
+                        current,
+                        values[:2],
+                        values[2:4],
+                        values[4:6],
+                    ],
+                    dtype=float,
+                )
+                if cubic_inflects(ctrl):
+                    samples = np.asarray([cbezier(ctrl, t) for t in np.linspace(0.0, 1.0, 9)], dtype=float)
+                    for bezier in fit_quadratic_beziers(samples, max_error):
+                        if _curve_controls_are_straight(bezier[0], [bezier[1]], bezier[2], line_epsilon):
+                            out_subpath.append(("L", [float(bezier[2][0]), float(bezier[2][1])]))
+                        else:
+                            out_subpath.append(
+                                (
+                                    "Q",
+                                    [
+                                        float(bezier[1][0]),
+                                        float(bezier[1][1]),
+                                        float(bezier[2][0]),
+                                        float(bezier[2][1]),
+                                    ],
+                                )
+                            )
+                    current = ctrl[3]
+                    changed = True
+                    continue
+            out_subpath.append((command, list(values)))
+            if command == "L":
+                current = np.array(values[:2], dtype=float)
+            elif command == "Q":
+                current = np.array(values[2:4], dtype=float)
+            elif command == "C":
+                current = np.array(values[4:6], dtype=float)
+            elif command == "A":
+                current = np.array(values[5:7], dtype=float)
+        rewritten.append(out_subpath)
+    if not changed:
+        return shape
+    return _shape_from_tokens(shape, rewritten)
+
+
+def _cleanup_mutated_path(
+    shape: Shape,
+    *,
+    epsilon: float,
+    max_error: float,
+    cubic: bool,
+) -> Shape:
+    cleaned = _cleanup_linelets(shape, epsilon=epsilon, max_error=max_error, cubic=cubic)
+    return _cleanup_inflecting_cubics(cleaned, max_error=max_error, line_epsilon=epsilon)
 
 
 def _true_up_path_vertices(a_shape: Shape, b_shape: Shape, *, tol: float) -> tuple[Shape, Shape, bool]:
@@ -425,25 +566,64 @@ def _replace_leaves(root: VectorRegion, replacements_by_leaf_id: dict[int, Vecto
     return root.with_children(children)
 
 
-def _proposal_from_leaf_pair(a_ref: _LeafRef, b_ref: _LeafRef) -> Proposal | None:
+def _leaf_key(ref: _LeafRef) -> tuple[int, int]:
+    return int(ref.owner.id), int(ref.leaf.id)
+
+
+def _apply_leaf_pair(
+    a_ref: _LeafRef,
+    b_ref: _LeafRef,
+    updates_by_leaf: dict[tuple[int, int], _LeafUpdate],
+    owner_leaf_maps: dict[int, dict[int, VectorRegion]],
+    *,
+    epsilon: float,
+    max_error: float,
+    cubic: bool,
+) -> tuple[int, int] | None:
     a = a_ref.leaf
     if a.current is None:
         return None
     b = b_ref.leaf
     if b.current is None:
         return None
-    candidate = _candidate_for_pair(a, b, tol=_SEAM_TOL)
+
+    def current_shape(ref: _LeafRef) -> Shape | None:
+        key = _leaf_key(ref)
+        if key in updates_by_leaf:
+            return updates_by_leaf[key].shape
+        leaf = ref.leaf
+        if leaf.current is None:
+            return None
+        if leaf.current.kind != "use":
+            return leaf.current
+        source_id = int(leaf.current.params.get("href_obj_id", -1))
+        source = owner_leaf_maps.get(int(ref.owner.id), {}).get(source_id)
+        if source is None or source.current is None:
+            return None
+        source_key = (int(ref.owner.id), source_id)
+        source_shape = updates_by_leaf[source_key].shape if source_key in updates_by_leaf else source.current
+        return bake_shape_transform(source_shape, leaf.current.params["transform"])
+
+    a_current = current_shape(a_ref)
+    b_current = current_shape(b_ref)
+    if a_current is None or b_current is None:
+        return None
+    a_for_candidate = a.with_current(a_current, footprint=a.footprint)
+    b_for_candidate = b.with_current(b_current, footprint=b.footprint)
+    candidate = _candidate_for_pair(a_for_candidate, b_for_candidate, tol=_SEAM_TOL)
     if candidate is None:
         return None
+    a_key = _leaf_key(a_ref)
+    b_key = _leaf_key(b_ref)
     a_shape = _rewrite_shape_side(
-        a.current,
+        a_current,
         side=candidate.a_side,
         candidate=candidate,
         side_value=candidate.a_value,
         tol=_SEAM_TOL,
     )
     b_shape = _rewrite_shape_side(
-        b.current,
+        b_current,
         side=candidate.b_side,
         candidate=candidate,
         side_value=candidate.b_value,
@@ -452,47 +632,200 @@ def _proposal_from_leaf_pair(a_ref: _LeafRef, b_ref: _LeafRef) -> Proposal | Non
     if a_shape is None or b_shape is None:
         return None
     a_shape, b_shape, vertices_changed = _true_up_path_vertices(a_shape, b_shape, tol=_SEAM_TOL)
+    cleaned_a = _cleanup_mutated_path(a_shape, epsilon=epsilon, max_error=max_error, cubic=cubic)
+    cleaned_b = _cleanup_mutated_path(b_shape, epsilon=epsilon, max_error=max_error, cubic=cubic)
+    if cleaned_a != a_shape or cleaned_b != b_shape:
+        a_shape, b_shape = cleaned_a, cleaned_b
+        a_shape, b_shape, cleanup_vertices_changed = _true_up_path_vertices(a_shape, b_shape, tol=_SEAM_TOL)
+        vertices_changed = vertices_changed or cleanup_vertices_changed
     selected = "vertex_midpoint" if vertices_changed or candidate.axis == "vertices" else "midpoint"
-    a_replacement = _replacement(a, a_shape, b.id, candidate, selected=selected)
-    b_replacement = _replacement(b, b_shape, a.id, candidate, selected=selected)
+    updates_by_leaf[a_key] = _LeafUpdate(a_shape, int(b.id), candidate, selected)
+    updates_by_leaf[b_key] = _LeafUpdate(b_shape, int(a.id), candidate, selected)
+    return int(a_ref.owner.id), int(b_ref.owner.id)
 
-    if int(a_ref.owner.id) == int(b_ref.owner.id):
-        owner = _replace_leaves(
-            a_ref.owner,
-            {
-                int(a.id): a_replacement,
-                int(b.id): b_replacement,
-            },
-        )
-        return Proposal((int(a_ref.owner.id),), [owner])
 
-    owner_replacements: dict[int, VectorRegion] = {
-        int(a_ref.owner.id): _replace_leaf(a_ref.owner, a.id, a_replacement),
-        int(b_ref.owner.id): _replace_leaf(b_ref.owner, b.id, b_replacement),
+def _owner_components(edges: list[tuple[int, int]]) -> list[set[int]]:
+    parent: dict[int, int] = {}
+
+    def find(value: int) -> int:
+        parent.setdefault(value, value)
+        while parent[value] != value:
+            parent[value] = parent[parent[value]]
+            value = parent[value]
+        return value
+
+    def union(a: int, b: int) -> None:
+        ra = find(a)
+        rb = find(b)
+        if ra != rb:
+            parent[rb] = ra
+
+    for a, b in edges:
+        union(a, b)
+
+    groups: dict[int, set[int]] = {}
+    for value in parent:
+        groups.setdefault(find(value), set()).add(value)
+    return [groups[key] for key in sorted(groups)]
+
+
+def _cluster_leaf_vertices(
+    updates_by_leaf: dict[tuple[int, int], _LeafUpdate],
+    owner_ids: set[int],
+    *,
+    tol: float,
+    epsilon: float,
+    max_error: float,
+    cubic: bool,
+) -> None:
+    keys = [
+        key for key, update in updates_by_leaf.items()
+        if key[0] in owner_ids and update.shape.kind == "path"
+    ]
+    if len(keys) < 2:
+        return
+
+    tokens_by_key = {
+        key: _parse_subpaths(str(updates_by_leaf[key].shape.params.get("d", "")))
+        for key in keys
     }
-    return Proposal(
-        tuple(sorted(owner_replacements)),
-        [owner_replacements[obj_id] for obj_id in sorted(owner_replacements)],
+    changed_keys: set[tuple[int, int]] = set()
+
+    def apply_clusters(*, link_tol: float, min_keys: int, allow_same_key_links: bool) -> None:
+        refs: list[_CoordinateRef] = []
+        for key, tokens in tokens_by_key.items():
+            refs.extend(_path_endpoint_refs(key, tokens))
+        if len(refs) < 2:
+            return
+
+        parent = list(range(len(refs)))
+
+        def find(index: int) -> int:
+            while parent[index] != index:
+                parent[index] = parent[parent[index]]
+                index = parent[index]
+            return index
+
+        def union(a: int, b: int) -> None:
+            ra = find(a)
+            rb = find(b)
+            if ra != rb:
+                parent[rb] = ra
+
+        for i, a_ref in enumerate(refs):
+            for j in range(i + 1, len(refs)):
+                b_ref = refs[j]
+                if not allow_same_key_links and a_ref.key == b_ref.key:
+                    continue
+                dx = a_ref.x - b_ref.x
+                dy = a_ref.y - b_ref.y
+                if 0.0 < (dx * dx + dy * dy) ** 0.5 <= link_tol:
+                    union(i, j)
+
+        groups: dict[int, list[_CoordinateRef]] = {}
+        for index, ref in enumerate(refs):
+            groups.setdefault(find(index), []).append(ref)
+
+        for group in groups.values():
+            if len({ref.key for ref in group}) < min_keys:
+                continue
+            x = sum(ref.x for ref in group) / len(group)
+            y = sum(ref.y for ref in group) / len(group)
+            for ref in group:
+                tokens = tokens_by_key[ref.key]
+                values = tokens[ref.subpath_index][ref.token_index][1]
+                values[ref.x_index] = x
+                values[ref.y_index] = y
+                changed_keys.add(ref.key)
+
+    apply_clusters(link_tol=tol, min_keys=2, allow_same_key_links=False)
+    apply_clusters(link_tol=_JUNCTION_TOL, min_keys=3, allow_same_key_links=True)
+
+    for key in changed_keys:
+        update = updates_by_leaf[key]
+        shape = _shape_from_tokens(update.shape, tokens_by_key[key])
+        updates_by_leaf[key] = _LeafUpdate(
+            _cleanup_mutated_path(shape, epsilon=epsilon, max_error=max_error, cubic=cubic),
+            update.paired_with,
+            update.candidate,
+            "vertex_cluster",
+        )
+
+
+def _replacement_for_update(ref: _LeafRef, update: _LeafUpdate) -> VectorRegion:
+    return _replacement(
+        ref.leaf,
+        update.shape,
+        update.paired_with,
+        update.candidate,
+        selected=update.selected,
     )
 
 
 def seams_pass(
     objects: list[VectorRegion],
     masks: dict[int, np.ndarray],
+    *,
+    epsilon: float = 1.0,
+    max_error: float = 1.0,
+    cubic: bool = False,
 ) -> list[Proposal]:
     owners = sorted(objects, key=lambda current: (float(current.z), int(current.id)))
-    proposals: list[Proposal] = []
+    owner_by_id = {int(owner.id): owner for owner in owners}
+    owner_leaf_maps = {
+        int(owner.id): {int(leaf.id): leaf for leaf in owner.leaves()}
+        for owner in owners
+    }
+    leaf_ref_by_key: dict[tuple[int, int], _LeafRef] = {}
+    updates_by_leaf: dict[tuple[int, int], _LeafUpdate] = {}
+    owner_edges: list[tuple[int, int]] = []
+
+    def record_pair(a_ref: _LeafRef, b_ref: _LeafRef) -> None:
+        leaf_ref_by_key.setdefault(_leaf_key(a_ref), a_ref)
+        leaf_ref_by_key.setdefault(_leaf_key(b_ref), b_ref)
+        edge = _apply_leaf_pair(
+            a_ref,
+            b_ref,
+            updates_by_leaf,
+            owner_leaf_maps,
+            epsilon=epsilon,
+            max_error=max_error,
+            cubic=cubic,
+        )
+        if edge is not None:
+            owner_edges.append(edge)
+
     for owner in owners:
         for a_ref, b_ref in _leaf_pairs_within(owner, owner, tol=_SEAM_TOL):
-            proposal = _proposal_from_leaf_pair(a_ref, b_ref)
-            if proposal is not None:
-                proposals.append(proposal)
+            record_pair(a_ref, b_ref)
 
     for owner_index, a_owner in enumerate(owners):
         for b_owner in owners[owner_index + 1:]:
             leaf_pairs = _leaf_pairs_between(a_owner, a_owner, b_owner, b_owner, tol=_SEAM_TOL)
             for a_ref, b_ref in leaf_pairs:
-                proposal = _proposal_from_leaf_pair(a_ref, b_ref)
-                if proposal is not None:
-                    proposals.append(proposal)
+                record_pair(a_ref, b_ref)
+
+    proposals: list[Proposal] = []
+    for owner_ids in _owner_components(owner_edges):
+        _cluster_leaf_vertices(
+            updates_by_leaf,
+            owner_ids,
+            tol=_SEAM_TOL,
+            epsilon=epsilon,
+            max_error=max_error,
+            cubic=cubic,
+        )
+        replacements: list[VectorRegion] = []
+        for owner_id in sorted(owner_ids):
+            owner = owner_by_id[owner_id]
+            leaf_replacements: dict[int, VectorRegion] = {}
+            for key, update in updates_by_leaf.items():
+                if key[0] != owner_id:
+                    continue
+                leaf_replacements[key[1]] = _replacement_for_update(leaf_ref_by_key[key], update)
+            if not leaf_replacements:
+                continue
+            replacements.append(_replace_leaves(owner, leaf_replacements))
+        if replacements:
+            proposals.append(Proposal(tuple(sorted(owner_ids)), replacements))
     return proposals

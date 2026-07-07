@@ -131,18 +131,31 @@ def cubic_inflects(ctrl) -> list[float]:
     c2 = _cross(a1, a2) + _cross(a2, b0)
     c1 = _cross(a0, a2) + _cross(a1, b0)
     c0 = _cross(a0, b0)
+    def curvature_poly(t: float) -> float:
+        return (c2 * t + c1) * t + c0
+
+    def real_sign_change(t: float) -> bool:
+        delta = 1e-4
+        left = curvature_poly(max(0.0, t - delta))
+        right = curvature_poly(min(1.0, t + delta))
+        scale = max(abs(c0), abs(c1), abs(c2), 1.0)
+        tol = 1e-9 * scale
+        if abs(left) <= tol and abs(right) <= tol:
+            return False
+        return left * right < 0.0
+
     roots: list[float] = []
     if abs(c2) < 1e-12:
         if abs(c1) > 1e-12:
             t = -c0 / c1
-            if 0.0 < t < 1.0:
+            if 1e-6 < t < 1.0 - 1e-6 and real_sign_change(t):
                 roots.append(t)
     else:
         disc = c1 * c1 - 4 * c2 * c0
         if disc >= 0:
             s = disc ** 0.5
             for t in ((-c1 - s) / (2 * c2), (-c1 + s) / (2 * c2)):
-                if 0.0 < t < 1.0:
+                if 1e-6 < t < 1.0 - 1e-6 and real_sign_change(float(t)):
                     roots.append(float(t))
     return sorted(roots)
 

@@ -3,7 +3,7 @@ from __future__ import annotations
 import numpy as np
 from shapely.geometry import Polygon
 
-from ...candidate import Fill, FlatFill, LinearGradientFill
+from ...candidate import Fill, FlatFill, LinearGradientFill, RadialGradientFill
 from ...fit import Shape
 from ..framework import Proposal
 from ..gate import rasterize
@@ -12,6 +12,8 @@ from ..vector_region import VectorRegion, _parse_subpaths, _ring_area, _sample_s
 _MIN_SUBPATH_AREA_FRACTION = 0.01
 _SOURCE_Z_OFFSET = 0.0
 _COVER_Z_OFFSET = 0.4
+_FILL_COVERAGE_THRESHOLD = 0.5
+_DEFAULT_BACKGROUND_FILL = FlatFill("#FFFFFF")
 
 
 def _subpath_shape(tokens: list[tuple[str, list[float]]]) -> Shape:
@@ -46,6 +48,7 @@ def _source_coverage(child_raster: np.ndarray, source_mask: np.ndarray | None) -
 
 def _fill_from_render_evidence(
     child_raster: np.ndarray,
+    child_footprint: Polygon,
     *,
     source: VectorRegion,
     source_mask: np.ndarray | None,
@@ -53,7 +56,7 @@ def _fill_from_render_evidence(
     masks: dict[int, np.ndarray],
 ) -> tuple[Fill | None, float, int | None]:
     source_coverage = _source_coverage(child_raster, source_mask)
-    if source_coverage >= 0.5:
+    if source_coverage >= _FILL_COVERAGE_THRESHOLD:
         assert source.fill is not None
         return source.fill, source_coverage, source.id
 
@@ -80,9 +83,11 @@ def _fill_from_render_evidence(
             best_id = candidate.id
             best_z = float(candidate.z)
 
-    if best_coverage >= 0.5:
+    if best_coverage >= _FILL_COVERAGE_THRESHOLD:
         return best_fill, best_coverage, best_id
-    return None, best_coverage, best_id
+    if not isinstance(source.fill, (LinearGradientFill, RadialGradientFill)):
+        return None, best_coverage, best_id
+    return _DEFAULT_BACKGROUND_FILL, best_coverage, None
 
 
 def split_compound_pass(
@@ -96,7 +101,7 @@ def split_compound_pass(
             continue
         if not obj.current.params.get("fill_rule"):
             continue
-        if not isinstance(obj.fill, (FlatFill, LinearGradientFill)):
+        if not isinstance(obj.fill, (FlatFill, LinearGradientFill, RadialGradientFill)):
             continue
 
         subpaths = _parse_subpaths(str(obj.current.params.get("d", "")))
@@ -114,6 +119,8 @@ def split_compound_pass(
         ]
         if len(kept) < 2:
             continue
+        source_subpath_index = max(kept, key=lambda item: item[2])[0]
+        kept = sorted(kept, key=lambda item: (item[0] != source_subpath_index, item[0]))
 
         source_mask = masks.get(obj.id)
         if source_mask is None:
@@ -137,12 +144,18 @@ def split_compound_pass(
             shape = _subpath_shape(tokens)
             footprint = footprints[output_index]
             raster = rasterize(footprint, shape_hw) if shape_hw is not None else obj.raster
-            child_fill, fill_coverage, fill_source_id = _fill_from_render_evidence(
-                raster,
-                source=obj,
-                source_mask=source_mask,
-                objects=objects,
-                masks=masks,
+            if _subpath_index == source_subpath_index:
+                child_fill = obj.fill
+                fill_coverage = 1.0
+                fill_source_id = obj.id
+            else:
+                child_fill, fill_coverage, fill_source_id = _fill_from_render_evidence(
+                    raster,
+                    footprint,
+                    source=obj,
+                    source_mask=source_mask,
+                    objects=objects,
+                    masks=masks,
             )
             if child_fill is None:
                 children = []

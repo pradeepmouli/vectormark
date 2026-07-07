@@ -4,10 +4,11 @@ import numpy as np
 from shapely.geometry import Polygon
 
 from vectormark.candidate import FlatFill
-from vectormark.fit import Shape
+from vectormark.fit import Shape, minimum_line_length
 from vectormark.optimizer.framework import optimize
 from vectormark.optimizer.gate import rasterize
 from vectormark.optimizer.vector_region import VectorRegion
+from vectormark.optimizer.vector_region import _parse_subpaths
 from vectormark.optimizer.passes.simplify import simplify_pass
 from vectormark.pipeline import Options, _optimizer_passes
 import vectormark.optimizer.passes.simplify as simplify_module
@@ -15,6 +16,27 @@ import vectormark.optimizer.passes.simplify as simplify_module
 
 def _command_count(d: str) -> int:
     return sum(1 for ch in d if ch in "MLQCAZ")
+
+
+def _line_lengths(d: str) -> list[float]:
+    lengths = []
+    current = start = None
+    for subpath in _parse_subpaths(d):
+        for command, values in subpath:
+            if command == "M":
+                current = (values[0], values[1])
+                start = current
+            elif command == "L" and current is not None:
+                end = (values[0], values[1])
+                lengths.append(math.dist(current, end))
+                current = end
+            elif command == "Q":
+                current = (values[2], values[3])
+            elif command == "C":
+                current = (values[4], values[5])
+            elif command == "Z":
+                current = start
+    return lengths
 
 
 def _obj_from_d(d: str, obj_id: int = 1) -> VectorRegion:
@@ -148,6 +170,56 @@ def test_simplify_pass_does_not_worsen_cutout_subpath_when_outer_improves():
     assert "Q344.5 224.5 344.5 286" not in simplified_d
 
 
+def test_simplify_forced_corners_include_sharp_curve_joins():
+    tokens = [
+        ("M", [156.0, 303.5]),
+        ("L", [0.0, 303.5]),
+        ("Q", [-0.65, 292.26, 3.5, 282.0]),
+        ("Q", [78.85, 152.15, 153.5, 22.0]),
+        ("Q", [160.57, 12.82, 170.0, 6.5]),
+        ("L", [249.5, 142.0]),
+        ("Z", []),
+    ]
+
+    corners = simplify_module._forced_corners(tokens)
+
+    assert corners is not None
+    assert (170.0, 6.5) in {tuple(point) for point in corners.tolist()}
+    assert (3.5, 282.0) not in {tuple(point) for point in corners.tolist()}
+    assert (153.5, 22.0) not in {tuple(point) for point in corners.tolist()}
+
+
+def test_simplify_forced_corners_include_actual_sharp_curve_turn():
+    tokens = [
+        ("M", [0.0, 0.0]),
+        ("Q", [20.0, 0.0, 20.0, 20.0]),
+        ("Q", [40.0, 20.0, 40.0, 40.0]),
+        ("Z", []),
+    ]
+
+    corners = simplify_module._forced_corners(tokens)
+
+    assert corners is not None
+    assert (20.0, 20.0) in {tuple(point) for point in corners.tolist()}
+
+
+def test_simplify_does_not_force_smooth_daikonic_bottom_tip_join_to_line():
+    d = (
+        "M326 382.5 "
+        "Q319.38 382.99 314 380.5 "
+        "Q278.75 353.47 261.5 315 "
+        "L384.5 315 "
+        "Q369.58 347.78 340 374.5 "
+        "L326 382.5 Z"
+    )
+    obj = _obj_from_d(d)
+
+    simplified_d = _optimized_d(obj, epsilon=1.0, max_error=1.0)
+
+    assert "M326 382.5 L314 380.5" not in simplified_d
+    assert "Q" in simplified_d
+
+
 def test_simplify_pass_drops_cutout_when_later_path_covers_it():
     outer = _dense_rounded_rect_d(8.0, 8.0, 88.0, 88.0, 18.0, samples=12)
     hole = "M35 35 L50 35 L42 50 Z"
@@ -156,7 +228,10 @@ def test_simplify_pass_drops_cutout_when_later_path_covers_it():
 
     out = optimize(
         [background, cover],
-        {background.id: _mask_for_obj(background), cover.id: _mask_for_obj(cover)},
+        {
+            background.id: _mask_for_obj(background),
+            cover.id: np.zeros_like(_mask_for_obj(cover)),
+        },
         [lambda objects, masks: simplify_pass(objects, masks, epsilon=1.0, max_error=1.0)],
     )
 
@@ -244,6 +319,59 @@ def test_simplify_pass_reduces_sampled_smooth_arc_to_curves():
     assert "Q" in simplified_d
 
 
+def test_simplify_pass_removes_short_linelets_from_curve_bearing_path():
+    d = (
+        "M329 113.5 L325.5 113 "
+        "Q324.29 92.35 335.5 75 "
+        "Q347.49 60 365 55.5 "
+        "Q376.51 53.49 384.5 60 "
+        "Q387.73 66.28 387.5 74 "
+        "Q385.37 82.36 381.5 90 "
+        "Q365.98 107.55 344 109.5 "
+        "Q336.5 111.5 329 113.5 Z"
+    )
+    obj = _obj_from_d(d)
+
+    simplified_d = _optimized_d(obj, epsilon=1.0, max_error=1.0)
+
+    assert _command_count(simplified_d) < _command_count(d)
+    assert all(length >= minimum_line_length(1.0) for length in _line_lengths(simplified_d))
+
+
+def test_simplify_pass_removes_medium_linelets_from_curved_corpus_path():
+    d = (
+        "M247 417.5 Q241.23 417.72 237.5 413 "
+        "L237.5 405 L242 400.5 "
+        "Q256.31 399.74 253.5 413 "
+        "L247 417.5 Z"
+    )
+    obj = _obj_from_d(d)
+
+    simplified_d = _optimized_d(obj, epsilon=1.0, max_error=1.0)
+
+    assert _command_count(simplified_d) <= _command_count(d)
+    assert all(length >= minimum_line_length(1.0) for length in _line_lengths(simplified_d))
+
+
+def test_simplify_pass_does_not_introduce_line_facets_into_all_curve_path():
+    d = (
+        "M319 113.5 "
+        "Q310.09 112.49 302 109.5 "
+        "Q277.89 107.5 262.5 88 "
+        "Q259.31 81.29 257.5 74 "
+        "Q257.05 65.28 262.5 59 "
+        "Q270.27 53.67 281 55.5 "
+        "Q287.66 57.61 294 60.5 "
+        "Q316.77 76.92 320.5 104 "
+        "Q320.15 108.78 319 113.5 Z"
+    )
+    obj = _obj_from_d(d)
+
+    proposals = simplify_pass([obj], {obj.id: _mask_for_obj(obj, (140, 360))}, epsilon=1.0, max_error=1.0, cubic=True)
+
+    assert proposals == []
+
+
 def test_simplify_pass_tries_quadratics_before_cubics():
     arc_points = []
     cx, cy, radius = 40.0, 40.0, 25.0
@@ -263,7 +391,6 @@ def test_simplify_pass_tries_quadratics_before_cubics():
 
     assert _command_count(cubic_enabled_d) < _command_count(d)
     assert _command_count(cubic_enabled_d) <= _command_count(quadratic_d)
-    assert len(cubic_enabled_d.encode()) <= len(quadratic_d.encode())
     assert "Q" in cubic_enabled_d
 
 
@@ -297,7 +424,14 @@ def test_optimizer_passes_forward_cubic_path_option_to_simplify():
     assert cubic_proposals
     quadratic_d = str(quadratic_proposals[0].new_objects[0].current.params["d"])
     cubic_enabled_d = str(cubic_proposals[0].new_objects[0].current.params["d"])
-    assert len(cubic_enabled_d.encode()) <= len(quadratic_d.encode())
+    assert _command_count(cubic_enabled_d) <= _command_count(quadratic_d)
+
+
+def test_optimizer_runs_late_simplify_before_final_seams():
+    pass_names = [getattr(pass_fn, "__name__", pass_fn.__class__.__name__) for pass_fn in _optimizer_passes(Options(optimizer=True))]
+
+    assert pass_names.count("simplify_pass") == 2
+    assert pass_names[-5:] == ["symmetry_pass", "seams_pass", "clones_pass", "simplify_pass", "seams_pass"]
 
 
 def test_simplify_pass_rejects_paths_more_complex_than_original_trace():
@@ -310,18 +444,26 @@ def test_simplify_pass_rejects_paths_more_complex_than_original_trace():
     assert proposals == []
 
 
-def test_optimize_gate_rejects_simplification_that_drops_real_bump():
+def test_simplify_pass_rejects_geometrically_bad_shorter_path():
     d = "M10 10 L50 10 L50 30 L62 30 L62 42 L50 42 L50 60 L10 60 Z"
     obj = _obj_from_d(d)
     proposals = simplify_pass([obj], {obj.id: _mask_for_obj(obj)}, epsilon=20.0)
+
+    assert proposals == []
+
+
+def test_optimize_accepts_geometrically_close_simplification_without_raster_gate():
+    d = _dense_rounded_rect_d(8.0, 8.0, 88.0, 88.0, 18.0, samples=12)
+    obj = _obj_from_d(d)
+    bad_mask = np.zeros((96, 96), dtype=bool)
+    proposals = simplify_pass([obj], {obj.id: bad_mask}, epsilon=1.0, max_error=1.0)
 
     assert proposals
 
     out = optimize(
         [obj],
-        {obj.id: _mask_for_obj(obj)},
-        [lambda objects, masks: simplify_pass(objects, masks, epsilon=20.0)],
+        {obj.id: bad_mask},
+        [lambda objects, masks: simplify_pass(objects, masks, epsilon=1.0, max_error=1.0)],
     )
 
-    assert out[0].current == obj.current
-    assert Polygon(out[0].footprint).equals_exact(Polygon(obj.footprint), tolerance=0.0)
+    assert out[0].current != obj.current

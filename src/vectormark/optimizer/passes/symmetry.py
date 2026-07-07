@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import math
-import re
 from collections import namedtuple
 
 import numpy as np
@@ -10,9 +9,12 @@ from shapely.geometry import MultiPolygon, Polygon
 from shapely.ops import unary_union
 
 from ...candidate import FlatFill
+from ...contour import region_corner_radius
 from ...fit import Shape, _fmt, fit_path
+from ...refine import fit_path_half_fit, half_ellipse_cap_half_fit, rounded_trapezoid_half_fit, symmetric_half_fit
 from ..framework import Proposal
-from ..gate import gate_ok
+from ..gate import rasterize
+from ..shape_transform import bake_shape_transform
 from ..vector_region import VectorRegion
 
 Axis2D = namedtuple("Axis2D", "theta cx cy")
@@ -24,7 +26,6 @@ _PAIR_RESIDUAL_TOL = 0.02
 _SELF_RESIDUAL_TOL = 0.02
 _SELF_AXIS_OVERLAP = 0.75
 _SELF_MIRROR_Z_OFFSET = 0.1
-_PATH_COMMAND = re.compile(r"[MLQCAZ]")
 
 
 def _polygonal_flat(flat: object) -> Polygon | MultiPolygon | None:
@@ -191,42 +192,105 @@ def _geometry_to_path_shape(flat: Polygon | MultiPolygon) -> Shape | None:
     return Shape("path", params)
 
 
-def _command_count(d: str) -> int:
-    return len(_PATH_COMMAND.findall(d))
-
-
-def _self_split_improves(original: Shape, half_shape: Shape) -> bool:
-    if original.kind != "path" or half_shape.kind != "path":
-        return False
-    original_d = str(original.params.get("d", ""))
-    half_d = str(half_shape.params.get("d", ""))
-    if not original_d or not half_d:
-        return False
-    # Count the mirrored <use> as one drawing command. This keeps already-simple
-    # symmetric polygons from being split just because they have an axis.
-    return (
-        _command_count(half_d) + 1 < _command_count(original_d)
-        and len(half_d.encode()) < len(original_d.encode())
+def _self_symmetry_branch(
+    obj: VectorRegion,
+    *,
+    axis: Axis2D,
+    half: Polygon | MultiPolygon,
+    reflected_half: Polygon | MultiPolygon,
+    half_shape: Shape,
+    residual: float,
+    mirror_id: int,
+    mask_shape: tuple[int, int],
+) -> VectorRegion:
+    matrix = _svg_reflection_matrix(axis)
+    source = obj.with_current(
+        half_shape,
+        footprint=half,
+        raster=rasterize(half, mask_shape),
+        diagnostics=_self_symmetry_diagnostics(axis, residual),
+    )
+    mirror = VectorRegion(
+        mirror_id,
+        Shape(
+            "use",
+            {
+                "href_obj_id": int(source.id),
+                "transform": matrix,
+            },
+        ),
+        obj.fill,
+        obj.z + _SELF_MIRROR_Z_OFFSET,
+        footprint=reflected_half,
+        raster=rasterize(reflected_half, mask_shape),
+        source_label=obj.source_label,
+        color_hex=obj.color_hex,
+        diagnostics={
+            "symmetry": {
+                "accepted": True,
+                "mode": "self_mirror",
+                "matched_source": int(source.id),
+                "axis": {
+                    "theta": float(axis.theta),
+                    "cx": float(axis.cx),
+                    "cy": float(axis.cy),
+                },
+                "residual": float(residual),
+            }
+        },
+    )
+    reconstructed = unary_union([half, reflected_half])
+    return VectorRegion.branch(
+        id=obj.id,
+        children=[source, mirror],
+        z=obj.z,
+        raster=obj.raster,
+        footprint=reconstructed,
+        fill=obj.fill,
+        source_label=obj.source_label,
+        color_hex=obj.color_hex,
+        diagnostics=_self_symmetry_diagnostics(axis, residual),
     )
 
 
-def _fit_polygon_path(poly: Polygon) -> str | None:
+def _self_symmetry_diagnostics(axis: Axis2D, residual: float) -> dict[str, object]:
+    return {
+        "symmetry": {
+            "accepted": True,
+            "mode": "self",
+            "axis": {
+                "theta": float(axis.theta),
+                "cx": float(axis.cx),
+                "cy": float(axis.cy),
+            },
+            "residual": float(residual),
+        }
+    }
+
+
+def _fit_polygon_path(poly: Polygon, *, epsilon: float, max_error: float, cubic: bool) -> str | None:
     coords = np.asarray(poly.exterior.coords, dtype=float)
     if len(coords) < 4:
         return None
     try:
-        fitted = fit_path(coords, epsilon=1.5, max_error=1.0)
+        fitted = fit_path(coords, epsilon=epsilon, max_error=max_error, cubic=cubic)
     except Exception:
         return None
     return str(fitted.params["d"])
 
 
-def _fit_geometry_to_path_shape(flat: Polygon | MultiPolygon) -> Shape | None:
+def _fit_geometry_to_path_shape(
+    flat: Polygon | MultiPolygon,
+    *,
+    epsilon: float,
+    max_error: float,
+    cubic: bool,
+) -> Shape | None:
     if isinstance(flat, MultiPolygon):
         return _geometry_to_path_shape(flat)
     if flat.is_empty:
         return None
-    exterior = _fit_polygon_path(flat)
+    exterior = _fit_polygon_path(flat, epsilon=epsilon, max_error=max_error, cubic=cubic)
     if exterior is None:
         return _geometry_to_path_shape(flat)
     parts = [exterior]
@@ -237,10 +301,71 @@ def _fit_geometry_to_path_shape(flat: Polygon | MultiPolygon) -> Shape | None:
     return Shape("path", params)
 
 
+def _vertical_half_side(half: Polygon | MultiPolygon, axis: Axis2D) -> str:
+    return "left" if float(half.centroid.x) < float(axis.cx) else "right"
+
+
+def _symmetric_refine_half_shape(
+    flat: Polygon | MultiPolygon,
+    half: Polygon | MultiPolygon,
+    axis: Axis2D,
+    *,
+    epsilon: float,
+    max_error: float,
+    corner_radius: float,
+    cubic: bool,
+) -> Shape | None:
+    if not isinstance(flat, Polygon) or flat.interiors:
+        return None
+    # A half-ellipse cap is bilaterally symmetric about a vertical line.
+    if abs(math.cos(float(axis.theta))) > 1e-6:
+        return None
+    side = _vertical_half_side(half, axis)
+    contour = np.asarray(flat.exterior.coords, dtype=float)
+    for build in (
+        lambda: half_ellipse_cap_half_fit(contour, float(axis.cx), side=side, max_error=max_error),
+        lambda: rounded_trapezoid_half_fit(
+            contour,
+            float(axis.cx),
+            side=side,
+            radius=corner_radius,
+            max_error=max_error,
+        ),
+        lambda: symmetric_half_fit(
+            contour,
+            float(axis.cx),
+            side=side,
+            corner_radius=corner_radius,
+            epsilon=epsilon,
+            max_error=max_error,
+        ),
+        lambda: fit_path_half_fit(
+            contour,
+            float(axis.cx),
+            side=side,
+            epsilon=epsilon,
+            max_error=max_error,
+            cubic=cubic,
+        ),
+    ):
+        try:
+            shape = build()
+        except Exception:
+            continue
+        if shape is not None:
+            return shape
+    return None
+
+
 def _best_self_reconstruction(
     flat: Polygon | MultiPolygon,
     mask: np.ndarray,
-) -> tuple[Axis2D, Polygon | MultiPolygon, Polygon | MultiPolygon, Shape] | None:
+    *,
+    epsilon: float,
+    max_error: float,
+    cubic: bool,
+) -> tuple[Axis2D, Polygon | MultiPolygon, Polygon | MultiPolygon, Shape, float] | None:
+    corner_radius = region_corner_radius(mask)
     candidates: list[tuple[float, Axis2D, Polygon | MultiPolygon, Polygon | MultiPolygon, Shape]] = []
     for axis in _self_axis_candidates(flat):
         reflected = _reflect_flat(flat, axis)
@@ -255,9 +380,17 @@ def _best_self_reconstruction(
             continue
         if reconstructed.is_empty or not isinstance(reconstructed, (Polygon, MultiPolygon)):
             continue
-        if not gate_ok(reconstructed, mask):
-            continue
-        shape = _fit_geometry_to_path_shape(half)
+        shape = _symmetric_refine_half_shape(
+            flat,
+            half,
+            axis,
+            epsilon=epsilon,
+            max_error=max_error,
+            corner_radius=corner_radius,
+            cubic=cubic,
+        )
+        if shape is None:
+            shape = _fit_geometry_to_path_shape(half, epsilon=epsilon, max_error=max_error, cubic=cubic)
         if shape is None:
             continue
         candidates.append((_residual(reconstructed, flat), axis, half, reflected_half, shape))
@@ -265,11 +398,11 @@ def _best_self_reconstruction(
     if not candidates:
         return None
 
-    _score, axis, half, reflected_half, shape = min(
+    score, axis, half, reflected_half, shape = min(
         candidates,
         key=lambda item: (round(item[0], 12), _axis_key(item[1]), item[4].params["d"]),
     )
-    return axis, half, reflected_half, shape
+    return axis, half, reflected_half, shape, score
 
 
 def _pair_proposal(
@@ -277,9 +410,9 @@ def _pair_proposal(
     canonical_flat: Polygon | MultiPolygon,
     target: VectorRegion,
     target_flat: Polygon | MultiPolygon,
-    target_fill_hex: str,
     masks: dict[int, np.ndarray],
 ) -> Proposal | None:
+    del masks
     if not _within_ratio(float(canonical_flat.area), float(target_flat.area), _AREA_RATIO_TOL):
         return None
     if not _within_ratio(float(canonical_flat.length), float(target_flat.length), _PERIMETER_RATIO_TOL):
@@ -291,25 +424,25 @@ def _pair_proposal(
     reflected = _apply_svg_matrix(canonical_flat, matrix)
     if _residual(reflected, target_flat) > _PAIR_RESIDUAL_TOL:
         return None
-    if not gate_ok(reflected, masks[target.id]):
-        return None
     return Proposal(
         (canonical.id, target.id),
         [
             canonical,
-            VectorRegion(
-                id=target.id,
-                current=Shape(
-                    "use",
-                    {
-                        "href_obj_id": canonical.id,
-                        "transform": matrix,
-                        "fill": target_fill_hex,
-                    },
-                ),
-                fill=target.fill,
-                z=target.z,
+            target.with_current(
+                bake_shape_transform(canonical.current, matrix),
                 footprint=reflected,
+                diagnostics={
+                    "symmetry": {
+                        "accepted": True,
+                        "mode": "pair",
+                        "matched_source": int(canonical.id),
+                        "axis": {
+                            "theta": float(axis.theta),
+                            "cx": float(axis.cx),
+                            "cy": float(axis.cy),
+                        },
+                    }
+                },
             )
         ],
     )
@@ -318,38 +451,35 @@ def _pair_proposal(
 def symmetry_pass(
     objects: list[VectorRegion],
     masks: dict[int, np.ndarray],
+    *,
+    epsilon: float = 1.5,
+    max_error: float = 1.0,
+    cubic: bool = False,
 ) -> list[Proposal]:
-    usable: list[tuple[VectorRegion, Polygon | MultiPolygon, str | None]] = []
+    usable: list[tuple[VectorRegion, Polygon | MultiPolygon]] = []
     for obj in sorted(objects, key=lambda current: int(current.id)):
         if not obj.is_leaf or obj.current is None:
             continue
         flat = _polygonal_flat(obj.footprint)
         if flat is None or obj.current.kind == "use" or obj.id not in masks:
             continue
-        usable.append((obj, flat, _flat_fill_hex(obj.fill)))
+        usable.append((obj, flat))
 
     proposals: list[Proposal] = []
     paired_ids: set[int] = set()
-    next_id = max((int(obj.id) for obj, _flat, _fill in usable), default=-1) + 1
+    next_id = max((int(obj.id) for obj, _flat in usable), default=-1) + 1
 
-    for index, (canonical, canonical_flat, canonical_fill) in enumerate(usable):
+    for index, (canonical, canonical_flat) in enumerate(usable):
         if canonical.id in paired_ids:
             continue
-        if canonical_fill is None:
-            continue
-        for target, target_flat, target_fill in usable[index + 1:]:
+        for target, target_flat in usable[index + 1:]:
             if target.id in paired_ids:
-                continue
-            if target_fill is None:
-                continue
-            if target_fill != canonical_fill:
                 continue
             proposal = _pair_proposal(
                 canonical,
                 canonical_flat,
                 target,
                 target_flat,
-                target_fill,
                 masks,
             )
             if proposal is None:
@@ -358,39 +488,32 @@ def symmetry_pass(
             paired_ids.update({canonical.id, target.id})
             break
 
-    for obj, flat, _fill_hex in usable:
+    for obj, flat in usable:
         if obj.id in paired_ids:
             continue
         if obj.current.kind != "path":
             continue
-        best = _best_self_reconstruction(flat, masks[obj.id])
+        best = _best_self_reconstruction(flat, masks[obj.id], epsilon=epsilon, max_error=max_error, cubic=cubic)
         if best is None:
             continue
-        axis, half, reflected_half, shape = best
-        if shape == obj.current or not _self_split_improves(obj.current, shape):
-            continue
-        use_id = next_id
-        next_id += 1
+        axis, half, reflected_half, shape, residual = best
         proposals.append(
             Proposal(
                 (obj.id,),
                 [
-                    VectorRegion(obj.id, shape, obj.fill, obj.z, half),
-                    VectorRegion(
-                        id=use_id,
-                        current=Shape(
-                            "use",
-                            {
-                                "href_obj_id": obj.id,
-                                "transform": _svg_reflection_matrix(axis),
-                            },
-                        ),
-                        fill=obj.fill,
-                        z=float(obj.z) + _SELF_MIRROR_Z_OFFSET,
-                        footprint=reflected_half,
-                    ),
+                    _self_symmetry_branch(
+                        obj,
+                        axis=axis,
+                        half=half,
+                        reflected_half=reflected_half,
+                        half_shape=shape,
+                        residual=residual,
+                        mirror_id=next_id,
+                        mask_shape=masks[obj.id].shape,
+                    )
                 ],
             )
         )
+        next_id += 1
 
     return proposals

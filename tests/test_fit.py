@@ -1,6 +1,7 @@
 import numpy as np
 from vectormark.contour import outer_contour
-from vectormark.fit import recognize_primitive
+from vectormark._fitcurve import cubic_inflects
+from vectormark.fit import Shape, minimum_line_length, recognize_primitive
 
 
 def _disk(cx, cy, r, size=60):
@@ -64,6 +65,63 @@ def _disk_local(size=60):
 
 
 from vectormark.fit import fit_path
+from vectormark.optimizer.vector_region import _parse_subpaths
+
+
+def _command_count(d: str) -> int:
+    return sum(1 for ch in d if ch in "MLQCAZ")
+
+
+def _line_lengths(d: str) -> list[float]:
+    import math
+
+    lengths = []
+    current = start = None
+    for subpath in _parse_subpaths(d):
+        for command, values in subpath:
+            if command == "M":
+                current = (values[0], values[1])
+                start = current
+            elif command == "L" and current is not None:
+                end = (values[0], values[1])
+                lengths.append(math.dist(current, end))
+                current = end
+            elif command == "Q":
+                current = (values[2], values[3])
+            elif command == "C":
+                current = (values[4], values[5])
+            elif command == "Z":
+                current = start
+    return lengths
+
+
+def _cubic_controls(d: str):
+    controls = []
+    current = start = None
+    for subpath in _parse_subpaths(d):
+        for command, values in subpath:
+            if command == "M":
+                current = np.array(values[:2], dtype=float)
+                start = current
+            elif command == "L":
+                current = np.array(values[:2], dtype=float)
+            elif command == "Q":
+                current = np.array(values[2:4], dtype=float)
+            elif command == "C" and current is not None:
+                ctrl = np.array(
+                    [
+                        current,
+                        values[:2],
+                        values[2:4],
+                        values[4:6],
+                    ],
+                    dtype=float,
+                )
+                controls.append(ctrl)
+                current = np.array(values[4:6], dtype=float)
+            elif command == "Z":
+                current = start
+    return controls
 
 
 def test_fit_path_of_square_uses_only_lines():
@@ -82,7 +140,88 @@ def test_fit_path_of_dome_uses_curve():
     shape = fit_path(c, epsilon=1.0, max_error=0.8)
     # curved top -> inflection-free quadratic arcs (Q), never cubic (C) by default
     assert shape.kind == "path" and "Q" in shape.params["d"] and "C" not in shape.params["d"]
-    # opt-in cubic flag still tries quadratics first and only keeps C when shorter
+    # opt-in cubic flag emits inflection-guarded cubic runs even when quadratics are shorter
     cshape = fit_path(c, epsilon=1.0, max_error=0.8, cubic=True)
     assert cshape.kind == "path"
-    assert len(cshape.params["d"].encode()) <= len(shape.params["d"].encode())
+    cubics = _cubic_controls(cshape.params["d"])
+    assert cubics
+    assert all(cubic_inflects(ctrl) == [] for ctrl in cubics)
+
+
+def test_fit_path_does_not_emit_short_linelets_between_forced_corners_on_smooth_curve():
+    angles = np.linspace(0.0, 2.0 * np.pi, 80, endpoint=False)
+    contour = np.array(
+        [(50.0 + 30.0 * np.cos(theta), 50.0 + 30.0 * np.sin(theta)) for theta in angles]
+        + [(80.0, 50.0)],
+        dtype=float,
+    )
+
+    shape = fit_path(
+        contour,
+        epsilon=1.0,
+        max_error=1.0,
+        forced_corners=np.array([contour[0], contour[1]], dtype=float),
+    )
+
+    assert all(length >= minimum_line_length(1.0) for length in _line_lengths(shape.params["d"]))
+
+
+def test_fit_path_keeps_nearly_linear_spans_as_curves_inside_curved_runs():
+    points = np.array(
+        [
+            (249.66, -0.73),
+            (237.53, -0.74),
+            (224.65, -0.54),
+            (216.37, -0.42),
+            (208.09, -0.21),
+            (202.56, -0.07),
+            (197.04, 0.11),
+            (182.93, -1.07),
+            (171.25, 7.05),
+            (249.66, -0.73),
+        ],
+        dtype=float,
+    )
+
+    shape = fit_path(points, epsilon=1.5, max_error=1.0)
+
+    assert "Q" in shape.params["d"]
+    assert "L" in shape.params["d"]
+
+
+def test_fit_path_cubic_option_emits_inflection_guarded_cubics_for_smooth_runs():
+    top = [(10.0 + 80.0 * t, 10.0 + 30.0 * (t**3)) for t in np.linspace(0.0, 1.0, 80)]
+    contour = np.array([*top, (90.0, 70.0), (10.0, 70.0), top[0]], dtype=float)
+
+    shape = fit_path(contour, epsilon=0.5, max_error=0.8, cubic=True)
+    cubics = _cubic_controls(shape.params["d"])
+
+    assert cubics
+    assert all(cubic_inflects(ctrl) == [] for ctrl in cubics)
+
+
+def test_fit_path_does_not_introduce_medium_line_facets_on_smooth_leaf():
+    from vectormark.optimizer.vector_region import flatten_points
+
+    source = Shape(
+        "path",
+        {
+            "d": (
+                "M319 113.5 "
+                "Q310.09 112.49 302 109.5 "
+                "Q277.89 107.5 262.5 88 "
+                "Q259.31 81.29 257.5 74 "
+                "Q257.05 65.28 262.5 59 "
+                "Q270.27 53.67 281 55.5 "
+                "Q287.66 57.61 294 60.5 "
+                "Q316.77 76.92 320.5 104 "
+                "Q320.15 108.78 319 113.5 Z"
+            )
+        },
+    )
+    contour = np.asarray(flatten_points(source, samples=12), dtype=float)
+    contour = np.vstack([contour, contour[0]])
+
+    fitted = fit_path(contour, epsilon=1.0, max_error=1.0)
+
+    assert fitted.params["d"].count("L") == 0

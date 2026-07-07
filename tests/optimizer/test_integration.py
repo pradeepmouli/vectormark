@@ -1,9 +1,10 @@
 from pathlib import Path
+import math
 
 import numpy as np
 from PIL import Image
 
-from vectormark.candidate import FlatFill, RadialGradientFill
+from vectormark.candidate import FlatFill, LinearGradientFill, RadialGradientFill
 from vectormark.emit import shape_to_path_d
 from vectormark.fit import Shape
 from vectormark.optimizer.framework import optimize
@@ -14,7 +15,9 @@ import vectormark.optimizer.passes.occlusion as occlusion_module
 import vectormark.optimizer.passes.primitives as primitives_module
 from vectormark.optimizer.vector_region import VectorRegion, to_polygon
 from vectormark.optimizer.passes.symmetry import symmetry_pass
-from vectormark.pipeline import Options, _optimizer_passes, _prefer_optimizer_svg, _render_optimizer_body, idealize
+from vectormark.optimizer.trace import _trace_shape_from_contours
+from vectormark.pipeline import Options, _optimizer_passes, _optimizer_report, _prefer_optimizer_svg, _render_optimizer_body, idealize
+import vectormark.pipeline as pipeline_module
 
 
 def _disk(h: int, w: int, cy: int, cx: int, r: int) -> np.ndarray:
@@ -62,6 +65,29 @@ def _synthetic_mastercard_image() -> np.ndarray:
     return img
 
 
+def _dense_rounded_rect_d(x0: float, y0: float, x1: float, y1: float, radius: float, *, samples: int = 10) -> str:
+    commands = [f"M{x0 + radius} {y0}", f"L{x1 - radius} {y0}"]
+    arcs = (
+        (x1 - radius, y0 + radius, -math.pi / 2.0, 0.0),
+        (x1 - radius, y1 - radius, 0.0, math.pi / 2.0),
+        (x0 + radius, y1 - radius, math.pi / 2.0, math.pi),
+        (x0 + radius, y0 + radius, math.pi, math.pi * 1.5),
+    )
+    straight_ends = (
+        (x1, y1 - radius),
+        (x0 + radius, y1),
+        (x0, y0 + radius),
+        (x0 + radius, y0),
+    )
+    for (cx, cy, start, end), line_end in zip(arcs, straight_ends, strict=True):
+        for theta in np.linspace(start, end, samples + 1)[1:]:
+            commands.append(f"L{cx + radius * math.cos(float(theta))} {cy + radius * math.sin(float(theta))}")
+        if line_end != straight_ends[-1]:
+            commands.append(f"L{line_end[0]} {line_end[1]}")
+    commands.append("Z")
+    return " ".join(commands)
+
+
 def test_optimizer_option_defaults_off_for_existing_pipeline():
     img = _disk_image()
 
@@ -77,6 +103,14 @@ def test_optimizer_pipeline_turns_disk_into_circle_and_is_deterministic():
 
     assert first == second
     assert "<circle" in first
+
+
+def test_optimizer_pipeline_uses_optimizer_output_even_when_noisier_than_trace(monkeypatch):
+    monkeypatch.setattr(pipeline_module, "_prefer_optimizer_svg", lambda _trace, _optimized: False)
+
+    svg = idealize(_disk_image(), options=Options(optimizer=True))
+
+    assert "<circle" in svg
 
 
 def test_optimizer_report_includes_object_diagnostics():
@@ -98,7 +132,7 @@ def test_optimizer_structural_fallback_rejects_larger_svg():
     assert _prefer_optimizer_svg(trace, trace)
 
 
-def test_optimizer_prefer_allows_small_element_increase_when_bytes_shrink():
+def test_optimizer_prefer_allows_small_element_increase_when_path_segments_drop():
     trace = '<svg><path d="M0 0 L10 0 L10 10 L0 10 Z"/></svg>'
     optimized = '<svg><circle r="1"/><use href="#s0"/></svg>'
 
@@ -110,13 +144,13 @@ def test_optimizer_prefer_ignores_non_path_element_count_but_not_path_segments()
     many_primitives = '<svg><circle r="1"/><circle r="2"/><use href="#s0"/></svg>'
     simple_long_path = '<svg><path d="M1000.123 1000.456 L2000.789 2000.123 Z"/></svg>'
     more_path_segments = '<svg><path d="M0 0 L1 0 L2 0 L3 0 L4 0 Z"/></svg>'
-    fewer_path_segments_more_bytes = (
+    fewer_path_segments_longer_text = (
         '<svg><path d="M1000.123 1000.456 L2000.789 2000.123 '
         'L3000.456 3000.789 Z"/></svg>'
     )
 
     assert _prefer_optimizer_svg(trace, many_primitives)
-    assert _prefer_optimizer_svg(trace, fewer_path_segments_more_bytes)
+    assert _prefer_optimizer_svg(trace, fewer_path_segments_longer_text)
     assert not _prefer_optimizer_svg(simple_long_path, more_path_segments)
 
 
@@ -129,6 +163,43 @@ def test_optimizer_flatten_emits_paths_without_primitives_or_transforms():
     assert "transform=" not in svg
 
 
+def test_optimizer_report_includes_leaf_pass_diagnostics_in_object_section():
+    obj = VectorRegion(
+        1,
+        Shape("path", {"d": "M0 0 L10 0 L10 10 L0 10 Z"}),
+        FlatFill("#111111"),
+        0,
+        diagnostics={"symmetry": {"accepted": True, "mode": "self"}},
+    )
+
+    report = _optimizer_report([obj], Options(optimizer=True))
+    diagnostics = report.diagnostics.to_dict()
+
+    assert diagnostics["optimizer_objects"][0]["diagnostics"]["symmetry"]["mode"] == "self"
+
+
+def test_optimizer_simplifies_compound_children_after_split():
+    outer = _dense_rounded_rect_d(0.0, 0.0, 120.0, 120.0, 20.0, samples=12)
+    hole = _dense_rounded_rect_d(28.0, 28.0, 92.0, 92.0, 14.0, samples=12)
+    shape = Shape("path", {"d": f"{outer} {hole}", "fill_rule": "evenodd"})
+    fill = LinearGradientFill({"x1": 0.0, "y1": 0.0, "x2": 120.0, "y2": 120.0}, [(0.0, "#111111"), (1.0, "#eeeeee")])
+    region = VectorRegion(1, shape, fill, 0)
+
+    out = optimize(
+        [region],
+        {region.id: rasterize(region.footprint, (140, 140))},
+        _optimizer_passes(Options(optimizer=True)),
+    )
+
+    branch = out[0]
+    assert branch.is_branch
+    cutout_leaves = [leaf for leaf in branch.leaves() if leaf.fill == FlatFill("#FFFFFF")]
+    assert cutout_leaves
+    assert all(leaf.current.kind == "path" for leaf in cutout_leaves)
+    assert sum(leaf.current.params["d"].count("Q") for leaf in cutout_leaves) >= 6
+    assert sum(leaf.current.params["d"].count("L") for leaf in cutout_leaves) < hole.count("L")
+
+
 def test_optimizer_recolored_clone_keeps_target_fill_without_use_override():
     svg = idealize(_two_colored_square_image(), options=Options(optimizer=True))
 
@@ -138,8 +209,11 @@ def test_optimizer_recolored_clone_keeps_target_fill_without_use_override():
 
 
 def test_optimizer_no_symmetry_skips_symmetry_pass():
-    assert symmetry_pass in _optimizer_passes(Options(optimizer=True))
-    assert symmetry_pass not in _optimizer_passes(Options(optimizer=True, no_symmetry=True))
+    assert "symmetry_pass" in {getattr(pass_fn, "__name__", "") for pass_fn in _optimizer_passes(Options(optimizer=True))}
+    assert "symmetry_pass" not in {
+        getattr(pass_fn, "__name__", "")
+        for pass_fn in _optimizer_passes(Options(optimizer=True, no_symmetry=True))
+    }
 
 
 def test_optimizer_threads_epsilon_into_primitives_pass(monkeypatch):
@@ -223,7 +297,9 @@ def test_optimizer_pipeline_reconstructs_mastercard_as_scene_branch():
     assert diagnostics["optimizer_fallback"] is None
     assert diagnostics["optimizer_regions"][0]["kind"] == "branch"
     assert diagnostics["optimizer_regions"][0]["children"] == 3
-    assert [obj["shape"] for obj in diagnostics["optimizer_objects"]] == ["circle", "circle", "path"]
+    assert [obj["shape"] for obj in diagnostics["optimizer_objects"]] == ["circle", "circle", "path", "path"]
+    assert diagnostics["optimizer_objects"][2]["diagnostics"]["symmetry"]["mode"] == "self"
+    assert diagnostics["optimizer_objects"][3]["diagnostics"]["symmetry"]["mode"] == "self_mirror"
 
 
 def test_optimizer_inlines_same_gradient_fill_mirror_to_preserve_paint_space():
@@ -313,6 +389,91 @@ def test_optimizer_orders_branch_mirror_before_sibling_covers():
     assert body[2].startswith('<circle id="s1-3"')
 
 
+def test_optimizer_combines_self_symmetry_branch_on_final_output():
+    fill = FlatFill("#111111")
+    source = VectorRegion(
+        1,
+        Shape("path", {"d": "M0 0 L10 0 L10 20 L0 20 Z"}),
+        fill,
+        0,
+    )
+    mirror = VectorRegion(
+        2,
+        Shape("use", {"href_obj_id": 1, "transform": (-1.0, 0.0, 0.0, 1.0, 20.0, 0.0)}),
+        fill,
+        0.1,
+        footprint=VectorRegion(3, Shape("path", {"d": "M10 0 L20 0 L20 20 L10 20 Z"}), fill).footprint,
+    )
+    branch = VectorRegion.branch(
+        id=1,
+        children=[source, mirror],
+        z=0,
+        footprint=VectorRegion(4, Shape("path", {"d": "M0 0 L20 0 L20 20 L0 20 Z"}), fill).footprint,
+        diagnostics={"symmetry": {"accepted": True, "mode": "self"}},
+    )
+
+    body, _defs = _render_optimizer_body([branch])
+    svg_body = "".join(body)
+
+    assert svg_body.count("<path") == 1
+    assert "<use" not in svg_body
+    assert svg_body.count("M") == 1
+    stitched = to_polygon(Shape("path", {"d": body[0].split(' d="', 1)[1].split('"', 1)[0]}))
+    assert stitched.symmetric_difference(branch.footprint).area < 1e-6
+
+
+def test_optimizer_self_symmetry_fit_uses_configured_epsilon_for_smooth_tip():
+    shape = Shape(
+        "path",
+        {
+            "d": (
+                "M326 382.5 "
+                "Q319.38 382.99 314 380.5 "
+                "Q278.75 353.47 261.5 315 "
+                "L384.5 315 "
+                "Q369.58 347.78 340 374.5 "
+                "L326 382.5 Z"
+            )
+        },
+    )
+    region = VectorRegion(1, shape, FlatFill("#f23325"), 0)
+    out = optimize(
+        [region],
+        {region.id: rasterize(region.footprint, (420, 420))},
+        _optimizer_passes(Options(optimizer=True, epsilon=1.0, max_error=1.0)),
+    )
+
+    body, _defs = _render_optimizer_body(out)
+    svg_body = "".join(body)
+
+    assert "L322.94 382." not in svg_body
+    assert "C" not in svg_body
+    assert svg_body.count("Q") <= 4
+    assert "Q318." in svg_body
+    assert "322.94 382.55" in svg_body
+
+
+def test_optimizer_trace_uses_quadratic_base_even_when_cubics_are_enabled():
+    contour = []
+    for theta in np.linspace(0.0, 2.0 * np.pi, 80, endpoint=False):
+        contour.append(
+            (
+                40.0 + 25.0 * np.cos(float(theta)) + 5.0 * np.sin(2.0 * float(theta)),
+                40.0 + 15.0 * np.sin(float(theta)),
+            )
+        )
+
+    shape = _trace_shape_from_contours(
+        [np.asarray(contour, dtype=float)],
+        Options(optimizer=True, cubic_paths=True, epsilon=1.0, max_error=1.0),
+    )
+
+    d = str(shape.params["d"])
+    assert "C" not in d
+    assert d.count("L") == 0
+    assert d.count("Q") >= 4
+
+
 def test_compound_split_keeps_uncovered_cutout_subpaths_subtractive():
     outer = "M0 0 L100 0 L100 100 L0 100 Z"
     hole = shape_to_path_d(Shape("circle", {"cx": 70.0, "cy": 50.0, "r": 12.0}))
@@ -398,3 +559,55 @@ def test_compound_split_carries_visible_region_fill_for_uncovered_subpath():
     branch = next(obj for obj in out if obj.id == region.id)
     assert branch.is_branch
     assert [child.fill for child in branch.children] == [region.fill, visible.fill]
+
+
+def test_gradient_compound_split_materializes_background_cutout():
+    outer = "M0 0 L100 0 L100 100 L0 100 Z"
+    inner = "M25 25 L75 25 L75 75 L25 75 Z"
+    shape = Shape("path", {"d": f"{outer} {inner}", "fill_rule": "evenodd"})
+    fill = RadialGradientFill({"cx": 50.0, "cy": 50.0, "r": 70.0}, [(0.0, "#000000"), (1.0, "#ffffff")])
+    region = VectorRegion(1, shape, fill, 0)
+
+    out = optimize(
+        [region],
+        {region.id: rasterize(region.footprint, (120, 120))},
+        [split_compound_pass],
+    )
+
+    assert len(out) == 1
+    assert out[0].is_branch
+    assert [child.current.kind for child in out[0].children] == ["path", "path"]
+    assert [child.fill for child in out[0].children] == [fill, FlatFill("#FFFFFF")]
+
+
+def test_compound_split_materializes_gradient_cutout_as_white_occluder():
+    lower_outer = "M0 0 L100 0 L100 100 L0 100 Z"
+    lower_inner = "M10 10 L90 10 L90 90 L10 90 Z"
+    lower_shape = Shape("path", {"d": f"{lower_outer} {lower_inner}", "fill_rule": "evenodd"})
+    lower_fill = RadialGradientFill({"cx": 50.0, "cy": 50.0, "r": 70.0}, [(0.0, "#000000"), (1.0, "#ffffff")])
+    lower = VectorRegion(1, lower_shape, lower_fill, 0)
+
+    top_outer = "M20 20 L80 20 L80 80 L20 80 Z"
+    top_hole = shape_to_path_d(Shape("circle", {"cx": 50.0, "cy": 50.0, "r": 16.0}))
+    top_shape = Shape("path", {"d": f"{top_outer} {top_hole}", "fill_rule": "evenodd"})
+    top_fill = LinearGradientFill({"x1": 20.0, "y1": 20.0, "x2": 80.0, "y2": 80.0}, [(0.0, "#111111"), (1.0, "#eeeeee")])
+    top = VectorRegion(2, top_shape, top_fill, 1)
+
+    out = optimize(
+        [lower, top],
+        {
+            lower.id: rasterize(lower.footprint, (120, 120)),
+            top.id: rasterize(top.footprint, (120, 120)),
+        },
+        [split_compound_pass, primitives_pass],
+    )
+
+    lower_branch = next(obj for obj in out if obj.id == lower.id)
+    assert lower_branch.is_branch
+    assert [child.fill for child in lower_branch.children] == [lower_fill, FlatFill("#FFFFFF")]
+
+    branch = next(obj for obj in out if obj.id == top.id)
+    assert branch.is_branch
+    assert [child.current.kind for child in branch.children] == ["path", "circle"]
+    assert branch.children[0].fill == top_fill
+    assert branch.children[1].fill == FlatFill("#FFFFFF")

@@ -23,7 +23,7 @@ def _path_square_obj(i, *, x=0.0, y=0.0, size=10.0):
     return VectorRegion(i, Shape("path", {"d": d}), FlatFill("#000"), 0)
 
 
-def test_framework_accepts_good_rejects_bad():
+def test_framework_accepts_non_primitive_proposals_without_raster_gate():
     objs = [_rect_obj(1, 10, 10)]
     masks = {1: np.zeros((20, 20), bool)}
     masks[1][0:10, 0:10] = True
@@ -34,7 +34,20 @@ def test_framework_accepts_good_rejects_bad():
 
     bad = lambda os, ms: [Proposal((1,), [_rect_obj(1, 2, 2)])]
     out2 = optimize(objs, masks, [bad])
-    assert abs(out2[0].current.params["w"] - 10) < 1e-9
+    assert abs(out2[0].current.params["w"] - 2) < 1e-9
+
+
+def test_framework_accepts_primitive_pass_proposals_without_raster_gate():
+    objs = [_rect_obj(1, 10, 10)]
+    masks = {1: np.zeros((20, 20), bool)}
+    masks[1][0:10, 0:10] = True
+
+    def primitives_pass(_os, _ms):
+        return [Proposal((1,), [_rect_obj(1, 2, 2)])]
+
+    out = optimize(objs, masks, [primitives_pass])
+
+    assert abs(out[0].current.params["w"] - 2) < 1e-9
 
 
 def test_framework_orders_multi_id_proposals_and_unions_masks_for_new_ids():
@@ -61,7 +74,7 @@ def test_framework_orders_multi_id_proposals_and_unions_masks_for_new_ids():
     assert [obj.id for obj in out] == [9]
 
 
-def test_framework_rejects_multi_id_new_id_without_union_coverage():
+def test_framework_accepts_multi_id_new_id_without_union_coverage_for_non_primitive_pass():
     objs = [
         _rect_obj(1, 10, 10, x=0, y=0),
         _rect_obj(2, 10, 10, x=10, y=0),
@@ -78,11 +91,11 @@ def test_framework_rejects_multi_id_new_id_without_union_coverage():
 
     out = optimize(objs, masks, [bad_pass])
 
-    assert [obj.id for obj in out] == [1, 2]
-    assert [obj.current.params["w"] for obj in out] == [10.0, 10.0]
+    assert [obj.id for obj in out] == [9]
+    assert out[0].current.params["w"] == 2.0
 
 
-def test_framework_rejects_multi_id_proposal_that_drops_consumed_coverage():
+def test_framework_accepts_multi_id_proposal_that_drops_consumed_coverage_for_non_primitive_pass():
     objs = [
         _rect_obj(1, 10, 10, x=0, y=0),
         _rect_obj(2, 10, 10, x=10, y=0),
@@ -99,7 +112,7 @@ def test_framework_rejects_multi_id_proposal_that_drops_consumed_coverage():
 
     out = optimize(objs, masks, [drop_second_object_pass])
 
-    assert [obj.id for obj in out] == [1, 2]
+    assert [obj.id for obj in out] == [1]
 
 
 def test_framework_accepts_multi_id_new_id_with_union_coverage():
