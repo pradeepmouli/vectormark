@@ -168,7 +168,6 @@ def transform_path_d(d: str, m: tuple[float, float, float, float, float, float])
     only the endpoint moves and the x-axis-rotation advances by the affine's
     rotation. Reflections reverse arc orientation, so they also flip the sweep flag."""
     a, b, c, dd, e, f = m
-    rot_deg = math.degrees(math.atan2(b, a))
     flips_orientation = (a * dd - b * c) < 0.0
 
     def pt(x: float, y: float) -> tuple[float, float]:
@@ -187,9 +186,13 @@ def transform_path_d(d: str, m: tuple[float, float, float, float, float, float])
             rx, ry, xrot, large, sweep, x, y = toks[i:i + 7]
             i += 7
             nx, ny = pt(float(x), float(y))
+            theta = math.radians(float(xrot))
+            axis_x = a * math.cos(theta) + c * math.sin(theta)
+            axis_y = b * math.cos(theta) + dd * math.sin(theta)
+            transformed_xrot = (math.degrees(math.atan2(axis_y, axis_x)) + 360.0) % 360.0
             if flips_orientation:
                 sweep = "0" if int(float(sweep)) else "1"
-            out += [rx, ry, _fmt(float(xrot) + rot_deg), large, sweep, _fmt(nx), _fmt(ny)]
+            out += [rx, ry, _fmt(transformed_xrot), large, sweep, _fmt(nx), _fmt(ny)]
             continue
         n = _COORD_COUNT[cmd]
         nums = [float(t) for t in toks[i:i + n]]

@@ -127,6 +127,14 @@ def test_transform_path_d_flips_arc_sweep_under_reflection():
     assert "A 5 5 180 0 0 0 0" in out
 
 
+def test_transform_path_d_reflects_rotated_arc_axis():
+    from vectormark.emit import transform_path_d
+
+    out = transform_path_d("M0 0 A5 3 30 0 1 10 0 Z", (-1.0, 0.0, 0.0, 1.0, 10.0, 0.0))
+
+    assert "A 5 3 150 0 0 0 0" in out
+
+
 def _annulus_shape():
     return Shape("annulus", {"cx": 60.0, "cy": 60.0, "r_outer": 40.0, "r_inner": 22.0})
 

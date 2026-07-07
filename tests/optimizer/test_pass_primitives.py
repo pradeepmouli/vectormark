@@ -107,7 +107,7 @@ def test_primitives_pass_accepts_quantized_small_circular_cutout():
     assert out[0].current.kind == "circle"
 
 
-def test_primitives_pass_uses_largest_polygon_exterior_for_multipolygon():
+def test_primitives_pass_skips_multipolygon_to_preserve_all_components():
     large = Point(40.0, 40.0).buffer(18.0, quad_segs=32)
     small = Polygon([(0.0, 0.0), (6.0, 0.0), (6.0, 6.0), (0.0, 6.0)])
     obj = VectorRegion(
@@ -119,11 +119,11 @@ def test_primitives_pass_uses_largest_polygon_exterior_for_multipolygon():
     )
 
     proposals = primitives_pass([obj], {7: np.zeros((80, 80), dtype=bool)})
+    out = optimize([obj], {7: np.zeros((80, 80), dtype=bool)}, [primitives_pass])
 
-    assert len(proposals) == 1
-    replacement = proposals[0].new_objects[0]
-    assert replacement.current.kind == "circle"
-    assert replacement.current.params["r"] > 10.0
+    assert proposals == []
+    assert out[0].current.kind == "path"
+    assert abs(out[0].footprint.area - obj.footprint.area) < 1e-6
 
 
 def test_primitives_pass_skips_polygon_with_counter():

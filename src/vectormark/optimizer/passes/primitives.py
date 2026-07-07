@@ -16,9 +16,7 @@ def _polygon_exterior_points(flat: object) -> tuple[np.ndarray, Polygon] | None:
     if isinstance(flat, Polygon):
         polygon = flat
     elif isinstance(flat, MultiPolygon):
-        polygons = [poly for poly in flat.geoms if not poly.is_empty]
-        if polygons:
-            polygon = max(polygons, key=lambda poly: (float(poly.area), tuple(poly.bounds)))
+        return None
 
     if polygon is None or polygon.is_empty:
         return None
