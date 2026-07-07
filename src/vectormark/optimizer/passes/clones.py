@@ -1,16 +1,14 @@
 from __future__ import annotations
 
 import math
-from collections import defaultdict
 
 import numpy as np
 from shapely import affinity
 from shapely.geometry import MultiPolygon, Polygon
 
 from ...candidate import FlatFill
-from ...fit import Shape
 from ..framework import Proposal
-from ..gate import gate_ok
+from ..shape_transform import bake_shape_transform
 from ..vector_region import VectorRegion
 
 _ANGLE_EPS = 1e-9
@@ -31,13 +29,13 @@ def _flat_fill_hex(fill: object) -> str | None:
     return None
 
 
+def _has_self_symmetry(region: VectorRegion) -> bool:
+    symmetry = region.diagnostics.get("symmetry")
+    return isinstance(symmetry, dict) and symmetry.get("mode") == "self"
+
+
 def _shape_descriptor(flat: Polygon | MultiPolygon) -> tuple[float, float, int]:
     return (float(flat.area), float(flat.length), len(getattr(flat, "geoms", ()) or []))
-
-
-def _bucket_key(descriptor: tuple[float, float, int]) -> tuple[int, int, int]:
-    area, perimeter, parts = descriptor
-    return (int(round(area)), int(round(perimeter)), parts)
 
 
 def _within_ratio(a: float, b: float, tol: float) -> bool:
@@ -137,68 +135,59 @@ def clones_pass(
     objects: list[VectorRegion],
     masks: dict[int, np.ndarray],
 ) -> list[Proposal]:
+    del masks
     usable: list[tuple[VectorRegion, Polygon | MultiPolygon, tuple[float, float, int], str]] = []
     for obj in sorted(objects, key=lambda current: int(current.id)):
         if not obj.is_leaf or obj.current is None:
             continue
         flat = _polygonal_flat(obj.footprint)
         fill_hex = _flat_fill_hex(obj.fill)
-        if flat is None or fill_hex is None or obj.current.kind == "use":
+        if flat is None or fill_hex is None or obj.current.kind == "use" or _has_self_symmetry(obj):
             continue
         usable.append((obj, flat, _shape_descriptor(flat), fill_hex))
 
-    by_bucket: dict[tuple[int, int, int], list[tuple[VectorRegion, Polygon | MultiPolygon, tuple[float, float, int], str]]] = defaultdict(list)
-    for item in usable:
-        by_bucket[_bucket_key(item[2])].append(item)
-
     proposals: list[Proposal] = []
-    for bucket in sorted(by_bucket):
-        group = by_bucket[bucket]
-        queued_targets: set[int] = set()
-        for index, (target_obj, target_flat, target_desc, target_fill_hex) in enumerate(group):
-            matched = False
-            for canonical_obj, canonical_flat, canonical_desc, _canonical_fill_hex in group[:index]:
-                if canonical_obj.id in queued_targets:
-                    continue
-                if _canonical_fill_hex != target_fill_hex:
-                    continue
-                if not _within_ratio(canonical_desc[0], target_desc[0], _AREA_RATIO_TOL):
-                    continue
-                if not _within_ratio(canonical_desc[1], target_desc[1], _PERIMETER_RATIO_TOL):
-                    continue
-
-                best = _best_transform(canonical_flat, target_flat)
-                if best is None:
-                    continue
-                matrix, transformed = best
-                if not gate_ok(transformed, masks[target_obj.id]):
-                    continue
-
-                proposals.append(
-                    Proposal(
-                        (target_obj.id,),
-                        [
-                            VectorRegion(
-                                id=target_obj.id,
-                                current=Shape(
-                                    "use",
-                                    {
-                                        "href_obj_id": canonical_obj.id,
-                                        "transform": matrix,
-                                        "fill": target_fill_hex,
-                                    },
-                                ),
-                                fill=target_obj.fill,
-                                z=target_obj.z,
-                                footprint=transformed,
-                            )
-                        ],
-                    )
-                )
-                queued_targets.add(int(target_obj.id))
-                matched = True
-                break
-            if matched:
+    queued_targets: set[int] = set()
+    for index, (target_obj, target_flat, target_desc, target_fill_hex) in enumerate(usable):
+        matched = False
+        for canonical_obj, canonical_flat, canonical_desc, _canonical_fill_hex in usable[:index]:
+            if canonical_obj.id in queued_targets:
                 continue
+            if canonical_desc[2] != target_desc[2]:
+                continue
+            if not _within_ratio(canonical_desc[0], target_desc[0], _AREA_RATIO_TOL):
+                continue
+            if not _within_ratio(canonical_desc[1], target_desc[1], _PERIMETER_RATIO_TOL):
+                continue
+
+            best = _best_transform(canonical_flat, target_flat)
+            if best is None:
+                continue
+            matrix, transformed = best
+
+            proposals.append(
+                Proposal(
+                    (target_obj.id,),
+                    [
+                        target_obj.with_current(
+                            bake_shape_transform(canonical_obj.current, matrix),
+                            footprint=transformed,
+                            diagnostics={
+                                "clones": {
+                                    "accepted": True,
+                                    "matched_source": int(canonical_obj.id),
+                                    "fill_preserved": target_fill_hex,
+                                    "transform": matrix,
+                                }
+                            },
+                        )
+                    ],
+                )
+            )
+            queued_targets.add(int(target_obj.id))
+            matched = True
+            break
+        if matched:
+            continue
 
     return proposals

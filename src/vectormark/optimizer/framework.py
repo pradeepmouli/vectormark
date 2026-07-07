@@ -1,13 +1,11 @@
 from __future__ import annotations
 
 from collections import namedtuple
-from collections.abc import Iterable
 from typing import Protocol
 
 import numpy as np
-from shapely.ops import unary_union
 
-from .gate import BUDGET, gate_ok, rasterize
+from .gate import BUDGET, rasterize
 from .vector_region import VectorRegion
 
 Proposal = namedtuple("Proposal", "obj_ids new_objects")
@@ -49,58 +47,12 @@ def _proposal_sort_key(proposal: Proposal) -> tuple[tuple[int, ...], tuple[tuple
     return (_proposal_key(proposal), tuple(sorted(_shape_key(obj) for obj in proposal.new_objects)))
 
 
-def _geometry_changed(original: VectorRegion, replacement: VectorRegion) -> bool:
-    if original.current is None or replacement.current is None:
-        return original.footprint != replacement.footprint
-    return original.current != replacement.current
-
-
-def _union_masks(mask_by_id: dict[int, np.ndarray], obj_ids: Iterable[int]) -> np.ndarray:
+def _union_masks(mask_by_id: dict[int, np.ndarray], obj_ids) -> np.ndarray:
     ordered_ids = tuple(sorted(int(obj_id) for obj_id in obj_ids))
     union = np.zeros_like(mask_by_id[ordered_ids[0]], dtype=bool)
     for obj_id in ordered_ids:
         union |= np.asarray(mask_by_id[obj_id], dtype=bool)
     return union
-
-
-def _union_flats(objects: Iterable[VectorRegion]):
-    return unary_union([obj.footprint for obj in sorted(objects, key=_shape_key)])
-
-
-def _matched_original(
-    proposal_ids: tuple[int, ...],
-    originals: dict[int, VectorRegion],
-    replacement: VectorRegion,
-) -> VectorRegion | None:
-    if replacement.id in proposal_ids and replacement.id in originals:
-        return originals[replacement.id]
-    if len(proposal_ids) == 1:
-        return originals[proposal_ids[0]]
-    return None
-
-
-def _gate_mask(
-    proposal_ids: tuple[int, ...],
-    originals: dict[int, VectorRegion],
-    current_masks: dict[int, np.ndarray],
-    replacement: VectorRegion,
-    union_mask: np.ndarray,
-) -> np.ndarray | None:
-    original = _matched_original(proposal_ids, originals, replacement)
-    if original is None:
-        if len(proposal_ids) == 1:
-            return current_masks[proposal_ids[0]]
-        return None
-    if not _geometry_changed(original, replacement):
-        return None
-    mask = np.asarray(current_masks[original.id], dtype=bool)
-    if len(proposal_ids) > 1:
-        mask = mask.copy()
-        for obj_id in proposal_ids:
-            other = originals[obj_id]
-            if other.z > original.z:
-                mask |= np.asarray(current_masks[obj_id], dtype=bool)
-    return mask
 
 
 def _pass_name(pass_fn: Pass) -> str:
@@ -128,10 +80,7 @@ def _annotate_replacement(
     )
 
 
-def _masks_from_objects(
-    objects: Iterable[VectorRegion],
-    fallback: dict[int, np.ndarray],
-) -> dict[int, np.ndarray]:
+def _masks_from_objects(objects, fallback: dict[int, np.ndarray]) -> dict[int, np.ndarray]:
     out: dict[int, np.ndarray] = {}
     for obj in objects:
         if obj.raster.size:
@@ -231,41 +180,7 @@ def optimize(
                 continue
 
             union_mask = _union_masks(pass_masks, proposal_ids)
-            gates_ok = True
             split_replacement = len(proposal_ids) == 1 and len(proposal.new_objects) > 1
-            if (len(proposal_ids) > 1 or split_replacement) and not gate_ok(
-                _union_flats(proposal.new_objects),
-                union_mask,
-                budget=budget,
-            ):
-                gates_ok = False
-            if split_replacement and not gates_ok:
-                continue
-            if split_replacement:
-                gates_ok = True
-                per_replacement_gate = False
-            else:
-                per_replacement_gate = True
-            for replacement in proposal.new_objects:
-                if not gates_ok:
-                    break
-                if not per_replacement_gate:
-                    continue
-                gate_mask = _gate_mask(
-                    proposal_ids,
-                    pass_original_by_id,
-                    pass_masks,
-                    replacement,
-                    union_mask,
-                )
-                if gate_mask is None:
-                    continue
-                if not gate_ok(replacement.footprint, gate_mask, budget=budget):
-                    gates_ok = False
-                    break
-
-            if not gates_ok:
-                continue
 
             preserved_masks = {
                 obj_id: np.asarray(pass_masks[obj_id], dtype=bool).copy()

@@ -15,7 +15,7 @@ from scipy.optimize import least_squares
 
 from ._fitcurve import fit_quadratic_beziers
 from .contour import rdp
-from .fit import Shape, _fmt, _max_point_to_polyline, _segment_is_straight
+from .fit import Shape, _fmt, _max_point_to_polyline, _segment_is_straight, fit_path
 
 _KAPPA = 0.5522847498
 _FILLET_K = 0.5522847498  # cubic handle for a quarter-circle-ish fillet
@@ -97,10 +97,16 @@ def _longest_true_run_circular(mask: np.ndarray) -> tuple[int, int]:
     return (best_start + off) % n, best_len
 
 
-def _right_half(contour: np.ndarray, axis_x: float) -> np.ndarray | None:
-    """The contour arc on the x >= axis side, ordered top (min y) -> bottom."""
+def _side_half(contour: np.ndarray, axis_x: float, *, side: str) -> np.ndarray | None:
+    """The contour arc on one side of the axis, ordered top (min y) -> bottom."""
     n = len(contour)
-    mask = contour[:, 0] >= axis_x
+    axis_tol = 1e-6
+    if side == "right":
+        mask = contour[:, 0] >= axis_x - axis_tol
+    elif side == "left":
+        mask = contour[:, 0] <= axis_x + axis_tol
+    else:
+        raise ValueError(f"unsupported side: {side!r}")
     start, length = _longest_true_run_circular(mask)
     if length < 3:
         return None
@@ -108,6 +114,80 @@ def _right_half(contour: np.ndarray, axis_x: float) -> np.ndarray | None:
     if half[0, 1] > half[-1, 1]:          # ensure top -> bottom
         half = half[::-1].copy()
     return half
+
+
+def _dedupe_consecutive_points(points: np.ndarray) -> np.ndarray:
+    if len(points) == 0:
+        return points
+    out = [points[0]]
+    for point in points[1:]:
+        if not np.allclose(point, out[-1]):
+            out.append(point)
+    return np.asarray(out, dtype=float)
+
+
+def _axis_crossings(contour: np.ndarray, axis_x: float) -> list[np.ndarray]:
+    crossings: list[np.ndarray] = []
+    for a, b in zip(contour, np.vstack([contour[1:], contour[:1]]), strict=False):
+        ax = float(a[0] - axis_x)
+        bx = float(b[0] - axis_x)
+        if abs(ax) <= 1e-6:
+            crossings.append(np.array([axis_x, float(a[1])], dtype=float))
+            continue
+        if ax * bx >= 0.0 or abs(float(b[0] - a[0])) <= 1e-9:
+            continue
+        t = float((axis_x - a[0]) / (b[0] - a[0]))
+        if 0.0 <= t <= 1.0:
+            crossings.append(np.array([axis_x, float(a[1] + t * (b[1] - a[1]))], dtype=float))
+    return crossings
+
+
+def _axis_bounded_side_half(contour: np.ndarray, axis_x: float, *, side: str, epsilon: float) -> np.ndarray | None:
+    half = _side_half(contour, axis_x, side=side)
+    if half is None or len(half) < 3:
+        return None
+    half = _dedupe_consecutive_points(half)
+    if len(half) < 3:
+        return None
+
+    crossings = _axis_crossings(np.asarray(contour, dtype=float), axis_x)
+    y_tol = max(1.5, epsilon * 1.5)
+
+    def axis_point_near(point: np.ndarray) -> np.ndarray | None:
+        if not crossings:
+            return None
+        crossing = min(crossings, key=lambda candidate: abs(float(candidate[1]) - float(point[1])))
+        if abs(float(crossing[1]) - float(point[1])) <= y_tol:
+            return crossing
+        return None
+
+    if abs(float(half[0][0]) - axis_x) > 1.0:
+        crossing = axis_point_near(half[0])
+        if crossing is not None:
+            half = np.vstack([crossing, half])
+    elif abs(float(half[0][0]) - axis_x) <= 1.0:
+        half[0, 0] = axis_x
+
+    if abs(float(half[-1][0]) - axis_x) > 1.0:
+        crossing = axis_point_near(half[-1])
+        if crossing is not None:
+            half = np.vstack([half, crossing])
+    elif abs(float(half[-1][0]) - axis_x) <= 1.0:
+        half[-1, 0] = axis_x
+
+    half = _dedupe_consecutive_points(half)
+    if len(half) < 3:
+        return None
+    if abs(float(half[0][0]) - axis_x) > 1.0 or abs(float(half[-1][0]) - axis_x) > 1.0:
+        return None
+    if not np.allclose(half[0], half[-1]):
+        half = np.vstack([half, half[0]])
+    return half
+
+
+def _right_half(contour: np.ndarray, axis_x: float) -> np.ndarray | None:
+    """The contour arc on the x >= axis side, ordered top (min y) -> bottom."""
+    return _side_half(contour, axis_x, side="right")
 
 
 def _open_corners(poly: np.ndarray, *, angle_threshold_deg: float = 40.0) -> list[int]:
@@ -191,15 +271,40 @@ def _emit_symmetric(start: np.ndarray, segs: list[tuple], axis_x: float) -> str:
     return d + "Z"
 
 
-def rounded_trapezoid_fit(
+def _emit_half(start: np.ndarray, segs: list[tuple]) -> str:
+    f = _fmt
+    d = f"M{f(start[0])} {f(start[1])} "
+    for s in segs:
+        if s[0] == "L":
+            d += f"L{f(s[1][0])} {f(s[1][1])} "
+        elif s[0] == "Q":
+            d += f"Q{f(s[1][0])} {f(s[1][1])} {f(s[2][0])} {f(s[2][1])} "
+        else:
+            d += (
+                f"C{f(s[1][0])} {f(s[1][1])} {f(s[2][0])} {f(s[2][1])} "
+                f"{f(s[3][0])} {f(s[3][1])} "
+            )
+    return d + "Z"
+
+
+def _mirror_segs(segs: list[tuple], axis_x: float) -> list[tuple]:
+    def mir(p: np.ndarray) -> np.ndarray:
+        return np.array([2 * axis_x - p[0], p[1]], dtype=float)
+
+    out: list[tuple] = []
+    for s in segs:
+        if s[0] == "L":
+            out.append(("L", mir(s[1])))
+        elif s[0] == "Q":
+            out.append(("Q", mir(s[1]), mir(s[2])))
+        else:
+            out.append(("C", mir(s[1]), mir(s[2]), mir(s[3])))
+    return out
+
+
+def _rounded_trapezoid_segments(
     contour: np.ndarray, axis_x: float, *, radius: float, max_error: float
-) -> Shape | None:
-    """Fit a clean, symmetric rounded trapezoid (flat top/bottom, straight
-    tapering sides, filleted corners) when the region is band-like. The corner
-    `radius` is the shared mark-level value (not a per-segment fraction of height),
-    so every band rounds the same. Returns None if the side isn't a clean straight
-    taper, so genuinely curved regions fall through to `symmetric_fit`.
-    """
+) -> tuple[np.ndarray, list[tuple]] | None:
     pts = np.asarray(contour, dtype=float)
     y_top, y_bot = float(pts[:, 1].min()), float(pts[:, 1].max())
     height = y_bot - y_top
@@ -252,7 +357,43 @@ def rounded_trapezoid_fit(
         _fillet_seg(p_bot_s, c0_bot, p_bot_h),
         ("L", np.array([axis_x, y_bot])),
     ]
+    return start, segs
+
+
+def rounded_trapezoid_fit(
+    contour: np.ndarray, axis_x: float, *, radius: float, max_error: float
+) -> Shape | None:
+    """Fit a clean, symmetric rounded trapezoid (flat top/bottom, straight
+    tapering sides, filleted corners) when the region is band-like. The corner
+    `radius` is the shared mark-level value (not a per-segment fraction of height),
+    so every band rounds the same. Returns None if the side isn't a clean straight
+    taper, so genuinely curved regions fall through to `symmetric_fit`.
+    """
+    fitted = _rounded_trapezoid_segments(contour, axis_x, radius=radius, max_error=max_error)
+    if fitted is None:
+        return None
+    start, segs = fitted
     return Shape("path", {"d": _emit_symmetric(start, segs, axis_x)})
+
+
+def rounded_trapezoid_half_fit(
+    contour: np.ndarray,
+    axis_x: float,
+    *,
+    side: str,
+    radius: float,
+    max_error: float,
+) -> Shape | None:
+    fitted = _rounded_trapezoid_segments(contour, axis_x, radius=radius, max_error=max_error)
+    if fitted is None:
+        return None
+    start, segs = fitted
+    if side == "left":
+        start = np.array([2 * axis_x - start[0], start[1]], dtype=float)
+        segs = _mirror_segs(segs, axis_x)
+    elif side != "right":
+        raise ValueError(f"unsupported side: {side!r}")
+    return Shape("path", {"d": _emit_half(start, segs)})
 
 
 def _half_ellipse_cap_d(axis_x: float, y_bot: float, rx: float, ry: float, r: float = 0.0) -> str:
@@ -292,14 +433,36 @@ def _half_ellipse_cap_d(axis_x: float, y_bot: float, rx: float, ry: float, r: fl
     )
 
 
-def half_ellipse_cap_fit(
-    contour: np.ndarray, axis_x: float, *, corner_radius: float = 0.0, max_error: float
-) -> Shape | None:
-    """Primitive-deform: fit a flat-bottomed half-ellipse (dome) to the contour
-    via scipy least-squares over (rx, ry), then emit it exactly symmetric. Cleaner
-    than the free half-outline fit when the region really is a half-ellipse cap.
-    Returns None if the arc doesn't match an ellipse within tolerance.
-    """
+def _half_ellipse_cap_half_d(axis_x: float, y_bot: float, rx: float, ry: float, *, side: str) -> str:
+    """One side of a flat-bottomed half-ellipse cap, bounded by the symmetry axis."""
+    k = _KAPPA
+    f = _fmt
+    y_top = y_bot - ry
+    if side == "left":
+        left = axis_x - rx
+        return (
+            f"M{f(axis_x)} {f(y_top)} "
+            f"C{f(axis_x - k * rx)} {f(y_top)} {f(left)} {f(y_bot - k * ry)} {f(left)} {f(y_bot)} "
+            f"L{f(axis_x)} {f(y_bot)} "
+            f"Z"
+        )
+    if side == "right":
+        right = axis_x + rx
+        return (
+            f"M{f(axis_x)} {f(y_top)} "
+            f"C{f(axis_x + k * rx)} {f(y_top)} {f(right)} {f(y_bot - k * ry)} {f(right)} {f(y_bot)} "
+            f"L{f(axis_x)} {f(y_bot)} "
+            f"Z"
+        )
+    raise ValueError(f"unsupported cap side: {side!r}")
+
+
+def _half_ellipse_cap_params(
+    contour: np.ndarray,
+    axis_x: float,
+    *,
+    max_error: float,
+) -> tuple[float, float, float] | None:
     pts = np.asarray(contour, dtype=float)
     y_bot = float(pts[:, 1].max())
     arc = pts[pts[:, 1] < y_bot - 1.0]               # exclude the flat base
@@ -325,7 +488,53 @@ def half_ellipse_cap_fit(
     # convert the algebraic residual to an approximate pixel distance
     if np.abs(resid(sol.x)).max() * min(rx, ry) > max_error * 2.0:
         return None
+    return y_bot, rx, ry
+
+
+def half_ellipse_cap_fit(
+    contour: np.ndarray, axis_x: float, *, corner_radius: float = 0.0, max_error: float
+) -> Shape | None:
+    """Primitive-deform: fit a flat-bottomed half-ellipse (dome) to the contour
+    via scipy least-squares over (rx, ry), then emit it exactly symmetric. Cleaner
+    than the free half-outline fit when the region really is a half-ellipse cap.
+    Returns None if the arc doesn't match an ellipse within tolerance.
+    """
+    params = _half_ellipse_cap_params(contour, axis_x, max_error=max_error)
+    if params is None:
+        return None
+    y_bot, rx, ry = params
     return Shape("path", {"d": _half_ellipse_cap_d(axis_x, y_bot, rx, ry, corner_radius)})
+
+
+def half_ellipse_cap_half_fit(
+    contour: np.ndarray,
+    axis_x: float,
+    *,
+    side: str,
+    max_error: float,
+) -> Shape | None:
+    """Fit one half of a flat-bottomed cap for internal mirror reconstruction."""
+    params = _half_ellipse_cap_params(contour, axis_x, max_error=max_error)
+    if params is None:
+        return None
+    y_bot, rx, ry = params
+    return Shape("path", {"d": _half_ellipse_cap_half_d(axis_x, y_bot, rx, ry, side=side)})
+
+
+def fit_path_half_fit(
+    contour: np.ndarray,
+    axis_x: float,
+    *,
+    side: str,
+    epsilon: float,
+    max_error: float,
+    cubic: bool,
+) -> Shape | None:
+    """Fit a closed half-region bounded by the symmetry axis with the generic path fitter."""
+    half = _axis_bounded_side_half(contour, axis_x, side=side, epsilon=epsilon)
+    if half is None:
+        return None
+    return fit_path(half, epsilon=epsilon, max_error=max_error, cubic=cubic)
 
 
 def symmetric_polygon_fit(contour: np.ndarray, axis_x: float, *, epsilon: float, max_vertices: int = 10) -> Shape | None:
@@ -374,3 +583,51 @@ def symmetric_fit(
     last = segs[-1]
     (last[1] if last[0] == "L" else last[-1])[0] = axis_x   # pin bottom to the axis
     return Shape("path", {"d": _emit_symmetric(start, segs, axis_x)})
+
+
+def symmetric_half_fit(
+    contour: np.ndarray,
+    axis_x: float,
+    *,
+    side: str,
+    corner_radius: float = 0.0,
+    epsilon: float,
+    max_error: float,
+) -> Shape | None:
+    """Fit one side of a straddling region for internal mirror reconstruction."""
+    half = _side_half(contour, axis_x, side=side)
+    if half is None or len(half) < 3:
+        return None
+    half = _dedupe_consecutive_points(half)
+    if len(half) < 3:
+        return None
+    if abs(float(half[0][0]) - axis_x) > 1.0:
+        crossings = _axis_crossings(np.asarray(contour, dtype=float), axis_x)
+        if crossings:
+            top_crossing = min(crossings, key=lambda point: abs(float(point[1]) - float(half[0][1])))
+            if abs(float(top_crossing[1]) - float(half[0][1])) <= max(1.5, epsilon * 1.5):
+                half = np.vstack([top_crossing, half])
+    prefix: list[tuple] = []
+    start = half[0].copy()
+    if (
+        abs(float(start[0]) - axis_x) <= 1.0
+        and abs(float(half[1][1]) - float(start[1])) <= max(1.5, epsilon * 1.5)
+        and abs(float(half[1][0]) - axis_x) >= 4.0
+    ):
+        prefix.append(("L", half[1].copy()))
+        fit_half = half[1:]
+    else:
+        fit_half = half
+    fit_start, fit_segs = _fit_open_segments(fit_half, epsilon, max_error, corner_radius)
+    if not fit_segs:
+        return None
+    if prefix:
+        start = half[0].copy()
+        segs = [*prefix, *fit_segs]
+    else:
+        start = fit_start
+        segs = fit_segs
+    start[0] = axis_x
+    last = segs[-1]
+    (last[1] if last[0] == "L" else last[-1])[0] = axis_x
+    return Shape("path", {"d": _emit_half(start, segs)})

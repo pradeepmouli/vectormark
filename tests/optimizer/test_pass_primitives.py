@@ -68,7 +68,46 @@ def test_primitives_pass_skips_irregular_blob():
     assert out[0].current.kind == "path"
 
 
-def test_primitives_pass_uses_largest_polygon_exterior_for_multipolygon():
+def test_primitives_pass_rejects_partial_oval_segment_as_full_ellipse():
+    segment = Shape(
+        "path",
+        {
+            "d": (
+                "M20 70 "
+                "C20 42 56 20 100 20 "
+                "C144 20 180 42 180 70 "
+                "L20 70 Z"
+            )
+        },
+    )
+    obj = VectorRegion(1, segment, FlatFill("#000000"), 0)
+
+    proposals = primitives_pass([obj], {1: np.zeros((120, 220), dtype=bool)})
+    out = optimize([obj], {1: np.zeros((120, 220), dtype=bool)}, [primitives_pass])
+
+    assert proposals == []
+    assert out[0].current.kind == "path"
+
+
+def test_primitives_pass_accepts_quantized_small_circular_cutout():
+    flash = Shape(
+        "path",
+        {
+            "d": (
+                "M351.5 174 Q370.14 167.06 368.5 147 L366.5 142 "
+                "L357 132.5 L341.5 131 L328.5 139 L324.5 149 "
+                "Q324.17 168.06 342 174.5 L351.5 174 Z"
+            )
+        },
+    )
+    obj = VectorRegion(1, flash, FlatFill("#FFFFFF"), 0)
+
+    out = optimize([obj], {1: np.zeros((220, 220), dtype=bool)}, [primitives_pass])
+
+    assert out[0].current.kind == "circle"
+
+
+def test_primitives_pass_skips_multipolygon_to_preserve_all_components():
     large = Point(40.0, 40.0).buffer(18.0, quad_segs=32)
     small = Polygon([(0.0, 0.0), (6.0, 0.0), (6.0, 6.0), (0.0, 6.0)])
     obj = VectorRegion(
@@ -80,11 +119,11 @@ def test_primitives_pass_uses_largest_polygon_exterior_for_multipolygon():
     )
 
     proposals = primitives_pass([obj], {7: np.zeros((80, 80), dtype=bool)})
+    out = optimize([obj], {7: np.zeros((80, 80), dtype=bool)}, [primitives_pass])
 
-    assert len(proposals) == 1
-    replacement = proposals[0].new_objects[0]
-    assert replacement.current.kind == "circle"
-    assert replacement.current.params["r"] > 10.0
+    assert proposals == []
+    assert out[0].current.kind == "path"
+    assert abs(out[0].footprint.area - obj.footprint.area) < 1e-6
 
 
 def test_primitives_pass_skips_polygon_with_counter():

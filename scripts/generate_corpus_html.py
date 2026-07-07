@@ -35,6 +35,8 @@ DEFAULT_CORPUS_OUTPUT = Path("corpus")
 DEFAULT_CORPUS_MANIFEST = REPO_ROOT / "corpus" / "sources.json"
 DEFAULT_CORPUS_CACHE = REPO_ROOT / "corpus" / "cache"
 LEGACY_CORPUS_INPUT = REPO_ROOT / "scratch" / "real-logos"
+DEFAULT_CORPUS_EPSILON = 1.0
+DEFAULT_CORPUS_MAX_ERROR = 1.0
 
 
 @dataclass(frozen=True)
@@ -294,16 +296,11 @@ def _idealize_optimizer_with_trace_cache(
     trace_svg = render_svg_doc(w0, h0, trace_body, trace_defs)
     optimized_body, optimized_defs = _render_optimizer_body(optimized, flatten=options.flatten)
     optimized_svg = render_svg_doc(w0, h0, optimized_body, optimized_defs)
-    if _prefer_optimizer_svg(trace_svg, optimized_svg):
-        svg = optimized_svg
-        report = _optimizer_report(optimized, options)
-    else:
-        svg = trace_svg
-        report = _optimizer_report(
-            objects,
-            options,
-            fallback_reason="optimized output has more path segments than trace baseline",
-        )
+    fallback_reason = None
+    if not _prefer_optimizer_svg(trace_svg, optimized_svg):
+        fallback_reason = "optimized output has more path segments than trace baseline"
+    svg = optimized_svg
+    report = _optimizer_report(optimized, options, fallback_reason=fallback_reason)
     if (working.shape[1], working.shape[0]) != (orig_w, orig_h):
         svg = _set_svg_output_size(svg, orig_w, orig_h)
     return svg, report
@@ -342,8 +339,14 @@ def _gallery_options(
     working_max_dim: int | None,
     *,
     cubic_paths: bool = False,
+    epsilon: float = DEFAULT_CORPUS_EPSILON,
+    max_error: float = DEFAULT_CORPUS_MAX_ERROR,
 ) -> Options:
     updates: dict[str, object] = {}
+    if options.epsilon != epsilon:
+        updates["epsilon"] = epsilon
+    if options.max_error != max_error:
+        updates["max_error"] = max_error
     if working_max_dim is not None and options.working_max_dim is None:
         updates["working_max_dim"] = working_max_dim
     if cubic_paths:
@@ -557,6 +560,8 @@ def generate_corpus_html(
     *,
     working_max_dim: int | None = None,
     cubic_paths: bool = False,
+    epsilon: float = DEFAULT_CORPUS_EPSILON,
+    max_error: float = DEFAULT_CORPUS_MAX_ERROR,
     only: Iterable[str] | None = None,
     rebuild_index: bool = False,
 ) -> Path:
@@ -586,7 +591,13 @@ def generate_corpus_html(
         input_path = input_dir / input_name
         Image.fromarray(image).save(input_path)
 
-        options = _gallery_options(entry.options, working_max_dim, cubic_paths=cubic_paths)
+        options = _gallery_options(
+            entry.options,
+            working_max_dim,
+            cubic_paths=cubic_paths,
+            epsilon=epsilon,
+            max_error=max_error,
+        )
         print(f"rendering {entry.mode}/{entry.name}", file=sys.stderr)
         if options.optimizer:
             svg, report = _idealize_optimizer_with_trace_cache(
@@ -740,6 +751,18 @@ def main() -> None:
         help="Opt in to cubic Bézier fitting for curved path runs.",
     )
     parser.add_argument(
+        "--epsilon",
+        type=float,
+        default=DEFAULT_CORPUS_EPSILON,
+        help=f"Corpus geometry tolerance in pixels. Defaults to {DEFAULT_CORPUS_EPSILON}.",
+    )
+    parser.add_argument(
+        "--max-error",
+        type=float,
+        default=DEFAULT_CORPUS_MAX_ERROR,
+        help=f"Corpus Bezier fit tolerance in pixels. Defaults to {DEFAULT_CORPUS_MAX_ERROR}.",
+    )
+    parser.add_argument(
         "--only",
         action="append",
         default=[],
@@ -766,6 +789,8 @@ def main() -> None:
         entries,
         working_max_dim=args.working_max_dim,
         cubic_paths=args.cubic_paths,
+        epsilon=args.epsilon,
+        max_error=args.max_error,
         only=args.only,
         rebuild_index=args.rebuild_index,
     )

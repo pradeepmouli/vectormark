@@ -45,3 +45,16 @@ def test_cubic_fit_splits_internal_inflections():
 
     assert len(beziers) > 1
     assert all(cubic_inflects(ctrl) == [] for ctrl in beziers)
+
+
+def test_cubic_inflects_detects_near_collinear_s_shape():
+    ctrl = np.array(
+        [
+            [10.0, 10.0],
+            [19.11, 10.4],
+            [28.23, 10.8],
+            [37.34, 11.2],
+        ]
+    )
+
+    assert cubic_inflects(ctrl) != []

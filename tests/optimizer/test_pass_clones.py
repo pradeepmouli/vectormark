@@ -64,7 +64,7 @@ def _circle(obj_id: int, *, center=(20.0, 20.0), radius=6.0, fill="#778899") -> 
     )
 
 
-def test_clones_pass_proposes_use_for_translated_square_with_same_flat_fill():
+def test_clones_pass_copies_translated_square_geometry_with_same_flat_fill():
     canonical = _square(1, center=(18.0, 18.0), fill=FlatFill("#112233"))
     clone = _square(2, center=(52.0, 40.0), fill=FlatFill("#112233"))
     objects = [clone, canonical]
@@ -74,12 +74,9 @@ def test_clones_pass_proposes_use_for_translated_square_with_same_flat_fill():
 
     assert [obj.id for obj in out] == [1, 2]
     assert out[0].current.kind == "path"
-    assert out[1].current.kind == "use"
-    assert out[1].current.params == {
-        "href_obj_id": 1,
-        "transform": (1.0, 0.0, 0.0, 1.0, 34.0, 22.0),
-        "fill": "#112233",
-    }
+    assert out[1].current.kind == "path"
+    assert out[1].current.params["d"] == "M 46 34 L 58 34 L 58 46 L 46 46 Z"
+    assert out[1].diagnostics["clones"]["matched_source"] == 1
 
 
 def test_clones_pass_matches_rotated_congruent_square():
@@ -91,15 +88,9 @@ def test_clones_pass_matches_rotated_congruent_square():
     out = optimize(objects, masks, [clones_pass])
 
     assert [obj.id for obj in out] == [1, 2]
-    use_obj = out[1]
-    assert use_obj.current.kind == "use"
-    a, b, c, d, e, f = use_obj.current.params["transform"]
-    assert a == pytest.approx(math.cos(math.radians(30.0)), abs=1e-6)
-    assert b == pytest.approx(math.sin(math.radians(30.0)), abs=1e-6)
-    assert c == pytest.approx(-math.sin(math.radians(30.0)), abs=1e-6)
-    assert d == pytest.approx(math.cos(math.radians(30.0)), abs=1e-6)
-    assert e == pytest.approx(51.94744111674235, abs=1e-6)
-    assert f == pytest.approx(17.94744111674235, abs=1e-6)
+    clone_obj = out[1]
+    assert clone_obj.current.kind == "path"
+    assert clone_obj.diagnostics["clones"]["matched_source"] == 1
 
 
 def test_clones_pass_skips_non_congruent_shapes():
@@ -115,15 +106,57 @@ def test_clones_pass_skips_non_congruent_shapes():
     assert [obj.current.kind for obj in out] == ["path", "circle"]
 
 
-def test_clones_pass_skips_recolored_clone_proposals():
+def test_clones_pass_reuses_geometry_for_recolored_clone_proposals():
     canonical = _square(1, center=(18.0, 18.0), fill=FlatFill("#112233"))
     clone = _square(2, center=(52.0, 40.0), fill=FlatFill("#abcdef"))
     objects = [canonical, clone]
     masks = {obj.id: _mask_for_polygon(obj.footprint) for obj in objects}
 
-    assert clones_pass(objects, masks) == []
     out = optimize(objects, masks, [clones_pass])
     assert [obj.current.kind for obj in out] == ["path", "path"]
+    assert out[1].fill == FlatFill("#abcdef")
+    assert out[1].diagnostics["clones"]["matched_source"] == 1
+
+
+def test_clones_pass_checks_nearby_descriptor_buckets_before_rejecting(monkeypatch):
+    canonical = _square(1, size=10.0, center=(18.0, 18.0), fill=FlatFill("#112233"))
+    clone = _square(2, size=10.03, center=(52.0, 40.0), fill=FlatFill("#abcdef"))
+    objects = [canonical, clone]
+    masks = {obj.id: _mask_for_polygon(obj.footprint) for obj in objects}
+
+    monkeypatch.setattr(
+        clones_module,
+        "_best_transform",
+        lambda _canonical, target: ((1.0, 0.0, 0.0, 1.0, 34.0, 22.0), target),
+    )
+    proposals = clones_pass(objects, masks)
+
+    assert [proposal.obj_ids for proposal in proposals] == [(2,)]
+
+
+def test_clones_pass_does_not_use_raster_mask_as_acceptance_gate():
+    canonical = _square(1, center=(18.0, 18.0), fill=FlatFill("#112233"))
+    clone = _square(2, center=(52.0, 40.0), fill=FlatFill("#abcdef"))
+    objects = [canonical, clone]
+    masks = {
+        canonical.id: _mask_for_polygon(canonical.footprint),
+        clone.id: np.zeros((96, 96), dtype=bool),
+    }
+
+    proposals = clones_pass(objects, masks)
+
+    assert [proposal.obj_ids for proposal in proposals] == [(2,)]
+
+
+def test_clones_pass_skips_self_symmetric_regions():
+    canonical = _square(1, center=(18.0, 18.0), fill=FlatFill("#112233")).with_diagnostics(
+        {"symmetry": {"accepted": True, "mode": "self"}}
+    )
+    clone = _square(2, center=(52.0, 40.0), fill=FlatFill("#abcdef"))
+    objects = [canonical, clone]
+    masks = {obj.id: _mask_for_polygon(obj.footprint) for obj in objects}
+
+    assert clones_pass(objects, masks) == []
 
 
 def test_clones_pass_skips_non_flat_fill_clone_proposals():
@@ -174,5 +207,5 @@ def test_optimizer_object_svg_resolves_clone_href_to_emitted_id():
     body = optimizer_objects_to_svg(out)
 
     assert body[0].startswith('<path id="s0"')
-    assert body[1].startswith('<use id="s1"')
-    assert 'href="#s0"' in body[1]
+    assert body[1].startswith('<path id="s1"')
+    assert 'href="#s0"' not in body[1]

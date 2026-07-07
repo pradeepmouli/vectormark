@@ -5,13 +5,17 @@ import re
 
 import numpy as np
 from shapely.geometry import MultiPolygon, Polygon
+from shapely.ops import unary_union
 
-from ...fit import Shape, _fmt, fit_path
+from ...fit import Shape, _fmt, fit_path, minimum_line_length
 from ..framework import Proposal
-from ..gate import BUDGET, rasterize
 from ..vector_region import VectorRegion, _parse_subpaths, _ring_area, _sample_subpath
 
 _PATH_COMMAND = re.compile(r"[MLQCAZ]")
+_MAX_GEOMETRY_RESIDUAL = 0.02
+_MAX_SHORT_LINELET_GEOMETRY_RESIDUAL = 0.06
+_COMMAND_COST = {"M": 0, "Z": 0, "L": 1, "Q": 2, "C": 3, "A": 3}
+_FORCED_CURVE_JOIN_DEG = 35.0
 
 
 def _command_count(d: str) -> int:
@@ -37,6 +41,86 @@ def _subpath_d(tokens: list[tuple[str, list[float]]]) -> str:
     return " ".join(parts)
 
 
+def _angle_between(a: np.ndarray, b: np.ndarray) -> float:
+    denom = float(np.linalg.norm(a) * np.linalg.norm(b))
+    if denom == 0.0:
+        return 0.0
+    cos_angle = float(np.clip(np.dot(a, b) / denom, -1.0, 1.0))
+    return float(np.degrees(np.arccos(cos_angle)))
+
+
+def _command_end(command: str, values: list[float], start: np.ndarray) -> np.ndarray:
+    if command in {"M", "L"}:
+        return np.array(values[:2], dtype=float)
+    if command == "Q":
+        return np.array(values[2:4], dtype=float)
+    if command == "C":
+        return np.array(values[4:6], dtype=float)
+    if command == "A":
+        return np.array(values[5:7], dtype=float)
+    return start.copy()
+
+
+def _command_start_tangent(command: str, values: list[float], start: np.ndarray, end: np.ndarray) -> np.ndarray:
+    if command in {"L", "Z", "A"}:
+        return end - start
+    if command == "Q":
+        return np.array(values[:2], dtype=float) - start
+    if command == "C":
+        return np.array(values[:2], dtype=float) - start
+    return np.zeros(2, dtype=float)
+
+
+def _command_end_tangent(command: str, values: list[float], start: np.ndarray, end: np.ndarray) -> np.ndarray:
+    if command in {"L", "Z", "A"}:
+        return end - start
+    if command == "Q":
+        return end - np.array(values[:2], dtype=float)
+    if command == "C":
+        return end - np.array(values[2:4], dtype=float)
+    return np.zeros(2, dtype=float)
+
+
+def _path_segments(tokens: list[tuple[str, list[float]]]) -> list[dict[str, object]]:
+    current: np.ndarray | None = None
+    start: np.ndarray | None = None
+    segments: list[dict[str, object]] = []
+    for command, values in tokens:
+        if command == "M":
+            current = np.array(values[:2], dtype=float)
+            start = current.copy()
+            continue
+        if current is None:
+            continue
+        end = start.copy() if command == "Z" and start is not None else _command_end(command, values, current)
+        segments.append(
+            {
+                "command": command,
+                "start": current,
+                "end": end,
+                "start_tangent": _command_start_tangent(command, values, current, end),
+                "end_tangent": _command_end_tangent(command, values, current, end),
+            }
+        )
+        current = end
+    return segments
+
+
+def _sharp_curve_join_points(tokens: list[tuple[str, list[float]]]) -> list[tuple[float, float]]:
+    segments = _path_segments(tokens)
+    points: list[tuple[float, float]] = []
+    for left, right in zip(segments, [*segments[1:], segments[0]] if segments else [], strict=False):
+        if left["command"] not in {"Q", "C", "A"} and right["command"] not in {"Q", "C", "A"}:
+            continue
+        if not np.allclose(left["end"], right["start"]):
+            continue
+        angle = _angle_between(left["end_tangent"], right["start_tangent"])
+        if angle >= _FORCED_CURVE_JOIN_DEG:
+            point = left["end"]
+            points.append((float(point[0]), float(point[1])))
+    return points
+
+
 def _forced_corners(tokens: list[tuple[str, list[float]]]) -> np.ndarray | None:
     if not any(command in {"Q", "C", "A"} for command, _values in tokens):
         return None
@@ -46,9 +130,11 @@ def _forced_corners(tokens: list[tuple[str, list[float]]]) -> np.ndarray | None:
             corners.append((float(values[0]), float(values[1])))
         elif command == "L" and len(values) >= 2:
             corners.append((float(values[0]), float(values[1])))
+    corners.extend(_sharp_curve_join_points(tokens))
     if not corners:
         return None
-    return np.asarray(corners, dtype=float)
+    unique = sorted(set(corners), key=corners.index)
+    return np.asarray(unique, dtype=float)
 
 
 def _point_line_distance(point: np.ndarray, start: np.ndarray, end: np.ndarray) -> float:
@@ -60,7 +146,40 @@ def _point_line_distance(point: np.ndarray, start: np.ndarray, end: np.ndarray) 
     return float(np.linalg.norm(point - (start + t * span)))
 
 
+def _has_short_linelet(tokens: list[tuple[str, list[float]]], *, epsilon: float) -> bool:
+    return _short_linelet_count_tokens(tokens, epsilon=epsilon) > 0
+
+
+def _short_linelet_count_tokens(tokens: list[tuple[str, list[float]]], *, epsilon: float) -> int:
+    if not any(command in {"Q", "C", "A"} for command, _values in tokens):
+        return 0
+    current: np.ndarray | None = None
+    min_length = minimum_line_length(epsilon)
+    count = 0
+    for command, values in tokens:
+        if command == "M" and len(values) >= 2:
+            current = np.array(values[:2], dtype=float)
+        elif command == "L" and current is not None and len(values) >= 2:
+            end = np.array(values[:2], dtype=float)
+            if float(np.linalg.norm(end - current)) < min_length:
+                count += 1
+            current = end
+        elif command == "Q" and len(values) >= 4:
+            current = np.array(values[2:4], dtype=float)
+        elif command == "C" and len(values) >= 6:
+            current = np.array(values[4:6], dtype=float)
+        elif command == "A" and len(values) >= 7:
+            current = np.array(values[5:7], dtype=float)
+    return count
+
+
+def _short_linelet_count_d(d: str, *, epsilon: float) -> int:
+    return sum(_short_linelet_count_tokens(tokens, epsilon=epsilon) for tokens in _parse_subpaths(d))
+
+
 def _curve_is_straight(points: list[np.ndarray], start: np.ndarray, end: np.ndarray, epsilon: float) -> bool:
+    if float(np.linalg.norm(end - start)) < minimum_line_length(epsilon):
+        return False
     return all(_point_line_distance(point, start, end) <= epsilon for point in points)
 
 
@@ -251,25 +370,63 @@ def _simplified_subpath_d(
     original = _subpath_d(tokens)
     candidates = [_normalized_subpath_d(tokens, epsilon=epsilon)]
     rounded = _rounded_rect_path(points, epsilon=epsilon)
-    if rounded is not None:
-        candidates.append(rounded)
+    if rounded is not None and _path_command_cost_d(rounded) < _path_command_cost_d(original):
+        return rounded
 
     contour = _closed_points(points)
     if contour is not None:
+        if _has_short_linelet(tokens, epsilon=epsilon):
+            linelet_epsilon = max(epsilon, minimum_line_length(epsilon) * 0.375)
+            candidates.append(
+                str(
+                    fit_path(
+                        contour,
+                        epsilon=linelet_epsilon,
+                        max_error=max_error,
+                        cubic=False,
+                    ).params["d"]
+                )
+            )
+            if cubic:
+                candidates.append(
+                    str(
+                        fit_path(
+                            contour,
+                            epsilon=linelet_epsilon,
+                            max_error=max_error,
+                            cubic=True,
+                        ).params["d"]
+                    )
+                )
         candidates.append(
             str(
                 fit_path(
                     contour,
                     epsilon=epsilon,
                     max_error=max_error,
-                    cubic=cubic,
+                    cubic=False,
                     forced_corners=_forced_corners(tokens),
                 ).params["d"]
             )
         )
+        if cubic:
+            candidates.append(
+                str(
+                    fit_path(
+                        contour,
+                        epsilon=epsilon,
+                        max_error=max_error,
+                        cubic=True,
+                        forced_corners=_forced_corners(tokens),
+                    ).params["d"]
+                )
+            )
 
-    best = min(candidates, key=_path_complexity_d)
-    return best if _path_complexity_d(best) < _path_complexity_d(original) else original
+    def candidate_key(d: str) -> tuple[int, int, int]:
+        return (_short_linelet_count_d(d, epsilon=epsilon), _path_command_cost_d(d), _path_segment_count_d(d))
+
+    best = min(candidates, key=candidate_key)
+    return best if candidate_key(best) < candidate_key(original) else original
 
 
 def _candidate_parts(
@@ -298,36 +455,92 @@ def _candidate_parts(
     return parts
 
 
-def _path_complexity(shape: Shape) -> tuple[int, int] | None:
+def _path_segment_count(shape: Shape) -> int | None:
     if shape.kind != "path":
         return None
     d = str(shape.params.get("d", ""))
-    return _path_complexity_d(d)
+    return _path_segment_count_d(d)
 
 
-def _path_complexity_d(d: str) -> tuple[int, int]:
-    return _command_count(d), len(d.encode())
+def _path_segment_count_d(d: str) -> int:
+    return _command_count(d)
 
 
-def _is_improvement(current: Shape, candidate: Shape, *, original: Shape | None = None) -> bool:
-    candidate_complexity = _path_complexity(candidate)
-    current_complexity = _path_complexity(current)
-    if candidate_complexity is None or current_complexity is None:
+def _path_command_cost(shape: Shape) -> int | None:
+    if shape.kind != "path":
+        return None
+    return _path_command_cost_d(str(shape.params.get("d", "")))
+
+
+def _path_command_cost_d(d: str) -> int:
+    return sum(_COMMAND_COST.get(command, 0) for command in _PATH_COMMAND.findall(d))
+
+
+def _line_command_count_d(d: str) -> int:
+    return sum(1 for command in _PATH_COMMAND.findall(d) if command == "L")
+
+
+def _geometry_residual(current: Shape, candidate: Shape) -> float:
+    from ..vector_region import to_polygon
+
+    try:
+        current_geometry = to_polygon(current)
+        candidate_geometry = to_polygon(candidate)
+        scale = max(float(current_geometry.area), 1.0)
+        return float(current_geometry.symmetric_difference(candidate_geometry).area / scale)
+    except Exception:
+        return float("inf")
+
+
+def _is_improvement(
+    current: Shape,
+    candidate: Shape,
+    *,
+    original: Shape | None = None,
+    check_geometry: bool = True,
+    epsilon: float = 1.0,
+    linelet_only: bool = False,
+) -> bool:
+    candidate_segments = _path_segment_count(candidate)
+    current_segments = _path_segment_count(current)
+    candidate_cost = _path_command_cost(candidate)
+    current_cost = _path_command_cost(current)
+    if candidate_segments is None or current_segments is None or candidate_cost is None or current_cost is None:
         return False
     if candidate == current:
         return False
-    if not (
-        candidate_complexity[0] < current_complexity[0]
-        and candidate_complexity[1] < current_complexity[1]
+    current_short_linelets = _short_linelet_count_d(str(current.params.get("d", "")), epsilon=epsilon)
+    candidate_short_linelets = _short_linelet_count_d(str(candidate.params.get("d", "")), epsilon=epsilon)
+    if linelet_only and candidate_short_linelets >= current_short_linelets:
+        return False
+    current_d = str(current.params.get("d", ""))
+    candidate_d = str(candidate.params.get("d", ""))
+    if (
+        current_short_linelets == 0
+        and _line_command_count_d(current_d) == 0
+        and _line_command_count_d(candidate_d) > 0
     ):
         return False
-    original_complexity = _path_complexity(original) if original is not None else None
-    if original_complexity is None:
+    if not (
+        candidate_short_linelets < current_short_linelets
+        or candidate_cost < current_cost
+    ):
+        return False
+    if check_geometry:
+        residual_limit = _MAX_GEOMETRY_RESIDUAL
+        if candidate_short_linelets < current_short_linelets:
+            residual_limit = _MAX_SHORT_LINELET_GEOMETRY_RESIDUAL
+        if _geometry_residual(current, candidate) > residual_limit:
+            return False
+    original_segments = _path_segment_count(original) if original is not None else None
+    original_cost = _path_command_cost(original) if original is not None else None
+    if original_segments is None:
         return True
-    return (
-        candidate_complexity[0] <= original_complexity[0]
-        and candidate_complexity[1] <= original_complexity[1]
-    )
+    if candidate_short_linelets < current_short_linelets:
+        return True
+    if original_cost is None:
+        return True
+    return candidate_cost <= original_cost
 
 
 def _simplified_path_shape(
@@ -339,6 +552,8 @@ def _simplified_path_shape(
     preserve_subpaths: bool = True,
     cubic: bool = False,
     original: Shape | None = None,
+    check_geometry: bool = True,
+    linelet_only: bool = False,
 ) -> Shape | None:
     if shape.kind != "path":
         return None
@@ -360,7 +575,14 @@ def _simplified_path_shape(
     if not parts:
         return None
     candidate = _candidate_shape(shape, parts, preserve_fill_rule=preserve_subpaths)
-    if not _is_improvement(shape, candidate, original=original):
+    if not _is_improvement(
+        shape,
+        candidate,
+        original=original,
+        check_geometry=check_geometry,
+        epsilon=epsilon,
+        linelet_only=linelet_only,
+    ):
         return None
     return candidate
 
@@ -375,28 +597,44 @@ def _covering_later_ids(
     objects: list[VectorRegion],
     masks: dict[int, np.ndarray],
 ) -> list[int] | None:
-    if obj.id not in masks:
+    del candidate, masks
+    if obj.current is None or obj.current.kind != "path":
         return None
-    candidate_obj = obj.with_current(candidate)
-    candidate_mask = rasterize(candidate_obj.footprint, masks[obj.id].shape)
-    added = candidate_mask & ~np.asarray(masks[obj.id], dtype=bool)
-    added_count = int(added.sum())
-    if added_count == 0:
+    subpaths = _path_subpaths(obj.current, samples=24)
+    if len(subpaths) <= 1:
         return []
-
-    covered = np.zeros_like(added, dtype=bool)
-    cover_ids: list[int] = []
-    for other in sorted(objects, key=lambda item: (float(item.z), int(item.id))):
-        if other.id == obj.id or other.id not in masks or other.z <= obj.z:
+    outer_index = max(range(len(subpaths)), key=lambda index: subpaths[index][2])
+    dropped_polygons = []
+    for index, (_tokens, points, _area) in enumerate(subpaths):
+        if index == outer_index:
             continue
-        other_mask = np.asarray(masks[other.id], dtype=bool)
-        if (other_mask & added).any():
-            cover_ids.append(int(other.id))
-            covered |= other_mask
+        poly = Polygon(points)
+        if not poly.is_valid:
+            poly = poly.buffer(0)
+        if isinstance(poly, Polygon) and not poly.is_empty:
+            dropped_polygons.append(poly)
+    if not dropped_polygons:
+        return []
+    dropped = unary_union(dropped_polygons)
 
-    uncovered = int((added & ~covered).sum())
-    base_area = max(1, int(np.asarray(masks[obj.id], dtype=bool).sum()))
-    if uncovered / base_area > BUDGET:
+    cover_ids: list[int] = []
+    cover_geoms = []
+    for other in sorted(objects, key=lambda item: (float(item.z), int(item.id))):
+        if other.id == obj.id or other.z <= obj.z:
+            continue
+        try:
+            overlap_area = float(other.footprint.intersection(dropped).area)
+        except Exception:
+            overlap_area = 0.0
+        if overlap_area > 1e-9:
+            cover_ids.append(int(other.id))
+            cover_geoms.append(other.footprint)
+
+    if not cover_geoms:
+        return None
+    covered = unary_union(cover_geoms)
+    uncovered = dropped.difference(covered)
+    if float(getattr(uncovered, "area", 0.0)) > 1e-6:
         return None
     return cover_ids
 
@@ -421,6 +659,7 @@ def simplify_pass(
     max_error: float = 1.0,
     samples: int = 16,
     cubic: bool = False,
+    linelet_only: bool = False,
 ) -> list[Proposal]:
     proposals: list[Proposal] = []
     referenced_source_ids = _referenced_source_ids(objects)
@@ -440,6 +679,8 @@ def simplify_pass(
                 preserve_subpaths=False,
                 cubic=cubic,
                 original=obj.original,
+                check_geometry=False,
+                linelet_only=linelet_only,
             )
             if solid is not None:
                 cover_ids = _covering_later_ids(obj, solid, objects, masks)
@@ -456,6 +697,7 @@ def simplify_pass(
             samples=samples,
             cubic=cubic,
             original=obj.original,
+            linelet_only=linelet_only,
         )
         if simplified is None:
             continue

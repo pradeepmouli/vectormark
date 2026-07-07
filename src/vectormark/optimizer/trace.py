@@ -26,7 +26,7 @@ def _trace_shape_from_contours(contours: list[np.ndarray], opt: Options) -> Shap
             contour,
             epsilon=opt.epsilon,
             max_error=opt.max_error,
-            cubic=opt.cubic_paths,
+            cubic=False,
         ).params["d"]
         for contour in contours
     ]

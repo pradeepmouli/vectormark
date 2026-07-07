@@ -54,6 +54,8 @@ def test_generate_corpus_html_writes_render_svg_and_diagnostics(tmp_path):
     assert "Optimizer Objects" in diagnostics_summary.read_text()
     assert "<td>circle</td>" in diagnostics_summary.read_text()
     assert '"optimizer": true' in options.read_text()
+    assert '"epsilon": 1.0' in options.read_text()
+    assert '"max_error": 1.0' in options.read_text()
 
 
 def test_generate_corpus_html_can_opt_into_cubic_paths(tmp_path):
@@ -66,6 +68,20 @@ def test_generate_corpus_html_can_opt_into_cubic_paths(tmp_path):
     options = index.parent / "options" / "optimizer-tiny_disk.json"
 
     assert '"cubic_paths": true' in options.read_text()
+
+
+def test_generate_corpus_html_can_override_corpus_tolerances(tmp_path):
+    index = generate_corpus_html(
+        tmp_path / "corpus",
+        [CorpusEntry("tiny_disk", "optimizer", _tiny_disk, Options(optimizer=True))],
+        epsilon=0.75,
+        max_error=0.5,
+    )
+
+    options = (index.parent / "options" / "optimizer-tiny_disk.json").read_text()
+
+    assert '"epsilon": 0.75' in options
+    assert '"max_error": 0.5' in options
 
 
 def test_generate_corpus_html_reuses_optimizer_trace_cache(tmp_path, monkeypatch):
