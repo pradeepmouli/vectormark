@@ -9,8 +9,11 @@ Run:
     python prototypes/skia_path_ops.py
 
 Requires:
-    skia-python >= 87.4   (tested with 144.0.post2)
-    libegl1               (apt install libegl1 on Debian/Ubuntu)
+    skia-python >= 87.4 (developed against 144.0.post2; any release since 87.4
+                         should work — check the skia-python changelog for
+                         PathOp/Simplify API changes if upgrading across major
+                         Skia milestones)
+    libegl1               (apt install libegl1 on Debian/Ubuntu headless)
 """
 
 from __future__ import annotations
@@ -18,7 +21,6 @@ from __future__ import annotations
 import math
 import re
 import time
-from dataclasses import dataclass
 
 import skia
 
@@ -38,6 +40,11 @@ _LINE  = 1
 _QUAD  = 2
 _CUBIC = 4
 _CLOSE = 5
+
+
+def _fmt(v: float) -> str:
+    """Format a float the same way vectormark.fit._fmt does."""
+    return f"{v:.2f}".rstrip("0").rstrip(".")
 
 
 def svg_d_to_skia(d: str, *, fill_type: skia.PathFillType = skia.PathFillType.kWinding) -> skia.Path:
@@ -79,26 +86,23 @@ def skia_to_svg_d(path: skia.Path) -> str:
     segments if it chooses, but for the winding-clean paths returned by Simplify
     and Op that doesn't occur in practice).
     """
-    def fmt(v: float) -> str:
-        return f"{v:.2f}".rstrip("0").rstrip(".")
-
     parts: list[str] = []
     for verb, pts in skia.Path.RawIter(path):
         v = int(verb)
         if v == _MOVE:
-            parts.append(f"M{fmt(pts[0].x())} {fmt(pts[0].y())}")
+            parts.append(f"M{_fmt(pts[0].x())} {_fmt(pts[0].y())}")
         elif v == _LINE:
-            parts.append(f"L{fmt(pts[1].x())} {fmt(pts[1].y())}")
+            parts.append(f"L{_fmt(pts[1].x())} {_fmt(pts[1].y())}")
         elif v == _QUAD:
             parts.append(
-                f"Q{fmt(pts[1].x())} {fmt(pts[1].y())} "
-                f"{fmt(pts[2].x())} {fmt(pts[2].y())}"
+                f"Q{_fmt(pts[1].x())} {_fmt(pts[1].y())} "
+                f"{_fmt(pts[2].x())} {_fmt(pts[2].y())}"
             )
         elif v == _CUBIC:
             parts.append(
-                f"C{fmt(pts[1].x())} {fmt(pts[1].y())} "
-                f"{fmt(pts[2].x())} {fmt(pts[2].y())} "
-                f"{fmt(pts[3].x())} {fmt(pts[3].y())}"
+                f"C{_fmt(pts[1].x())} {_fmt(pts[1].y())} "
+                f"{_fmt(pts[2].x())} {_fmt(pts[2].y())} "
+                f"{_fmt(pts[3].x())} {_fmt(pts[3].y())}"
             )
         elif v == _CLOSE:
             parts.append("Z")
@@ -114,16 +118,13 @@ _KAPPA = 0.5522847498
 
 
 def _circle_d(cx: float, cy: float, r: float) -> str:
-    def f(v: float) -> str:
-        return f"{v:.2f}".rstrip("0").rstrip(".")
-
     k = r * _KAPPA
     return (
-        f"M{f(cx + r)} {f(cy)} "
-        f"C{f(cx + r)} {f(cy + k)} {f(cx + k)} {f(cy + r)} {f(cx)} {f(cy + r)} "
-        f"C{f(cx - k)} {f(cy + r)} {f(cx - r)} {f(cy + k)} {f(cx - r)} {f(cy)} "
-        f"C{f(cx - r)} {f(cy - k)} {f(cx - k)} {f(cy - r)} {f(cx)} {f(cy - r)} "
-        f"C{f(cx + k)} {f(cy - r)} {f(cx + r)} {f(cy - k)} {f(cx + r)} {f(cy)} Z"
+        f"M{_fmt(cx + r)} {_fmt(cy)} "
+        f"C{_fmt(cx + r)} {_fmt(cy + k)} {_fmt(cx + k)} {_fmt(cy + r)} {_fmt(cx)} {_fmt(cy + r)} "
+        f"C{_fmt(cx - k)} {_fmt(cy + r)} {_fmt(cx - r)} {_fmt(cy + k)} {_fmt(cx - r)} {_fmt(cy)} "
+        f"C{_fmt(cx - r)} {_fmt(cy - k)} {_fmt(cx - k)} {_fmt(cy - r)} {_fmt(cx)} {_fmt(cy - r)} "
+        f"C{_fmt(cx + k)} {_fmt(cy - r)} {_fmt(cx + r)} {_fmt(cy - k)} {_fmt(cx + r)} {_fmt(cy)} Z"
     )
 
 
@@ -136,7 +137,7 @@ def _circle_d(cx: float, cy: float, r: float) -> str:
 # directly on Bézier path data — no rasterisation, no polygon approximation.
 #
 # Pipeline fit: the output of vectormark's fit_path / refine passes can produce
-# compound paths (fill-rule: evenodd) where two same-winding sub-paths overlap
+# compound paths (fill rule: evenodd) where two same-winding sub-paths overlap
 # near a symmetry axis.  Simplify resolves them to a single clean contour.
 
 def demo_simplify() -> None:
@@ -145,7 +146,7 @@ def demo_simplify() -> None:
     print("=" * 60)
 
     # 1a: Two overlapping rectangles as a single compound path.
-    # Without simplification the renderer relies on fill-rule to resolve the
+    # Without simplification the renderer relies on fill rule to resolve the
     # overlap, but the path itself has a self-intersection at the crossing seam.
     p = skia.Path()
     for x0, y0 in [(0, 0), (40, 40)]:
@@ -203,7 +204,7 @@ def demo_simplify() -> None:
 #   kXOR_PathOp             a ⊕ b  (symmetric difference)
 #
 # Pipeline fit:
-#   • Replacing compound paths (fill-rule: evenodd, outer + inner) with an
+#   • Replacing compound paths (fill rule: evenodd, outer + inner) with an
 #     Op(outer, inner, kDifference_PathOp) result gives the same geometry but
 #     expressed as a winding-safe single-contour-pair path that any renderer
 #     interprets correctly without needing fill-rule.
@@ -226,13 +227,13 @@ def demo_op() -> None:
     ]:
         result = skia.Op(outer, inner, op_const)
         print(f"  Op({label}): {result.countVerbs()} verbs, "
-              f"fill={result.getFillType()}")
+              f"fill type={result.getFillType()}")
 
     # Practical demo: build an annulus via difference rather than even-odd
     diff = skia.Op(outer, inner, skia.kDifference_PathOp)
     d_result = skia_to_svg_d(diff)
     print(f"\nAnnulus via kDifference_PathOp:")
-    print(f"  verbs: {diff.countVerbs()}, fill-type: {diff.getFillType()}")
+    print(f"  verbs: {diff.countVerbs()}, fill type: {diff.getFillType()}")
     print(f"  d (first 150): {d_result[:150]}…")
 
 
@@ -276,13 +277,6 @@ def demo_op_builder() -> None:
 # Section 4: Benchmark — skia.Op vs Shapely for annulus construction
 # ===========================================================================
 
-@dataclass
-class BenchResult:
-    label: str
-    ms: float
-    verbs: int
-
-
 def _bench(fn, *, iterations: int = 200) -> float:
     t0 = time.perf_counter()
     for _ in range(iterations):
@@ -309,41 +303,40 @@ def demo_benchmark() -> None:
         p = svg_d_to_skia(d, fill_type=skia.PathFillType.kEvenOdd)
         return skia.Simplify(p)
 
-    results: list[BenchResult] = []
+    rows: list[tuple[str, float, int]] = []
 
     ms = _bench(skia_annulus)
     r = skia_annulus()
-    results.append(BenchResult("skia Op(difference)", ms, r.countVerbs()))
+    rows.append(("skia Op(difference)", ms, r.countVerbs()))
 
     ms = _bench(skia_simplify_annulus)
     r = skia_simplify_annulus()
-    results.append(BenchResult("skia Simplify(even-odd)", ms, r.countVerbs()))
+    rows.append(("skia Simplify(even-odd)", ms, r.countVerbs()))
 
     # Optional: Shapely comparison
     try:
-        from shapely.geometry import Polygon
-        from shapely.ops import unary_union
+        from shapely.geometry import Polygon  # type: ignore[import-untyped]
+        from shapely.ops import unary_union   # noqa: F401
 
         def shapely_annulus():
-            # Approximate circles as 64-point polygons (how Shapely works)
-            def circle_poly(cx, cy, r, n=64):
-                pts = [(cx + r * math.cos(2 * math.pi * i / n),
-                        cy + r * math.sin(2 * math.pi * i / n)) for i in range(n)]
-                return Polygon(pts)
-
-            outer = circle_poly(60, 60, 50)
-            inner = circle_poly(60, 60, 25)
+            # Approximate circles as 64-point polygons (the standard Shapely approach)
+            n = 64
+            outer = Polygon([(60 + 50 * math.cos(2 * math.pi * i / n),
+                              60 + 50 * math.sin(2 * math.pi * i / n)) for i in range(n)])
+            inner = Polygon([(60 + 25 * math.cos(2 * math.pi * i / n),
+                              60 + 25 * math.sin(2 * math.pi * i / n)) for i in range(n)])
             return outer.difference(inner)
 
         ms = _bench(shapely_annulus)
-        results.append(BenchResult("Shapely difference (64-pt polygon)", ms, 0))
+        rows.append(("Shapely difference (64-pt polygon)", ms, 0))
     except ImportError:
         pass
 
     print(f"  {'Method':<38}  {'ms/call':>8}  {'verbs':>6}")
     print(f"  {'-'*38}  {'-'*8}  {'-'*6}")
-    for r in results:
-        print(f"  {r.label:<38}  {r.ms:8.3f}  {r.verbs:6}")
+    for label, ms, verbs in rows:
+        verb_str = str(verbs) if verbs else "n/a"
+        print(f"  {label:<38}  {ms:8.3f}  {verb_str:>6}")
 
 
 # ===========================================================================
@@ -364,8 +357,8 @@ A. vectormark.optimizer.passes.simplify — path simplification pass
    Skia:    skia.Simplify(path) on the path-d directly, no rasterisation.
             Works on cubic Bézier data; Shapely approximates with polygons.
 
-B. vectormark.emit._annulus_path_d — compound paths with even-odd fill
-   Current: emits outer + inner circle sub-paths and relies on fill-rule
+B. vectormark.emit._annulus_path_d — compound paths with even-odd fill rule
+   Current: emits outer + inner circle sub-paths and relies on fill rule
             evenodd in the SVG renderer.
    Skia:    Op(outer, inner, kDifference_PathOp) produces a winding-safe
             two-contour path without needing fill-rule — compatible with
@@ -384,7 +377,7 @@ D. vectormark.optimizer.passes.seams — future region merging
 Key caveats
 -----------
 • skia-python requires libeGL (libegl1) on Linux headless environments.
-• skia.Simplify always returns kEvenOdd fill-type; callers must set fill-rule
+• skia.Simplify always returns kEvenOdd fill type; callers must set fill-rule
   in the emitted SVG accordingly, or post-process to kWinding.
 • Op results with kDifference produce two-subpath kEvenOdd paths for the
   annulus case — same structure as the current emitter, just Bézier-exact.
@@ -406,3 +399,4 @@ if __name__ == "__main__":
     demo_op_builder()
     demo_benchmark()
     demo_integration_notes()
+
