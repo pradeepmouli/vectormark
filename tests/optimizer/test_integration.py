@@ -418,6 +418,9 @@ def test_optimizer_combines_self_symmetry_branch_on_final_output():
     assert svg_body.count("<path") == 1
     assert "<use" not in svg_body
     assert svg_body.count("M") == 1
+    assert "L0 0 Z" not in svg_body
+    assert "L10 20 Z" not in svg_body
+    assert "Z Z" not in svg_body
     stitched = to_polygon(Shape("path", {"d": body[0].split(' d="', 1)[1].split('"', 1)[0]}))
     assert stitched.symmetric_difference(branch.footprint).area < 1e-6
 

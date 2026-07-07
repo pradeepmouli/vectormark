@@ -166,10 +166,10 @@ def transform_path_d(d: str, m: tuple[float, float, float, float, float, float])
     path, so the transform can be *baked* into the geometry instead of carried on a
     wrapping `<g transform>`. Handles M/L/C/Q/Z exactly; for an elliptical-arc `A`
     only the endpoint moves and the x-axis-rotation advances by the affine's
-    rotation — valid because the transforms we bake are rigid (rotation +
-    translation), which leave `rx`, `ry`, and the arc flags invariant."""
+    rotation. Reflections reverse arc orientation, so they also flip the sweep flag."""
     a, b, c, dd, e, f = m
     rot_deg = math.degrees(math.atan2(b, a))
+    flips_orientation = (a * dd - b * c) < 0.0
 
     def pt(x: float, y: float) -> tuple[float, float]:
         return apply_affine_point(m, x, y)
@@ -187,6 +187,8 @@ def transform_path_d(d: str, m: tuple[float, float, float, float, float, float])
             rx, ry, xrot, large, sweep, x, y = toks[i:i + 7]
             i += 7
             nx, ny = pt(float(x), float(y))
+            if flips_orientation:
+                sweep = "0" if int(float(sweep)) else "1"
             out += [rx, ry, _fmt(float(xrot) + rot_deg), large, sweep, _fmt(nx), _fmt(ny)]
             continue
         n = _COORD_COUNT[cmd]

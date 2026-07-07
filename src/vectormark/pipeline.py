@@ -805,9 +805,16 @@ def _render_optimizer_body(objects, *, flatten: bool = False) -> tuple[list[str]
         ]
         if not cleaned:
             return None
+        if (
+            len(cleaned) > 1
+            and str(cleaned[-1]["command"]) in {"L", "Z"}
+            and _pt_close(cleaned[-1]["end"], cleaned[0]["start"])
+        ):
+            cleaned = cleaned[:-1]
         parts = [f"M{_fmt(cleaned[0]['start'][0])} {_fmt(cleaned[0]['start'][1])}"]
         parts.extend(_segment_d(segment) for segment in cleaned)
-        parts.append("Z")
+        if not parts[-1].endswith("Z"):
+            parts.append("Z")
         return " ".join(parts)
 
     def _join_chains(a_chain: list[dict], b_chain: list[dict]) -> list[dict] | None:

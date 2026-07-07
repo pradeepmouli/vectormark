@@ -618,12 +618,15 @@ def symmetric_half_fit(
         fit_half = half[1:]
     else:
         fit_half = half
-    start, segs = _fit_open_segments(half, epsilon, max_error, corner_radius)
-    if not segs:
+    fit_start, fit_segs = _fit_open_segments(fit_half, epsilon, max_error, corner_radius)
+    if not fit_segs:
         return None
     if prefix:
         start = half[0].copy()
-        segs = [*prefix, *(_fit_open_segments(fit_half, epsilon, max_error, corner_radius)[1])]
+        segs = [*prefix, *fit_segs]
+    else:
+        start = fit_start
+        segs = fit_segs
     start[0] = axis_x
     last = segs[-1]
     (last[1] if last[0] == "L" else last[-1])[0] = axis_x

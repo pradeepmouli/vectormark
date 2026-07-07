@@ -210,6 +210,46 @@ def test_symmetry_pass_preserves_flat_top_width_on_daikonic_like_tip():
     assert d.count("Q") <= 2
 
 
+def test_symmetric_half_fit_fits_prefixed_half_only_once(monkeypatch):
+    import vectormark.refine as refine_module
+
+    shape = Shape(
+        "path",
+        {
+            "d": (
+                "M322.92 314.5 "
+                "L384.5 315 "
+                "Q367.72 352.4 333 379.5 "
+                "Q328.43 382.04 322.92 382.5 "
+                "Q317.41 382.04 312.84 379.5 "
+                "Q278.12 352.4 261.34 315 "
+                "L322.92 314.5 Z"
+            )
+        },
+    )
+    contour = np.asarray(to_polygon(shape).exterior.coords, dtype=float)
+    calls: list[np.ndarray] = []
+    real_fit = refine_module._fit_open_segments
+
+    def spy_fit(points, *args, **kwargs):
+        calls.append(np.asarray(points, dtype=float))
+        return real_fit(points, *args, **kwargs)
+
+    monkeypatch.setattr(refine_module, "_fit_open_segments", spy_fit)
+
+    out = refine_module.symmetric_half_fit(
+        contour,
+        322.92,
+        side="left",
+        epsilon=1.0,
+        max_error=1.0,
+    )
+
+    assert out is not None
+    assert len(calls) == 1
+    assert abs(float(calls[0][0][0]) - 322.92) > 1.0
+
+
 def test_symmetry_pass_reconstructs_gradient_self_symmetry_as_internal_branch():
     angles = np.linspace(0.0, 2.0 * np.pi, 32, endpoint=False)
     symmetric_contour = Polygon(
