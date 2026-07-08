@@ -20,6 +20,7 @@ from .skia_geometry import SkPath
 # at sub-pixel tolerance to collapse the staircase before fitting.
 PATH_DENOISE_EPS = 0.5
 MIN_LINE_LENGTH_FACTOR = 8.0
+SIMPLE_CURVE_RESIDUAL_TOL = 0.012
 
 
 @dataclass
@@ -131,6 +132,29 @@ def _path_command_count(d: str) -> int:
     return sum(1 for char in d if char in "MLQCAZ")
 
 
+def _closed_ring_points(pts: np.ndarray) -> np.ndarray:
+    if len(pts) == 0:
+        return pts
+    if np.allclose(pts[0], pts[-1]):
+        return pts[:-1]
+    return pts
+
+
+def _path_area_residual(contour: np.ndarray, d: str) -> float:
+    ring = _closed_ring_points(np.asarray(contour, dtype=float))
+    if len(ring) < 3:
+        return float("inf")
+    try:
+        source = SkPath(shell=list(map(tuple, ring)))
+        fitted = SkPath.from_svg_d(d)
+        if source.is_empty or fitted.is_empty:
+            return float("inf")
+        scale = max(float(source.area), float(fitted.area), 1.0)
+        return float(source.symmetric_difference(fitted).area / scale)
+    except Exception:
+        return float("inf")
+
+
 def _curve_controls_are_straight(start: np.ndarray, controls: list[np.ndarray], end: np.ndarray, epsilon: float) -> bool:
     if float(np.linalg.norm(end - start)) < minimum_line_length(epsilon):
         return False
@@ -187,20 +211,14 @@ def _curved_run_d(seg: np.ndarray, max_error: float, *, cubic: bool, line_epsilo
     return _append_cubic_run("", seg, max_error, line_epsilon=line_epsilon)
 
 
-def fit_path(
+def _fit_path_d(
     contour: np.ndarray,
     *,
     epsilon: float,
     max_error: float,
     cubic: bool = False,
     forced_corners: np.ndarray | None = None,
-) -> Shape:
-    """Corner-split the contour; emit lines for straight runs, Béziers otherwise.
-
-    ``cubic=False`` (default) fits each curved run with inflection-free
-    quadratics — robust against the quantization staircase. ``cubic=True`` fits
-    curved runs with denoised, inflection-guarded cubics; see PATH_DENOISE_EPS.
-    """
+) -> str:
     pts = np.asarray(contour, dtype=float)
     closed = np.allclose(pts[0], pts[-1])
     ring = pts[:-1] if closed else pts
@@ -226,4 +244,77 @@ def fit_path(
         else:
             d += _curved_run_d(seg, max_error, cubic=cubic, line_epsilon=epsilon)
     d += "Z"
+    return d
+
+
+def _simpler_curve_candidate(
+    contour: np.ndarray,
+    *,
+    baseline_d: str,
+    epsilon: float,
+    max_error: float,
+    cubic: bool,
+    forced_corners: np.ndarray | None,
+) -> str:
+    best_d = baseline_d
+    best_count = _path_command_count(best_d)
+    for eps_factor, err_factor in (
+        (1.5, 2.0),
+        (2.0, 3.0),
+        (3.0, 4.0),
+        (1.0, 20.0),
+        (10.0, 30.0),
+    ):
+        candidate = _fit_path_d(
+            contour,
+            epsilon=max(epsilon * eps_factor, epsilon + 0.5),
+            max_error=max(max_error * err_factor, max_error + 0.75),
+            cubic=cubic,
+            forced_corners=forced_corners,
+        )
+        candidate_count = _path_command_count(candidate)
+        if candidate_count >= best_count:
+            continue
+        if _path_area_residual(contour, candidate) > SIMPLE_CURVE_RESIDUAL_TOL:
+            continue
+        best_d = candidate
+        best_count = candidate_count
+    return best_d
+
+
+def fit_path(
+    contour: np.ndarray,
+    *,
+    epsilon: float,
+    max_error: float,
+    cubic: bool = False,
+    forced_corners: np.ndarray | None = None,
+    prefer_simple_curves: bool = False,
+) -> Shape:
+    """Corner-split the contour; emit lines for straight runs, Béziers otherwise.
+
+    ``cubic=False`` (default) fits each curved run with inflection-free
+    quadratics — robust against the quantization staircase. ``cubic=True`` fits
+    curved runs with denoised, inflection-guarded cubics; see PATH_DENOISE_EPS.
+
+    ``prefer_simple_curves`` keeps the normal fit as a baseline, then accepts a
+    looser smooth-curve fit only when it reduces path commands and stays close to
+    the same filled contour.
+    """
+    d = _fit_path_d(
+        contour,
+        epsilon=epsilon,
+        max_error=max_error,
+        cubic=cubic,
+        forced_corners=forced_corners,
+    )
+    if prefer_simple_curves:
+        d = _simpler_curve_candidate(
+            contour,
+            baseline_d=d,
+            epsilon=epsilon,
+            max_error=max_error,
+            cubic=cubic,
+            forced_corners=forced_corners,
+        )
     return Shape("path", {"d": d})

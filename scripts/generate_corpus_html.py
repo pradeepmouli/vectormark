@@ -34,6 +34,7 @@ DEFAULT_CORPUS_INPUT = REPO_ROOT / "corpus" / "input"
 DEFAULT_CORPUS_OUTPUT = Path("corpus")
 DEFAULT_CORPUS_MANIFEST = REPO_ROOT / "corpus" / "sources.json"
 DEFAULT_CORPUS_CACHE = REPO_ROOT / "corpus" / "cache"
+TRACE_CACHE_VERSION = 2
 LEGACY_CORPUS_INPUT = REPO_ROOT / "scratch" / "real-logos"
 DEFAULT_CORPUS_EPSILON = 1.0
 DEFAULT_CORPUS_MAX_ERROR = 1.0
@@ -235,7 +236,7 @@ def _options_json(options: Options) -> str:
 def _trace_cache_key(entry: CorpusEntry, image: np.ndarray, options: Options) -> str:
     arr = np.ascontiguousarray(image, dtype=np.uint8)
     payload = {
-        "version": 1,
+        "version": TRACE_CACHE_VERSION,
         "entry": entry.name,
         "shape": arr.shape,
         "dtype": str(arr.dtype),
@@ -257,13 +258,13 @@ def _load_or_create_trace(cache_path: Path, image: np.ndarray, options: Options)
 
     if cache_path.exists():
         payload = pickle.loads(cache_path.read_bytes())
-        if payload.get("version") == 1:
+        if payload.get("version") == TRACE_CACHE_VERSION:
             return payload["objects"], payload["masks"]
 
     objects, masks = trace_regions(image, options)
     cache_path.parent.mkdir(parents=True, exist_ok=True)
     tmp = cache_path.with_suffix(cache_path.suffix + ".tmp")
-    tmp.write_bytes(pickle.dumps({"version": 1, "objects": objects, "masks": masks}))
+    tmp.write_bytes(pickle.dumps({"version": TRACE_CACHE_VERSION, "objects": objects, "masks": masks}))
     tmp.replace(cache_path)
     return objects, masks
 
@@ -292,9 +293,21 @@ def _idealize_optimizer_with_trace_cache(
     cache_path = _trace_cache_path(cache_dir, entry, working, options)
     objects, masks = _load_or_create_trace(cache_path, working, options)
     optimized = optimize(objects, masks, _optimizer_passes(options))
-    trace_body, trace_defs = _render_optimizer_body(objects, flatten=options.flatten)
+    trace_body, trace_defs = _render_optimizer_body(
+        objects,
+        flatten=options.flatten,
+        epsilon=options.epsilon,
+        max_error=options.max_error,
+        cubic=options.cubic_paths,
+    )
     trace_svg = render_svg_doc(w0, h0, trace_body, trace_defs)
-    optimized_body, optimized_defs = _render_optimizer_body(optimized, flatten=options.flatten)
+    optimized_body, optimized_defs = _render_optimizer_body(
+        optimized,
+        flatten=options.flatten,
+        epsilon=options.epsilon,
+        max_error=options.max_error,
+        cubic=options.cubic_paths,
+    )
     optimized_svg = render_svg_doc(w0, h0, optimized_body, optimized_defs)
     fallback_reason = None
     if not _prefer_optimizer_svg(trace_svg, optimized_svg):

@@ -52,6 +52,7 @@ _V_CONIC = 3
 _V_CUBIC = 4
 _V_CLOSE = 5
 _V_DONE = 6
+DEFAULT_CONIC_TO_QUADS_POW2 = 4
 
 
 def _fmt(v: float) -> str:
@@ -105,8 +106,82 @@ def svg_d_to_skia(d: str) -> skia.Path:
     return path
 
 
+def _path_api_svg_d(path: skia.Path) -> str | None:
+    parse_path = getattr(skia, "ParsePath", None)
+    to_svg_string = getattr(parse_path, "ToSVGString", None)
+    if callable(to_svg_string):
+        return str(to_svg_string(path))
+
+    to_svg = getattr(path, "toSVGString", None)
+    if callable(to_svg):
+        raw = str(to_svg())
+        match = re.search(r'\sd="([^"]+)"', raw)
+        return match.group(1) if match else raw
+
+    return None
+
+
+def path_to_svg_string_faithful(path: skia.Path, pow2: int = DEFAULT_CONIC_TO_QUADS_POW2) -> str:
+    """Serialise a :class:`skia.Path` to SVG path data.
+
+    SVG has no rational quadratic command, so Skia conics are decomposed with
+    ``Path.ConvertConicToQuads`` into ``2 ** pow2`` quadratic Bézier segments.
+    """
+    pow2 = int(np.clip(pow2, 1, 5))
+    parts: list[str] = []
+    iterator = skia.Path.Iter(path, False)
+    while True:
+        verb, pts = iterator.next()
+        if verb == skia.Path.Verb.kDone_Verb:
+            break
+        if verb == skia.Path.Verb.kMove_Verb:
+            parts.append(f"M{_fmt(pts[0].x())} {_fmt(pts[0].y())}")
+        elif verb == skia.Path.Verb.kLine_Verb:
+            parts.append(f"L{_fmt(pts[1].x())} {_fmt(pts[1].y())}")
+        elif verb == skia.Path.Verb.kQuad_Verb:
+            parts.append(
+                f"Q{_fmt(pts[1].x())} {_fmt(pts[1].y())} "
+                f"{_fmt(pts[2].x())} {_fmt(pts[2].y())}"
+            )
+        elif verb == skia.Path.Verb.kConic_Verb:
+            quads = skia.Path.ConvertConicToQuads(
+                pts[0],
+                pts[1],
+                pts[2],
+                iterator.conicWeight(),
+                pow2,
+            )
+            j = 0
+            while j + 2 < len(quads):
+                ctrl = quads[j + 1]
+                end = quads[j + 2]
+                parts.append(
+                    f"Q{_fmt(ctrl.x())} {_fmt(ctrl.y())} "
+                    f"{_fmt(end.x())} {_fmt(end.y())}"
+                )
+                j += 2
+        elif verb == skia.Path.Verb.kCubic_Verb:
+            parts.append(
+                f"C{_fmt(pts[1].x())} {_fmt(pts[1].y())} "
+                f"{_fmt(pts[2].x())} {_fmt(pts[2].y())} "
+                f"{_fmt(pts[3].x())} {_fmt(pts[3].y())}"
+            )
+        elif verb == skia.Path.Verb.kClose_Verb:
+            parts.append("Z")
+    return " ".join(parts)
+
+
 def skia_to_svg_d(path: skia.Path) -> str:
     """Serialise a :class:`skia.Path` back to an SVG *d* string (M/L/Q/C/Z)."""
+    api_d = _path_api_svg_d(path)
+    if api_d is not None:
+        return api_d
+
+    return path_to_svg_string_faithful(path)
+
+
+def _skia_to_svg_d_raw(path: skia.Path) -> str:
+    """Serialise via RawIter for low-level debugging."""
     parts: list[str] = []
     ri = skia.Path.RawIter(path)
     while True:
@@ -740,6 +815,17 @@ class SkPath:
 
     def __repr__(self) -> str:
         return f"SkPath(area={self.area:.2f}, bounds={self.bounds})"
+
+    def __getstate__(self) -> dict[str, object]:
+        return {
+            "d": skia_to_svg_d(self._path),
+            "fill_type": int(self._path.getFillType()),
+        }
+
+    def __setstate__(self, state: dict[str, object]) -> None:
+        self._path = svg_d_to_skia(str(state["d"]))
+        self._path.setFillType(skia.PathFillType(int(state.get("fill_type", 0))))
+        self._subpaths = None
 
 
 # ---------------------------------------------------------------------------

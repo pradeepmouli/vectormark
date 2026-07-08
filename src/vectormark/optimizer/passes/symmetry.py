@@ -24,6 +24,8 @@ _PAIR_RESIDUAL_TOL = 0.02
 _SELF_RESIDUAL_TOL = 0.02
 _SELF_AXIS_OVERLAP = 0.75
 _SELF_MIRROR_Z_OFFSET = 0.1
+_MIN_SKIA_CONTOUR_AREA = 1.0
+_MIN_SKIA_CONTOUR_AREA_FRACTION = 1e-4
 
 
 def _polygonal_flat(flat: object) -> SkPath | None:
@@ -165,23 +167,62 @@ def _ring_d(coords) -> str:
     return f"M{_fmt(float(pts[0][0]))} {_fmt(float(pts[0][1]))} {body} Z"
 
 
-def _polygon_path_parts(poly: SkPath) -> list[str]:
-    parts = [_ring_d(poly.exterior.coords)]
-    parts.extend(_ring_d(ring.coords) for ring in poly.interiors)
-    return [part for part in parts if part]
+def _coords_area(coords) -> float:
+    pts = list(coords)
+    if len(pts) < 4:
+        return 0.0
+    area = 0.0
+    for (x1, y1), (x2, y2) in zip(pts, pts[1:], strict=False):
+        area += float(x1) * float(y2) - float(x2) * float(y1)
+    return abs(area) / 2.0
 
 
-def _geometry_to_path_shape(flat: SkPath) -> Shape | None:
+def _fit_ring_path(coords, *, epsilon: float, max_error: float, cubic: bool) -> str:
+    pts = np.asarray(coords, dtype=float)
+    if len(pts) < 4:
+        return _ring_d(coords)
+    try:
+        return str(
+            fit_path(
+                pts,
+                epsilon=epsilon,
+                max_error=max_error,
+                cubic=cubic,
+                prefer_simple_curves=True,
+            ).params["d"]
+        )
+    except Exception:
+        return _ring_d(coords)
+
+
+def _geometry_to_path_shape(
+    flat: SkPath,
+    *,
+    epsilon: float,
+    max_error: float,
+    cubic: bool,
+) -> Shape | None:
     polygons = flat.geoms
     polygons = sorted(
         [poly for poly in polygons if not poly.is_empty],
         key=lambda poly: (round(float(poly.bounds[0]), 6), round(float(poly.bounds[1]), 6), -round(float(poly.area), 6)),
     )
+    max_area = max((float(poly.area) for poly in polygons), default=0.0)
+    contour_area_floor = max(_MIN_SKIA_CONTOUR_AREA, max_area * _MIN_SKIA_CONTOUR_AREA_FRACTION)
     parts: list[str] = []
     has_holes = False
     for poly in polygons:
-        parts.extend(_polygon_path_parts(poly))
-        has_holes = has_holes or bool(poly.interiors)
+        if float(poly.area) < contour_area_floor:
+            continue
+        parts.append(_fit_ring_path(poly.exterior.coords, epsilon=epsilon, max_error=max_error, cubic=cubic))
+        kept_holes = [
+            ring
+            for ring in poly.interiors
+            if _coords_area(ring.coords) >= contour_area_floor
+        ]
+        parts.extend(_fit_ring_path(ring.coords, epsilon=epsilon, max_error=max_error, cubic=cubic) for ring in kept_holes)
+        has_holes = has_holes or bool(kept_holes)
+    parts = [part for part in parts if part]
     if not parts:
         return None
     params: dict[str, object] = {"d": " ".join(parts)}
@@ -271,7 +312,13 @@ def _fit_polygon_path(poly: SkPath, *, epsilon: float, max_error: float, cubic: 
     if len(coords) < 4:
         return None
     try:
-        fitted = fit_path(coords, epsilon=epsilon, max_error=max_error, cubic=cubic)
+        fitted = fit_path(
+            coords,
+            epsilon=epsilon,
+            max_error=max_error,
+            cubic=cubic,
+            prefer_simple_curves=True,
+        )
     except Exception:
         return None
     return str(fitted.params["d"])
@@ -285,16 +332,22 @@ def _fit_geometry_to_path_shape(
     cubic: bool,
 ) -> Shape | None:
     if not flat.is_empty and len(flat.geoms) > 1:
-        return _geometry_to_path_shape(flat)
+        return _geometry_to_path_shape(flat, epsilon=epsilon, max_error=max_error, cubic=cubic)
     if flat.is_empty:
         return None
     exterior = _fit_polygon_path(flat, epsilon=epsilon, max_error=max_error, cubic=cubic)
     if exterior is None:
-        return _geometry_to_path_shape(flat)
+        return _geometry_to_path_shape(flat, epsilon=epsilon, max_error=max_error, cubic=cubic)
     parts = [exterior]
-    parts.extend(_ring_d(ring.coords) for ring in flat.interiors)
+    contour_area_floor = max(_MIN_SKIA_CONTOUR_AREA, float(flat.area) * _MIN_SKIA_CONTOUR_AREA_FRACTION)
+    kept_holes = [
+        ring
+        for ring in flat.interiors
+        if _coords_area(ring.coords) >= contour_area_floor
+    ]
+    parts.extend(_fit_ring_path(ring.coords, epsilon=epsilon, max_error=max_error, cubic=cubic) for ring in kept_holes)
     params: dict[str, object] = {"d": " ".join(part for part in parts if part)}
-    if flat.interiors:
+    if kept_holes:
         params["fill_rule"] = "evenodd"
     return Shape("path", params)
 

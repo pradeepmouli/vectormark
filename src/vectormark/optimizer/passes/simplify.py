@@ -15,6 +15,8 @@ _MAX_GEOMETRY_RESIDUAL = 0.02
 _MAX_SHORT_LINELET_GEOMETRY_RESIDUAL = 0.06
 _COMMAND_COST = {"M": 0, "Z": 0, "L": 1, "Q": 2, "C": 3, "A": 3}
 _FORCED_CURVE_JOIN_DEG = 35.0
+_MIN_SUBPATH_AREA = 1.0
+_MIN_SUBPATH_AREA_FRACTION = 1e-4
 
 
 def _command_count(d: str) -> int:
@@ -344,7 +346,7 @@ def _candidate_shape(
     preserve_fill_rule: bool = True,
 ) -> Shape:
     params = {"d": " ".join(parts)}
-    if preserve_fill_rule and shape.params.get("fill_rule"):
+    if preserve_fill_rule and len(parts) > 1 and shape.params.get("fill_rule"):
         params["fill_rule"] = shape.params["fill_rule"]
     return Shape("path", params)
 
@@ -354,6 +356,16 @@ def _ordered_subpath_indices(subpaths) -> list[int]:
         return []
     outer_index = max(range(len(subpaths)), key=lambda i: subpaths[i][2])
     return [outer_index, *(i for i in range(len(subpaths)) if i != outer_index)]
+
+
+def _significant_subpaths(subpaths):
+    max_area = max((float(area) for _tokens, _points, area in subpaths), default=0.0)
+    area_floor = max(_MIN_SUBPATH_AREA, max_area * _MIN_SUBPATH_AREA_FRACTION)
+    return [
+        subpath
+        for subpath in subpaths
+        if float(subpath[2]) >= area_floor
+    ]
 
 
 def _simplified_subpath_d(
@@ -381,6 +393,7 @@ def _simplified_subpath_d(
                         epsilon=linelet_epsilon,
                         max_error=max_error,
                         cubic=False,
+                        prefer_simple_curves=True,
                     ).params["d"]
                 )
             )
@@ -392,6 +405,7 @@ def _simplified_subpath_d(
                             epsilon=linelet_epsilon,
                             max_error=max_error,
                             cubic=True,
+                            prefer_simple_curves=True,
                         ).params["d"]
                     )
                 )
@@ -403,6 +417,7 @@ def _simplified_subpath_d(
                     max_error=max_error,
                     cubic=False,
                     forced_corners=_forced_corners(tokens),
+                    prefer_simple_curves=True,
                 ).params["d"]
             )
         )
@@ -415,6 +430,7 @@ def _simplified_subpath_d(
                         max_error=max_error,
                         cubic=True,
                         forced_corners=_forced_corners(tokens),
+                        prefer_simple_curves=True,
                     ).params["d"]
                 )
             )
@@ -434,6 +450,8 @@ def _candidate_parts(
     cubic: bool,
     preserve_subpaths: bool,
 ) -> list[str]:
+    if preserve_subpaths:
+        subpaths = _significant_subpaths(subpaths)
     indices = _ordered_subpath_indices(subpaths)
     if not preserve_subpaths:
         indices = indices[:1]
@@ -497,6 +515,7 @@ def _is_improvement(
     check_geometry: bool = True,
     epsilon: float = 1.0,
     linelet_only: bool = False,
+    allow_new_lines: bool = False,
 ) -> bool:
     candidate_segments = _path_segment_count(candidate)
     current_segments = _path_segment_count(current)
@@ -513,6 +532,8 @@ def _is_improvement(
     current_d = str(current.params.get("d", ""))
     candidate_d = str(candidate.params.get("d", ""))
     if (
+        not allow_new_lines
+        and
         current_short_linelets == 0
         and _line_command_count_d(current_d) == 0
         and _line_command_count_d(candidate_d) > 0
@@ -551,6 +572,7 @@ def _simplified_path_shape(
     original: Shape | None = None,
     check_geometry: bool = True,
     linelet_only: bool = False,
+    allow_new_lines: bool = False,
 ) -> Shape | None:
     if shape.kind != "path":
         return None
@@ -579,6 +601,7 @@ def _simplified_path_shape(
         check_geometry=check_geometry,
         epsilon=epsilon,
         linelet_only=linelet_only,
+        allow_new_lines=allow_new_lines,
     ):
         return None
     return candidate

@@ -534,7 +534,7 @@ def fit_path_half_fit(
     half = _axis_bounded_side_half(contour, axis_x, side=side, epsilon=epsilon)
     if half is None:
         return None
-    return fit_path(half, epsilon=epsilon, max_error=max_error, cubic=cubic)
+    return fit_path(half, epsilon=epsilon, max_error=max_error, cubic=cubic, prefer_simple_curves=True)
 
 
 def symmetric_polygon_fit(contour: np.ndarray, axis_x: float, *, epsilon: float, max_vertices: int = 10) -> Shape | None:

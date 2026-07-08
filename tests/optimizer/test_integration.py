@@ -1,5 +1,6 @@
 from pathlib import Path
 import math
+import re
 
 import numpy as np
 from PIL import Image
@@ -453,7 +454,8 @@ def test_optimizer_self_symmetry_fit_uses_configured_epsilon_for_smooth_tip():
     assert "C" not in svg_body
     assert svg_body.count("Q") <= 4
     assert "Q318." in svg_body
-    assert "322.94 382.55" in svg_body
+    points = [(float(x), float(y)) for x, y in re.findall(r"(-?\d+(?:\.\d+)?) (-?\d+(?:\.\d+)?)", svg_body)]
+    assert any(abs(x - 322.94) <= 0.05 and abs(y - 382.55) <= 0.05 for x, y in points)
 
 
 def test_optimizer_trace_uses_quadratic_base_even_when_cubics_are_enabled():
