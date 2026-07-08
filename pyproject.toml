@@ -36,9 +36,9 @@ Issues = "https://github.com/pradeepmouli/vectormark/issues"
 scoring = ["resvg-py>=0.1.7"]
 # the MCP server (`vectormark-mcp`); only needed to expose vectormark over MCP.
 server = ["mcp>=1.13"]
-# Bézier-exact path boolean operations (Simplify, Op, OpBuilder) via Skia.
-# Requires libegl1 on Linux headless: apt install libegl1
-# (skia-python is now a required dependency; this extra kept for compatibility)
+# skia-python is now a required dependency (promoted from optional).
+# This empty extra is kept for backwards compatibility with any installs that
+# reference `vectormark[skia]`.
 skia = []
 dev = [
     "pytest>=8.0",

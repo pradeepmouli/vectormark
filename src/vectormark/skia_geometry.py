@@ -476,6 +476,16 @@ class SkPath:
         obj._subpaths = None
         return obj
 
+    @property
+    def linearized_subpaths(self) -> list[list[tuple[float, float]]]:
+        """Return the path as a list of linearised subpaths (list of vertex lists).
+
+        Each subpath is a closed ring of ``(x, y)`` float tuples.  Curves are
+        approximated by linear segments; straight-sided polygons are exact.
+        """
+        self._ensure_subpaths()
+        return list(self._subpaths or [])
+
     @classmethod
     def make_circle(cls, cx: float, cy: float, r: float) -> "SkPath":
         """Create a circular path (analogue of ``Point(cx,cy).buffer(r)``)."""

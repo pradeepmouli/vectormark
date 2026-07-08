@@ -3,7 +3,7 @@ from __future__ import annotations
 import numpy as np
 from skimage.draw import polygon as draw_polygon
 
-from ..skia_geometry import SkPath
+from ..skia_geometry import SkPath, _ring_area, _ring_centroid, _point_in_ring
 
 BUDGET = 0.02
 
@@ -22,13 +22,11 @@ def rasterize(geom: SkPath, shape_hw: tuple[int, int]) -> np.ndarray:
     mask = np.zeros(shape_hw, dtype=bool)
     if geom.is_empty:
         return mask
-    geom._ensure_subpaths()
-    assert geom._subpaths is not None
-    if not geom._subpaths:
+    subpaths = geom.linearized_subpaths
+    if not subpaths:
         return mask
 
-    from ..skia_geometry import _ring_area, _ring_centroid, _point_in_ring
-    sorted_sp = sorted(geom._subpaths, key=_ring_area, reverse=True)
+    sorted_sp = sorted(subpaths, key=_ring_area, reverse=True)
     # Fill exterior subpaths; subtract holes
     exteriors: list[int] = []
     for i, sp in enumerate(sorted_sp):

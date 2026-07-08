@@ -315,8 +315,7 @@ def _rounded_rect_path(points: list[tuple[float, float]], *, epsilon: float) -> 
     contour = _closed_points(points)
     if contour is None:
         return None
-    ring = list(contour[:-1])
-    poly = SkPath(shell=ring)
+    poly = SkPath(shell=list(contour[:-1]))
     poly = poly.buffer(0)
     if poly.is_empty:
         return None

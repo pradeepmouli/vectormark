@@ -188,7 +188,6 @@ def to_polygon(shape: Shape, *, samples: int = 24) -> SkPath:
     The *samples* parameter is kept for API compatibility but is no longer used
     (the Skia path represents curves exactly via the original SVG commands).
     """
-    from ..skia_geometry import svg_d_to_skia
     d = shape_to_path_d(shape)
     if not d:
         return SkPath()
