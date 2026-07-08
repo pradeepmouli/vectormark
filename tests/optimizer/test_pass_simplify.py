@@ -368,7 +368,11 @@ def test_simplify_pass_does_not_introduce_line_facets_into_all_curve_path():
 
     proposals = simplify_pass([obj], {obj.id: _mask_for_obj(obj, (140, 360))}, epsilon=1.0, max_error=1.0, cubic=True)
 
-    assert proposals == []
+    assert proposals
+    simplified = proposals[0].new_objects[0].current
+    simplified_d = simplified.params["d"]
+    assert "L" not in simplified_d
+    assert _command_count(simplified_d) < _command_count(d)
 
 
 def test_simplify_pass_tries_quadratics_before_cubics():

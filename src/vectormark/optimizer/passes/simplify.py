@@ -11,7 +11,7 @@ from ..framework import Proposal
 from ..vector_region import VectorRegion, _parse_subpaths, _ring_area, _sample_subpath
 
 _PATH_COMMAND = re.compile(r"[MLQCAZ]")
-_MAX_GEOMETRY_RESIDUAL = 0.02
+_MAX_GEOMETRY_RESIDUAL = 0.025
 _MAX_SHORT_LINELET_GEOMETRY_RESIDUAL = 0.06
 _COMMAND_COST = {"M": 0, "Z": 0, "L": 1, "Q": 2, "C": 3, "A": 3}
 _FORCED_CURVE_JOIN_DEG = 35.0

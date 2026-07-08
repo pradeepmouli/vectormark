@@ -20,7 +20,7 @@ from .skia_geometry import SkPath
 # at sub-pixel tolerance to collapse the staircase before fitting.
 PATH_DENOISE_EPS = 0.5
 MIN_LINE_LENGTH_FACTOR = 8.0
-SIMPLE_CURVE_RESIDUAL_TOL = 0.012
+SIMPLE_CURVE_RESIDUAL_TOL = 0.025
 
 
 @dataclass
