@@ -4,9 +4,8 @@ import math
 import re
 
 import numpy as np
-from shapely.geometry import MultiPolygon, Polygon
-from shapely.ops import unary_union
 
+from ...skia_geometry import SkPath, unary_union
 from ...fit import Shape, _fmt, fit_path, minimum_line_length
 from ..framework import Proposal
 from ..vector_region import VectorRegion, _parse_subpaths, _ring_area, _sample_subpath
@@ -282,7 +281,7 @@ def _side_radius_estimates(points: np.ndarray, x0: float, y0: float, x1: float, 
     return estimates
 
 
-def _rounded_rect_radius(points: np.ndarray, poly: Polygon, epsilon: float) -> tuple[float, tuple[float, float, float, float]] | None:
+def _rounded_rect_radius(points: np.ndarray, poly: SkPath, epsilon: float) -> tuple[float, tuple[float, float, float, float]] | None:
     x0, y0, x1, y1 = (float(v) for v in poly.bounds)
     width = x1 - x0
     height = y1 - y0
@@ -316,14 +315,13 @@ def _rounded_rect_path(points: list[tuple[float, float]], *, epsilon: float) -> 
     contour = _closed_points(points)
     if contour is None:
         return None
-    ring = contour[:-1]
-    poly = Polygon(ring)
-    if not poly.is_valid:
-        poly = poly.buffer(0)
-    if not isinstance(poly, Polygon) or poly.is_empty:
+    ring = list(contour[:-1])
+    poly = SkPath(shell=ring)
+    poly = poly.buffer(0)
+    if poly.is_empty:
         return None
 
-    fit = _rounded_rect_radius(ring, poly, epsilon)
+    fit = _rounded_rect_radius(contour[:-1], poly, epsilon)
     if fit is None:
         return None
     radius, (x0, y0, x1, y1) = fit
@@ -588,7 +586,7 @@ def _simplified_path_shape(
 
 
 def _simplifiable_polygon(flat: object) -> bool:
-    return isinstance(flat, Polygon) and not flat.is_empty
+    return isinstance(flat, SkPath) and not flat.is_empty
 
 
 def _covering_later_ids(
@@ -604,31 +602,34 @@ def _covering_later_ids(
     if len(subpaths) <= 1:
         return []
     outer_index = max(range(len(subpaths)), key=lambda index: subpaths[index][2])
-    dropped_polygons = []
+    dropped_polygons: list[SkPath] = []
     for index, (_tokens, points, _area) in enumerate(subpaths):
         if index == outer_index:
             continue
-        poly = Polygon(points)
-        if not poly.is_valid:
-            poly = poly.buffer(0)
-        if isinstance(poly, Polygon) and not poly.is_empty:
+        poly = SkPath(shell=list(points))
+        poly = poly.buffer(0)
+        if not poly.is_empty:
             dropped_polygons.append(poly)
     if not dropped_polygons:
         return []
     dropped = unary_union(dropped_polygons)
 
     cover_ids: list[int] = []
-    cover_geoms = []
+    cover_geoms: list[SkPath] = []
     for other in sorted(objects, key=lambda item: (float(item.z), int(item.id))):
         if other.id == obj.id or other.z <= obj.z:
             continue
         try:
-            overlap_area = float(other.footprint.intersection(dropped).area)
+            if isinstance(other.footprint, SkPath):
+                overlap_area = float(other.footprint.intersection(dropped).area)
+            else:
+                overlap_area = 0.0
         except Exception:
             overlap_area = 0.0
         if overlap_area > 1e-9:
             cover_ids.append(int(other.id))
-            cover_geoms.append(other.footprint)
+            if isinstance(other.footprint, SkPath):
+                cover_geoms.append(other.footprint)
 
     if not cover_geoms:
         return None
@@ -668,7 +669,7 @@ def simplify_pass(
             continue
         if int(obj.id) in referenced_source_ids:
             continue
-        if isinstance(obj.footprint, MultiPolygon) or not _simplifiable_polygon(obj.footprint):
+        if not _simplifiable_polygon(obj.footprint):
             continue
         if obj.current.kind == "path" and obj.current.params.get("fill_rule"):
             solid = _simplified_path_shape(

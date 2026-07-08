@@ -1,8 +1,8 @@
 from __future__ import annotations
 
 import numpy as np
-from shapely.geometry import MultiPolygon, Polygon
 
+from ...skia_geometry import SkPath
 from ...fit import recognize_primitive
 from ..framework import Proposal
 from ..vector_region import VectorRegion, to_polygon
@@ -10,23 +10,21 @@ from ..vector_region import VectorRegion, to_polygon
 _MAX_GEOMETRY_RESIDUAL = 0.04
 
 
-def _polygon_exterior_points(flat: object) -> tuple[np.ndarray, Polygon] | None:
-    polygon: Polygon | None = None
-
-    if isinstance(flat, Polygon):
-        polygon = flat
-    elif isinstance(flat, MultiPolygon):
+def _polygon_exterior_points(flat: object) -> tuple[np.ndarray, SkPath] | None:
+    if not isinstance(flat, SkPath) or flat.is_empty:
         return None
 
-    if polygon is None or polygon.is_empty:
+    geoms = flat.geoms
+    if len(geoms) != 1:
         return None
-    if polygon.interiors:
+    poly = geoms[0]
+    if poly.interiors:
         return None
 
-    coords = np.asarray(polygon.exterior.coords, dtype=float)
+    coords = np.asarray(poly.exterior.coords, dtype=float)
     if len(coords) < 4:
         return None
-    return coords, polygon
+    return coords, flat
 
 
 def _geometry_residual(original: object, candidate: object) -> float:

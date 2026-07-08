@@ -2,9 +2,8 @@ import math
 
 import numpy as np
 import pytest
-from shapely import affinity
-from shapely.geometry import Point, Polygon
 
+from vectormark.skia_geometry import SkPath, affinity
 from vectormark.candidate import FlatFill, LinearGradientFill
 from vectormark.emit import optimizer_objects_to_svg
 from vectormark.fit import Shape
@@ -14,7 +13,7 @@ from vectormark.optimizer.passes.clones import clones_pass
 import vectormark.optimizer.passes.clones as clones_module
 
 
-def _mask_for_polygon(poly: Polygon, shape_hw: tuple[int, int] = (96, 96)) -> np.ndarray:
+def _mask_for_polygon(poly: SkPath, shape_hw: tuple[int, int] = (96, 96)) -> np.ndarray:
     from vectormark.optimizer.gate import rasterize
 
     return rasterize(poly, shape_hw)
@@ -30,8 +29,8 @@ def _square(
 ) -> VectorRegion:
     cx, cy = center
     half = size / 2.0
-    poly = Polygon(
-        [
+    poly = SkPath(
+        shell=[
             (cx - half, cy - half),
             (cx + half, cy - half),
             (cx + half, cy + half),
@@ -54,7 +53,7 @@ def _square(
 
 
 def _circle(obj_id: int, *, center=(20.0, 20.0), radius=6.0, fill="#778899") -> VectorRegion:
-    poly = Point(*center).buffer(radius, quad_segs=32)
+    poly = SkPath.make_circle(center[0], center[1], radius)
     return VectorRegion(
         id=obj_id,
         current=Shape("circle", {"cx": center[0], "cy": center[1], "r": radius}),

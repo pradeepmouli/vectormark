@@ -4,10 +4,8 @@ import math
 from collections import namedtuple
 
 import numpy as np
-from shapely import affinity
-from shapely.geometry import MultiPolygon, Polygon
-from shapely.ops import unary_union
 
+from ...skia_geometry import SkPath, unary_union, affinity
 from ...candidate import FlatFill
 from ...contour import region_corner_radius
 from ...fit import Shape, _fmt, fit_path
@@ -28,8 +26,8 @@ _SELF_AXIS_OVERLAP = 0.75
 _SELF_MIRROR_Z_OFFSET = 0.1
 
 
-def _polygonal_flat(flat: object) -> Polygon | MultiPolygon | None:
-    if isinstance(flat, (Polygon, MultiPolygon)) and not flat.is_empty:
+def _polygonal_flat(flat: object) -> SkPath | None:
+    if isinstance(flat, SkPath) and not flat.is_empty:
         return flat
     return None
 
@@ -60,7 +58,7 @@ def _within_ratio(a: float, b: float, tol: float) -> bool:
     return abs(a - b) / scale <= tol
 
 
-def _residual(a: Polygon | MultiPolygon, b: Polygon | MultiPolygon) -> float:
+def _residual(a: SkPath, b: SkPath) -> float:
     scale = max(float(a.area), float(b.area), 1.0)
     return float(a.symmetric_difference(b).area / scale)
 
@@ -80,21 +78,21 @@ def _svg_reflection_matrix(axis: Axis2D) -> tuple[float, float, float, float, fl
 
 
 def _apply_svg_matrix(
-    flat: Polygon | MultiPolygon,
+    flat: SkPath,
     matrix: tuple[float, float, float, float, float, float],
-) -> Polygon | MultiPolygon:
+) -> SkPath:
     a, b, c, d, e, f = matrix
     return affinity.affine_transform(flat, [a, c, b, d, e, f])
 
 
-def _reflect_flat(flat: Polygon | MultiPolygon, axis: Axis2D) -> Polygon | MultiPolygon:
+def _reflect_flat(flat: SkPath, axis: Axis2D) -> SkPath:
     return _apply_svg_matrix(flat, _svg_reflection_matrix(axis))
 
 
-def _orientation_axes(flat: Polygon | MultiPolygon) -> list[float]:
+def _orientation_axes(flat: SkPath) -> list[float]:
     angles = [0.0, math.pi / 2.0]
     rect = flat.minimum_rotated_rectangle
-    if isinstance(rect, Polygon) and not rect.is_empty:
+    if not rect.is_empty:
         coords = list(rect.exterior.coords)
         for (x1, y1), (x2, y2) in zip(coords, coords[1:], strict=False):
             dx = float(x2 - x1)
@@ -111,15 +109,15 @@ def _orientation_axes(flat: Polygon | MultiPolygon) -> list[float]:
     return sorted(out)
 
 
-def _self_axis_candidates(flat: Polygon | MultiPolygon) -> list[Axis2D]:
+def _self_axis_candidates(flat: SkPath) -> list[Axis2D]:
     centroid = flat.centroid
     axes = [Axis2D(theta, float(centroid.x), float(centroid.y)) for theta in _orientation_axes(flat)]
     return sorted(axes, key=_axis_key)
 
 
 def _mirror_pair_axis(
-    canonical: Polygon | MultiPolygon,
-    target: Polygon | MultiPolygon,
+    canonical: SkPath,
+    target: SkPath,
 ) -> Axis2D | None:
     cc = canonical.centroid
     tc = target.centroid
@@ -131,7 +129,7 @@ def _mirror_pair_axis(
     return Axis2D(theta, float((cc.x + tc.x) / 2.0), float((cc.y + tc.y) / 2.0))
 
 
-def _half_plane(flat: Polygon | MultiPolygon, axis: Axis2D) -> Polygon:
+def _half_plane(flat: SkPath, axis: Axis2D) -> SkPath:
     minx, miny, maxx, maxy = flat.bounds
     span = max(maxx - minx, maxy - miny, 1.0) * 8.0
     ux = math.cos(axis.theta)
@@ -142,8 +140,8 @@ def _half_plane(flat: Polygon | MultiPolygon, axis: Axis2D) -> Polygon:
     cy = float(axis.cy)
     seam_x = nx * _SELF_AXIS_OVERLAP
     seam_y = ny * _SELF_AXIS_OVERLAP
-    return Polygon(
-        [
+    return SkPath(
+        shell=[
             (cx - ux * span - seam_x, cy - uy * span - seam_y),
             (cx + ux * span - seam_x, cy + uy * span - seam_y),
             (cx + ux * span + nx * span, cy + uy * span + ny * span),
@@ -152,9 +150,9 @@ def _half_plane(flat: Polygon | MultiPolygon, axis: Axis2D) -> Polygon:
     )
 
 
-def _canonical_half(flat: Polygon | MultiPolygon, axis: Axis2D) -> Polygon | MultiPolygon | None:
+def _canonical_half(flat: SkPath, axis: Axis2D) -> SkPath | None:
     half = flat.intersection(_half_plane(flat, axis))
-    if half.is_empty or not isinstance(half, (Polygon, MultiPolygon)):
+    if half.is_empty or not isinstance(half, SkPath):
         return None
     return half if half.is_valid else half.buffer(0)
 
@@ -167,14 +165,14 @@ def _ring_d(coords) -> str:
     return f"M{_fmt(float(pts[0][0]))} {_fmt(float(pts[0][1]))} {body} Z"
 
 
-def _polygon_path_parts(poly: Polygon) -> list[str]:
+def _polygon_path_parts(poly: SkPath) -> list[str]:
     parts = [_ring_d(poly.exterior.coords)]
     parts.extend(_ring_d(ring.coords) for ring in poly.interiors)
     return [part for part in parts if part]
 
 
-def _geometry_to_path_shape(flat: Polygon | MultiPolygon) -> Shape | None:
-    polygons = [flat] if isinstance(flat, Polygon) else list(flat.geoms)
+def _geometry_to_path_shape(flat: SkPath) -> Shape | None:
+    polygons = flat.geoms
     polygons = sorted(
         [poly for poly in polygons if not poly.is_empty],
         key=lambda poly: (round(float(poly.bounds[0]), 6), round(float(poly.bounds[1]), 6), -round(float(poly.area), 6)),
@@ -196,8 +194,8 @@ def _self_symmetry_branch(
     obj: VectorRegion,
     *,
     axis: Axis2D,
-    half: Polygon | MultiPolygon,
-    reflected_half: Polygon | MultiPolygon,
+    half: SkPath,
+    reflected_half: SkPath,
     half_shape: Shape,
     residual: float,
     mirror_id: int,
@@ -268,7 +266,7 @@ def _self_symmetry_diagnostics(axis: Axis2D, residual: float) -> dict[str, objec
     }
 
 
-def _fit_polygon_path(poly: Polygon, *, epsilon: float, max_error: float, cubic: bool) -> str | None:
+def _fit_polygon_path(poly: SkPath, *, epsilon: float, max_error: float, cubic: bool) -> str | None:
     coords = np.asarray(poly.exterior.coords, dtype=float)
     if len(coords) < 4:
         return None
@@ -280,13 +278,13 @@ def _fit_polygon_path(poly: Polygon, *, epsilon: float, max_error: float, cubic:
 
 
 def _fit_geometry_to_path_shape(
-    flat: Polygon | MultiPolygon,
+    flat: SkPath,
     *,
     epsilon: float,
     max_error: float,
     cubic: bool,
 ) -> Shape | None:
-    if isinstance(flat, MultiPolygon):
+    if not flat.is_empty and len(flat.geoms) > 1:
         return _geometry_to_path_shape(flat)
     if flat.is_empty:
         return None
@@ -301,13 +299,13 @@ def _fit_geometry_to_path_shape(
     return Shape("path", params)
 
 
-def _vertical_half_side(half: Polygon | MultiPolygon, axis: Axis2D) -> str:
+def _vertical_half_side(half: SkPath, axis: Axis2D) -> str:
     return "left" if float(half.centroid.x) < float(axis.cx) else "right"
 
 
 def _symmetric_refine_half_shape(
-    flat: Polygon | MultiPolygon,
-    half: Polygon | MultiPolygon,
+    flat: SkPath,
+    half: SkPath,
     axis: Axis2D,
     *,
     epsilon: float,
@@ -315,7 +313,7 @@ def _symmetric_refine_half_shape(
     corner_radius: float,
     cubic: bool,
 ) -> Shape | None:
-    if not isinstance(flat, Polygon) or flat.interiors:
+    if flat.interiors:
         return None
     # A half-ellipse cap is bilaterally symmetric about a vertical line.
     if abs(math.cos(float(axis.theta))) > 1e-6:
@@ -358,15 +356,15 @@ def _symmetric_refine_half_shape(
 
 
 def _best_self_reconstruction(
-    flat: Polygon | MultiPolygon,
+    flat: SkPath,
     mask: np.ndarray,
     *,
     epsilon: float,
     max_error: float,
     cubic: bool,
-) -> tuple[Axis2D, Polygon | MultiPolygon, Polygon | MultiPolygon, Shape, float] | None:
+) -> tuple[Axis2D, SkPath, SkPath, Shape, float] | None:
     corner_radius = region_corner_radius(mask)
-    candidates: list[tuple[float, Axis2D, Polygon | MultiPolygon, Polygon | MultiPolygon, Shape]] = []
+    candidates: list[tuple[float, Axis2D, SkPath, SkPath, Shape]] = []
     for axis in _self_axis_candidates(flat):
         reflected = _reflect_flat(flat, axis)
         if _residual(reflected, flat) > _SELF_RESIDUAL_TOL:
@@ -378,7 +376,7 @@ def _best_self_reconstruction(
         reconstructed = unary_union([half, reflected_half])
         if reconstructed is None:
             continue
-        if reconstructed.is_empty or not isinstance(reconstructed, (Polygon, MultiPolygon)):
+        if reconstructed.is_empty or not isinstance(reconstructed, SkPath):
             continue
         shape = _symmetric_refine_half_shape(
             flat,
@@ -407,9 +405,9 @@ def _best_self_reconstruction(
 
 def _pair_proposal(
     canonical: VectorRegion,
-    canonical_flat: Polygon | MultiPolygon,
+    canonical_flat: SkPath,
     target: VectorRegion,
-    target_flat: Polygon | MultiPolygon,
+    target_flat: SkPath,
     masks: dict[int, np.ndarray],
 ) -> Proposal | None:
     del masks
@@ -456,7 +454,7 @@ def symmetry_pass(
     max_error: float = 1.0,
     cubic: bool = False,
 ) -> list[Proposal]:
-    usable: list[tuple[VectorRegion, Polygon | MultiPolygon]] = []
+    usable: list[tuple[VectorRegion, SkPath]] = []
     for obj in sorted(objects, key=lambda current: int(current.id)):
         if not obj.is_leaf or obj.current is None:
             continue

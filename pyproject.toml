@@ -21,7 +21,7 @@ dependencies = [
     "numpy>=2.0",
     "scipy>=1.13",
     "scikit-image>=0.24",
-    "shapely>=2.0",
+    "skia-python>=87.4",
     "pillow>=10.0",
 ]
 
@@ -38,7 +38,8 @@ scoring = ["resvg-py>=0.1.7"]
 server = ["mcp>=1.13"]
 # Bézier-exact path boolean operations (Simplify, Op, OpBuilder) via Skia.
 # Requires libegl1 on Linux headless: apt install libegl1
-skia = ["skia-python>=87.4"]
+# (skia-python is now a required dependency; this extra kept for compatibility)
+skia = []
 dev = [
     "pytest>=8.0",
     "vectormark[scoring,server]",

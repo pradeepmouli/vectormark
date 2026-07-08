@@ -5,11 +5,11 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 import numpy as np
-from shapely.geometry import Polygon
 from skimage.measure import CircleModel, EllipseModel
 
 from ._fitcurve import cbezier, cubic_inflects, fit_cubic_beziers, fit_quadratic_beziers
 from .contour import corner_indices, rdp
+from .skia_geometry import SkPath
 
 # Curved runs are fit with quadratic Béziers by default: a parabola cannot
 # inflect, so it averages the quantization staircase into smooth convex arcs.
@@ -37,7 +37,7 @@ def recognize_primitive(contour: np.ndarray, *, epsilon: float) -> Shape | None:
     pts = np.asarray(contour, dtype=float)
     if len(pts) < 8:
         return None
-    poly = Polygon(pts)
+    poly = SkPath(shell=list(map(tuple, pts)))
     if not poly.is_valid or poly.area < 1:
         return None
 

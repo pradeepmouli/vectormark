@@ -7,12 +7,11 @@ from collections.abc import Sequence
 from typing import Any, Mapping
 
 import numpy as np
-from shapely.geometry import MultiPolygon, Polygon
-from shapely.ops import unary_union
 
 from ..candidate import Fill
 from ..emit import shape_to_path_d
 from ..fit import Shape
+from ..skia_geometry import SkPath, unary_union
 
 _NUM = r"-?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?"
 _PATH_TOKEN = re.compile(rf"[MLQCAZ]|{_NUM}")
@@ -183,28 +182,24 @@ def flatten_points(shape: Shape, *, samples: int = 24) -> list[tuple[float, floa
     return max(rings, key=_ring_area)
 
 
-def to_polygon(shape: Shape, *, samples: int = 24) -> Polygon | MultiPolygon:
-    subpaths = _parse_subpaths(shape_to_path_d(shape))
-    rings = [_sample_subpath(subpath, samples) for subpath in subpaths]
-    rings = [ring for ring in rings if len(ring) >= 3]
-    if not rings:
-        return Polygon()
+def to_polygon(shape: Shape, *, samples: int = 24) -> SkPath:
+    """Convert a :class:`~vectormark.fit.Shape` to an :class:`SkPath` footprint.
 
-    polys = [Polygon(ring) for ring in rings]
-    polys = [poly if poly.is_valid else poly.buffer(0) for poly in polys]
-    shell = max(polys, key=lambda poly: poly.area)
-    holes = [poly for poly in polys if poly is not shell]
-    out: Polygon | MultiPolygon = shell
-    for hole in holes:
-        out = out.difference(hole)
-    return out if out.is_valid else out.buffer(0)
+    The *samples* parameter is kept for API compatibility but is no longer used
+    (the Skia path represents curves exactly via the original SVG commands).
+    """
+    from ..skia_geometry import svg_d_to_skia
+    d = shape_to_path_d(shape)
+    if not d:
+        return SkPath()
+    return SkPath.from_svg_d(d)
 
 
 @dataclass(frozen=True, init=False)
 class VectorRegion:
     id: int
     raster: np.ndarray = field(compare=False)
-    footprint: Polygon | MultiPolygon | object = field(compare=False)
+    footprint: SkPath | object = field(compare=False)
     fill: Fill | None
     z: float
     original: Shape | None
@@ -221,7 +216,7 @@ class VectorRegion:
         current: Shape | None,
         fill: Fill | None,
         z: float = 0,
-        footprint: Polygon | MultiPolygon | object | None = None,
+        footprint: SkPath | object | None = None,
         *,
         raster: np.ndarray | None = None,
         original: Shape | None = None,
@@ -240,7 +235,9 @@ class VectorRegion:
             if current is not None:
                 footprint = to_polygon(current)
             else:
-                footprint = unary_union([child.footprint for child in child_tuple])
+                footprint = unary_union(
+                    [child.footprint for child in child_tuple if isinstance(child.footprint, SkPath)]
+                )
         if raster is None:
             raster = _union_child_rasters(child_tuple)
 
@@ -266,7 +263,7 @@ class VectorRegion:
         fill: Fill,
         z: float,
         raster: np.ndarray | None = None,
-        footprint: Polygon | MultiPolygon | object | None = None,
+        footprint: SkPath | object | None = None,
         source_label: int | None = None,
         color_hex: str | None = None,
         coverage: np.ndarray | None = None,
@@ -294,7 +291,7 @@ class VectorRegion:
         children: Sequence["VectorRegion"],
         z: float = 0,
         raster: np.ndarray | None = None,
-        footprint: Polygon | MultiPolygon | object | None = None,
+        footprint: SkPath | object | None = None,
         fill: Fill | None = None,
         source_label: int | None = None,
         color_hex: str | None = None,
@@ -335,7 +332,7 @@ class VectorRegion:
         self,
         new_shape: Shape,
         *,
-        footprint: Polygon | MultiPolygon | object | None = None,
+        footprint: SkPath | object | None = None,
         raster: np.ndarray | None = None,
         fill: Fill | None = None,
         z: float | None = None,

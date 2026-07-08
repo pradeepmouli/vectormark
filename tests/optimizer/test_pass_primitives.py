@@ -1,6 +1,6 @@
 import numpy as np
-from shapely.geometry import GeometryCollection, MultiPolygon, Point, Polygon
 
+from vectormark.skia_geometry import SkPath
 from vectormark.candidate import FlatFill
 from vectormark.fit import Shape
 from vectormark.optimizer.trace import trace_regions
@@ -108,14 +108,14 @@ def test_primitives_pass_accepts_quantized_small_circular_cutout():
 
 
 def test_primitives_pass_skips_multipolygon_to_preserve_all_components():
-    large = Point(40.0, 40.0).buffer(18.0, quad_segs=32)
-    small = Polygon([(0.0, 0.0), (6.0, 0.0), (6.0, 6.0), (0.0, 6.0)])
+    large = SkPath.make_circle(40.0, 40.0, 18.0)
+    small = SkPath(shell=[(0.0, 0.0), (6.0, 0.0), (6.0, 6.0), (0.0, 6.0)])
     obj = VectorRegion(
         id=7,
         current=Shape("path", {"d": "M0 0 L1 0 L1 1 L0 1 Z"}),
         fill=FlatFill("#000000"),
         z=0,
-        footprint=MultiPolygon([small, large]),
+        footprint=small.union(large),
     )
 
     proposals = primitives_pass([obj], {7: np.zeros((80, 80), dtype=bool)})
@@ -127,9 +127,9 @@ def test_primitives_pass_skips_multipolygon_to_preserve_all_components():
 
 
 def test_primitives_pass_skips_polygon_with_counter():
-    outer = Point(40.0, 40.0).buffer(24.0, quad_segs=32)
-    inner = Point(40.0, 40.0).buffer(5.0, quad_segs=32)
-    ring = Polygon(outer.exterior.coords, [inner.exterior.coords])
+    outer = SkPath.make_circle(40.0, 40.0, 24.0)
+    inner = SkPath.make_circle(40.0, 40.0, 5.0)
+    ring = outer.difference(inner)
     obj = VectorRegion(
         id=8,
         current=Shape("path", {"d": "M0 0 L1 0 L1 1 L0 1 Z"}),
@@ -149,14 +149,14 @@ def test_primitives_pass_skips_empty_and_nonpolygon_geometry():
         current=Shape("path", {"d": "M0 0 L1 0 L1 1 L0 1 Z"}),
         fill=FlatFill("#000000"),
         z=0,
-        footprint=GeometryCollection(),
+        footprint=SkPath(),
     )
     nonpolygon = VectorRegion(
         id=2,
         current=Shape("path", {"d": "M0 0 L1 0 L1 1 L0 1 Z"}),
         fill=FlatFill("#000000"),
         z=0,
-        footprint=Point(0.0, 0.0),
+        footprint=SkPath(),
     )
 
     proposals = primitives_pass(

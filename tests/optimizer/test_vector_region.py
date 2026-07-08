@@ -1,5 +1,4 @@
 import numpy as np
-from shapely.geometry import Polygon
 
 from vectormark.candidate import FlatFill
 from vectormark.fit import Shape

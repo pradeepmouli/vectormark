@@ -1,6 +1,6 @@
 import numpy as np
-from shapely.geometry import MultiPolygon, Point, Polygon
 
+from vectormark.skia_geometry import SkPath
 from vectormark.optimizer.gate import BUDGET, coverage_residual, gate_ok, rasterize
 
 
@@ -18,7 +18,7 @@ def _square_mask(shape, top, left, bottom, right):
 def test_gate_accepts_matching_circle():
     h = w = 120
     true = _disk_mask(h, w, 60, 60, 40)
-    circ = Point(60, 60).buffer(40, quad_segs=64)
+    circ = SkPath.make_circle(60, 60, 40)
 
     assert BUDGET == 0.02
     assert coverage_residual(circ, true) < 0.05
@@ -28,7 +28,7 @@ def test_gate_accepts_matching_circle():
 def test_gate_rejects_wrong_shape():
     h = w = 120
     true = _disk_mask(h, w, 60, 60, 40)
-    square = Polygon([(20, 20), (100, 20), (100, 100), (20, 100)])
+    square = SkPath(shell=[(20, 20), (100, 20), (100, 100), (20, 100)])
     residual = coverage_residual(square, true)
 
     assert residual > BUDGET
@@ -38,8 +38,8 @@ def test_gate_rejects_wrong_shape():
 
 def test_rasterize_subtracts_hole_and_gate_accepts_matching_ring():
     shape = (12, 12)
-    ring = Polygon(
-        [(1, 1), (10, 1), (10, 10), (1, 10)],
+    ring = SkPath(
+        shell=[(1, 1), (10, 1), (10, 10), (1, 10)],
         holes=[[(4, 4), (7, 4), (7, 7), (4, 7)]],
     )
     true = _square_mask(shape, 1, 1, 10, 10)
@@ -55,12 +55,9 @@ def test_rasterize_subtracts_hole_and_gate_accepts_matching_ring():
 
 def test_rasterize_unions_multipolygon_parts_and_gate_accepts_match():
     shape = (12, 12)
-    geom = MultiPolygon(
-        [
-            Polygon([(1, 1), (3, 1), (3, 3), (1, 3)]),
-            Polygon([(7, 7), (9, 7), (9, 9), (7, 9)]),
-        ]
-    )
+    p1 = SkPath(shell=[(1, 1), (3, 1), (3, 3), (1, 3)])
+    p2 = SkPath(shell=[(7, 7), (9, 7), (9, 9), (7, 9)])
+    geom = p1.union(p2)
     true = _square_mask(shape, 1, 1, 3, 3) | _square_mask(shape, 7, 7, 9, 9)
 
     raster = rasterize(geom, shape)
