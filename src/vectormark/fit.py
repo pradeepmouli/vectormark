@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 
 import numpy as np
@@ -20,7 +21,8 @@ from .skia_geometry import SkPath
 # at sub-pixel tolerance to collapse the staircase before fitting.
 PATH_DENOISE_EPS = 0.5
 MIN_LINE_LENGTH_FACTOR = 8.0
-SIMPLE_CURVE_RESIDUAL_TOL = 0.025
+SIMPLE_CURVE_RESIDUAL_TOL = 0.032
+_PATH_TOKEN = re.compile(r"[MLQCZ]|-?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?")
 
 
 @dataclass
@@ -132,6 +134,27 @@ def _path_command_count(d: str) -> int:
     return sum(1 for char in d if char in "MLQCAZ")
 
 
+def _parse_path_commands(d: str) -> list[tuple[str, list[float]]] | None:
+    raw = _PATH_TOKEN.findall(d)
+    if not raw:
+        return None
+    coord_count = {"M": 2, "L": 2, "Q": 4, "C": 6, "Z": 0}
+    commands: list[tuple[str, list[float]]] = []
+    i = 0
+    while i < len(raw):
+        command = raw[i]
+        if command not in coord_count:
+            return None
+        i += 1
+        count = coord_count[command]
+        values = [float(token) for token in raw[i:i + count]]
+        if len(values) != count:
+            return None
+        i += count
+        commands.append((command, values))
+    return commands
+
+
 def _closed_ring_points(pts: np.ndarray) -> np.ndarray:
     if len(pts) == 0:
         return pts
@@ -161,6 +184,101 @@ def _curve_controls_are_straight(start: np.ndarray, controls: list[np.ndarray], 
     return _max_point_to_polyline(np.asarray(controls, dtype=float), np.vstack([start, end])) <= epsilon
 
 
+def _unit_vector(v: np.ndarray) -> np.ndarray | None:
+    n = float(np.hypot(v[0], v[1]))
+    if n <= 1e-9:
+        return None
+    return np.asarray(v, dtype=float) / n
+
+
+def _smooth_quadratic_path_d(d: str, *, strength: float = 1.0) -> str:
+    commands = _parse_path_commands(d)
+    if commands is None:
+        return d
+
+    for i in range(len(commands) - 1):
+        command, values = commands[i]
+        next_command, next_values = commands[i + 1]
+        if command != "Q" or next_command not in {"Q", "L"}:
+            continue
+        join = np.array(values[2:4], dtype=float)
+        incoming = join - np.array(values[0:2], dtype=float)
+        outgoing = np.array(next_values[0:2], dtype=float) - join
+        in_dir = _unit_vector(incoming)
+        out_dir = _unit_vector(outgoing)
+        if in_dir is None or out_dir is None:
+            continue
+        if float(np.dot(in_dir, out_dir)) <= 0.0:
+            continue
+        tangent = out_dir if next_command == "L" else _unit_vector(in_dir + out_dir)
+        if tangent is None:
+            continue
+        prev_control = join - tangent * float(np.hypot(incoming[0], incoming[1]))
+        values[0:2] = [
+            float(values[0] + strength * (prev_control[0] - values[0])),
+            float(values[1] + strength * (prev_control[1] - values[1])),
+        ]
+        if next_command == "Q":
+            next_control = join + tangent * float(np.hypot(outgoing[0], outgoing[1]))
+            next_values[0:2] = [
+                float(next_values[0] + strength * (next_control[0] - next_values[0])),
+                float(next_values[1] + strength * (next_control[1] - next_values[1])),
+            ]
+
+    parts: list[str] = []
+    for command, values in commands:
+        if command == "Z":
+            parts.append("Z")
+        else:
+            parts.append(f"{command}{' '.join(_fmt(value) for value in values)}")
+    return " ".join(parts)
+
+
+def _quadratic_join_min_dot_d(d: str) -> float:
+    commands = _parse_path_commands(d)
+    if commands is None:
+        return 1.0
+    current: np.ndarray | None = None
+    start: np.ndarray | None = None
+    previous_q: tuple[np.ndarray, np.ndarray, np.ndarray] | None = None
+    dots: list[float] = []
+    for command, values in commands:
+        if command == "M":
+            current = np.array(values[:2], dtype=float)
+            start = current.copy()
+            previous_q = None
+        elif command == "Q" and current is not None:
+            control = np.array(values[:2], dtype=float)
+            end = np.array(values[2:4], dtype=float)
+            if previous_q is not None and np.allclose(previous_q[2], current):
+                incoming = current - previous_q[1]
+                outgoing = control - current
+                in_dir = _unit_vector(incoming)
+                out_dir = _unit_vector(outgoing)
+                if in_dir is not None and out_dir is not None:
+                    dots.append(float(np.dot(in_dir, out_dir)))
+            previous_q = (current, control, end)
+            current = end
+        elif command == "L":
+            end = np.array(values[:2], dtype=float)
+            if previous_q is not None and current is not None and np.allclose(previous_q[2], current):
+                incoming = current - previous_q[1]
+                outgoing = end - current
+                in_dir = _unit_vector(incoming)
+                out_dir = _unit_vector(outgoing)
+                if in_dir is not None and out_dir is not None:
+                    dots.append(float(np.dot(in_dir, out_dir)))
+            current = end
+            previous_q = None
+        elif command == "C":
+            current = np.array(values[4:6], dtype=float)
+            previous_q = None
+        elif command == "Z":
+            current = start.copy() if start is not None else current
+            previous_q = None
+    return min(dots) if dots else 1.0
+
+
 def _append_quadratic_run(
     d: str,
     seg: np.ndarray,
@@ -178,6 +296,26 @@ def _append_quadratic_run(
     return d
 
 
+def _residual_gated_smooth_quadratic_path_d(contour: np.ndarray, d: str) -> str:
+    residual_limit = max(SIMPLE_CURVE_RESIDUAL_TOL, _path_area_residual(contour, d) + 0.005)
+    smoothed = _smooth_quadratic_path_d(d)
+    if _path_area_residual(contour, smoothed) <= residual_limit:
+        return smoothed
+
+    best = d
+    lo = 0.0
+    hi = 1.0
+    for _ in range(10):
+        mid = (lo + hi) / 2.0
+        candidate = _smooth_quadratic_path_d(d, strength=mid)
+        if _path_area_residual(contour, candidate) <= residual_limit:
+            best = candidate
+            lo = mid
+        else:
+            hi = mid
+    return best
+
+
 def _append_cubic_run(d: str, seg: np.ndarray, max_error: float, *, line_epsilon: float) -> str:
     run = rdp(seg, PATH_DENOISE_EPS) if len(seg) > 2 else seg
     current = np.array([float(_fmt(seg[0][0])), float(_fmt(seg[0][1]))], dtype=float)
@@ -193,7 +331,13 @@ def _append_cubic_run(d: str, seg: np.ndarray, max_error: float, *, line_epsilon
         )
         if cubic_inflects(rounded):
             samples = np.asarray([cbezier(b, t) for t in np.linspace(0.0, 1.0, 9)], dtype=float)
-            d = _append_quadratic_run(d, samples, max_error, line_epsilon=line_epsilon, collapse_straight=False)
+            d = _append_quadratic_run(
+                d,
+                samples,
+                max_error,
+                line_epsilon=line_epsilon,
+                collapse_straight=False,
+            )
             current = np.array([float(_fmt(samples[-1][0])), float(_fmt(samples[-1][1]))], dtype=float)
             continue
         d += (
@@ -204,8 +348,20 @@ def _append_cubic_run(d: str, seg: np.ndarray, max_error: float, *, line_epsilon
     return d
 
 
-def _curved_run_d(seg: np.ndarray, max_error: float, *, cubic: bool, line_epsilon: float) -> str:
-    quadratic = _append_quadratic_run("", seg, max_error, line_epsilon=line_epsilon, collapse_straight=False)
+def _curved_run_d(
+    seg: np.ndarray,
+    max_error: float,
+    *,
+    cubic: bool,
+    line_epsilon: float,
+) -> str:
+    quadratic = _append_quadratic_run(
+        "",
+        seg,
+        max_error,
+        line_epsilon=line_epsilon,
+        collapse_straight=False,
+    )
     if not cubic:
         return quadratic
     return _append_cubic_run("", seg, max_error, line_epsilon=line_epsilon)
@@ -256,8 +412,7 @@ def _simpler_curve_candidate(
     cubic: bool,
     forced_corners: np.ndarray | None,
 ) -> str:
-    best_d = baseline_d
-    best_count = _path_command_count(best_d)
+    candidates = [_residual_gated_smooth_quadratic_path_d(contour, baseline_d)]
     for eps_factor, err_factor in (
         (1.5, 2.0),
         (2.0, 3.0),
@@ -272,14 +427,13 @@ def _simpler_curve_candidate(
             cubic=cubic,
             forced_corners=forced_corners,
         )
-        candidate_count = _path_command_count(candidate)
-        if candidate_count >= best_count:
-            continue
+        candidate = _residual_gated_smooth_quadratic_path_d(contour, candidate)
         if _path_area_residual(contour, candidate) > SIMPLE_CURVE_RESIDUAL_TOL:
             continue
-        best_d = candidate
-        best_count = candidate_count
-    return best_d
+        if _path_command_count(candidate) > _path_command_count(baseline_d):
+            continue
+        candidates.append(candidate)
+    return min(candidates, key=lambda d: (1.0 - _quadratic_join_min_dot_d(d), _path_command_count(d)))
 
 
 def fit_path(

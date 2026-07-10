@@ -1100,6 +1100,7 @@ def _optimizer_passes(opt: Options):
     if not opt.no_symmetry:
         passes.append(_configured_symmetry_pass)
     passes.append(_configured_seams_pass)
+    passes.append(_configured_simplify_pass)
     passes.append(clones_pass)
     passes.append(_configured_linelet_simplify_pass)
     passes.append(_configured_seams_pass)

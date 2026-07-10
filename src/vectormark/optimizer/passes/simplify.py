@@ -6,12 +6,13 @@ import re
 import numpy as np
 
 from ...skia_geometry import SkPath, unary_union
-from ...fit import Shape, _fmt, fit_path, minimum_line_length
+from ...fit import Shape, SIMPLE_CURVE_RESIDUAL_TOL, _fmt, fit_path, minimum_line_length
 from ..framework import Proposal
 from ..vector_region import VectorRegion, _parse_subpaths, _ring_area, _sample_subpath
 
 _PATH_COMMAND = re.compile(r"[MLQCAZ]")
-_MAX_GEOMETRY_RESIDUAL = 0.025
+_MAX_GEOMETRY_RESIDUAL = SIMPLE_CURVE_RESIDUAL_TOL + 0.001
+_MAX_SMOOTH_CURVE_GEOMETRY_RESIDUAL = SIMPLE_CURVE_RESIDUAL_TOL + 0.004
 _MAX_SHORT_LINELET_GEOMETRY_RESIDUAL = 0.06
 _COMMAND_COST = {"M": 0, "Z": 0, "L": 1, "Q": 2, "C": 3, "A": 3}
 _FORCED_CURVE_JOIN_DEG = 35.0
@@ -105,6 +106,22 @@ def _path_segments(tokens: list[tuple[str, list[float]]]) -> list[dict[str, obje
         )
         current = end
     return segments
+
+
+def _curve_join_angle_penalty_d(d: str) -> float:
+    penalty = 0.0
+    for tokens in _parse_subpaths(d):
+        segments = _path_segments(tokens)
+        for left, right in zip(segments, segments[1:], strict=False):
+            if not (
+                (left["command"] in {"Q", "C", "A"} and right["command"] in {"Q", "C", "A"})
+                or (left["command"] == "Q" and right["command"] == "L")
+            ):
+                continue
+            if not np.allclose(left["end"], right["start"]):
+                continue
+            penalty = max(penalty, _angle_between(left["end_tangent"], right["start_tangent"]))
+    return penalty
 
 
 def _sharp_curve_join_points(tokens: list[tuple[str, list[float]]]) -> list[tuple[float, float]]:
@@ -384,6 +401,7 @@ def _simplified_subpath_d(
 
     contour = _closed_points(points)
     if contour is not None:
+        forced_corners = _forced_corners(tokens)
         if _has_short_linelet(tokens, epsilon=epsilon):
             linelet_epsilon = max(epsilon, minimum_line_length(epsilon) * 0.375)
             candidates.append(
@@ -416,11 +434,35 @@ def _simplified_subpath_d(
                     epsilon=epsilon,
                     max_error=max_error,
                     cubic=False,
-                    forced_corners=_forced_corners(tokens),
+                    forced_corners=forced_corners,
                     prefer_simple_curves=True,
                 ).params["d"]
             )
         )
+        if forced_corners is not None and _line_command_count_d(original) == 0:
+            candidates.append(
+                str(
+                    fit_path(
+                        contour,
+                        epsilon=epsilon,
+                        max_error=max_error,
+                        cubic=False,
+                        prefer_simple_curves=True,
+                    ).params["d"]
+                )
+            )
+        if forced_corners is not None and _line_command_count_d(original) == 0 and cubic:
+            candidates.append(
+                str(
+                    fit_path(
+                        contour,
+                        epsilon=epsilon,
+                        max_error=max_error,
+                        cubic=True,
+                        prefer_simple_curves=True,
+                    ).params["d"]
+                )
+            )
         if cubic:
             candidates.append(
                 str(
@@ -429,7 +471,7 @@ def _simplified_subpath_d(
                         epsilon=epsilon,
                         max_error=max_error,
                         cubic=True,
-                        forced_corners=_forced_corners(tokens),
+                        forced_corners=forced_corners,
                         prefer_simple_curves=True,
                     ).params["d"]
                 )
@@ -438,8 +480,41 @@ def _simplified_subpath_d(
     def candidate_key(d: str) -> tuple[int, int, int]:
         return (_short_linelet_count_d(d, epsilon=epsilon), _path_command_cost_d(d), _path_segment_count_d(d))
 
-    best = min(candidates, key=candidate_key)
-    return best if candidate_key(best) < candidate_key(original) else original
+    if _short_linelet_count_d(original, epsilon=epsilon) == 0 and _line_command_count_d(original) == 0:
+        all_curve_candidates = [candidate for candidate in candidates if _line_command_count_d(candidate) == 0]
+        if all_curve_candidates:
+            improved_candidates = [
+                candidate
+                for candidate in all_curve_candidates
+                if candidate_key(candidate) < candidate_key(original)
+                or _is_smoother_curve_join_candidate(original, candidate)
+            ]
+            candidates = improved_candidates or all_curve_candidates
+            best = min(
+                candidates,
+                key=lambda d: (
+                    _short_linelet_count_d(d, epsilon=epsilon),
+                    _curve_join_angle_penalty_d(d),
+                    _path_command_cost_d(d),
+                    _path_segment_count_d(d),
+                ),
+            )
+            if candidate_key(best) < candidate_key(original) or _is_smoother_curve_join_candidate(original, best):
+                return best
+            return original
+
+    best = min(
+        candidates,
+        key=lambda d: (
+            _short_linelet_count_d(d, epsilon=epsilon),
+            _path_command_cost_d(d),
+            _curve_join_angle_penalty_d(d),
+            _path_segment_count_d(d),
+        ),
+    )
+    if candidate_key(best) < candidate_key(original) or _is_smoother_curve_join_candidate(original, best):
+        return best
+    return original
 
 
 def _candidate_parts(
@@ -495,6 +570,14 @@ def _line_command_count_d(d: str) -> int:
     return sum(1 for command in _PATH_COMMAND.findall(d) if command == "L")
 
 
+def _is_smoother_curve_join_candidate(current_d: str, candidate_d: str) -> bool:
+    if _line_command_count_d(candidate_d) != _line_command_count_d(current_d):
+        return False
+    if _path_command_cost_d(candidate_d) > _path_command_cost_d(current_d):
+        return False
+    return _curve_join_angle_penalty_d(candidate_d) + 1e-6 < _curve_join_angle_penalty_d(current_d)
+
+
 def _geometry_residual(current: Shape, candidate: Shape) -> float:
     from ..vector_region import to_polygon
 
@@ -531,6 +614,7 @@ def _is_improvement(
         return False
     current_d = str(current.params.get("d", ""))
     candidate_d = str(candidate.params.get("d", ""))
+    smoother_curve_join = _is_smoother_curve_join_candidate(current_d, candidate_d)
     if (
         not allow_new_lines
         and
@@ -542,12 +626,19 @@ def _is_improvement(
     if not (
         candidate_short_linelets < current_short_linelets
         or candidate_cost < current_cost
+        or smoother_curve_join
     ):
         return False
     if check_geometry:
         residual_limit = _MAX_GEOMETRY_RESIDUAL
         if candidate_short_linelets < current_short_linelets:
             residual_limit = _MAX_SHORT_LINELET_GEOMETRY_RESIDUAL
+        if (
+            current_short_linelets == 0
+            and candidate_short_linelets == 0
+            and _line_command_count_d(candidate_d) == _line_command_count_d(current_d)
+        ):
+            residual_limit = max(residual_limit, _MAX_SMOOTH_CURVE_GEOMETRY_RESIDUAL)
         if _geometry_residual(current, candidate) > residual_limit:
             return False
     original_segments = _path_segment_count(original) if original is not None else None
@@ -555,6 +646,8 @@ def _is_improvement(
     if original_segments is None:
         return True
     if candidate_short_linelets < current_short_linelets:
+        return True
+    if smoother_curve_join:
         return True
     if original_cost is None:
         return True

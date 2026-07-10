@@ -34,7 +34,15 @@ DEFAULT_CORPUS_INPUT = REPO_ROOT / "corpus" / "input"
 DEFAULT_CORPUS_OUTPUT = Path("corpus")
 DEFAULT_CORPUS_MANIFEST = REPO_ROOT / "corpus" / "sources.json"
 DEFAULT_CORPUS_CACHE = REPO_ROOT / "corpus" / "cache"
-TRACE_CACHE_VERSION = 2
+TRACE_CACHE_VERSION = 3
+TRACE_OPTION_FIELDS = (
+    "epsilon",
+    "max_error",
+    "aa_contours",
+    "max_colors",
+    "min_region_fraction",
+    "working_max_dim",
+)
 LEGACY_CORPUS_INPUT = REPO_ROOT / "scratch" / "real-logos"
 DEFAULT_CORPUS_EPSILON = 1.0
 DEFAULT_CORPUS_MAX_ERROR = 1.0
@@ -233,6 +241,10 @@ def _options_json(options: Options) -> str:
     return json.dumps(dataclasses.asdict(options), indent=2, sort_keys=True, default=repr)
 
 
+def _trace_options(options: Options) -> dict[str, object]:
+    return {field: getattr(options, field) for field in TRACE_OPTION_FIELDS}
+
+
 def _trace_cache_key(entry: CorpusEntry, image: np.ndarray, options: Options) -> str:
     arr = np.ascontiguousarray(image, dtype=np.uint8)
     payload = {
@@ -240,7 +252,7 @@ def _trace_cache_key(entry: CorpusEntry, image: np.ndarray, options: Options) ->
         "entry": entry.name,
         "shape": arr.shape,
         "dtype": str(arr.dtype),
-        "options": dataclasses.asdict(options),
+        "trace_options": _trace_options(options),
     }
     digest = hashlib.sha256()
     digest.update(json.dumps(payload, sort_keys=True, default=repr).encode("utf-8"))
@@ -253,18 +265,39 @@ def _trace_cache_path(cache_dir: Path, entry: CorpusEntry, image: np.ndarray, op
     return cache_dir / f"trace-{safe_name}-{_trace_cache_key(entry, image, options)}.pkl"
 
 
+def _load_cached_trace(path: Path, *, trace_options: dict[str, object]):
+    if not path.exists():
+        return None
+    payload = pickle.loads(path.read_bytes())
+    if (
+        payload.get("version") == TRACE_CACHE_VERSION
+        and payload.get("trace_options") == trace_options
+    ):
+        return payload
+    return None
+
+
 def _load_or_create_trace(cache_path: Path, image: np.ndarray, options: Options):
     from vectormark.optimizer.trace import trace_regions
 
-    if cache_path.exists():
-        payload = pickle.loads(cache_path.read_bytes())
-        if payload.get("version") == TRACE_CACHE_VERSION:
-            return payload["objects"], payload["masks"]
+    trace_options = _trace_options(options)
+    payload = _load_cached_trace(cache_path, trace_options=trace_options)
+    if payload is not None:
+        return payload["objects"], payload["masks"]
 
     objects, masks = trace_regions(image, options)
     cache_path.parent.mkdir(parents=True, exist_ok=True)
     tmp = cache_path.with_suffix(cache_path.suffix + ".tmp")
-    tmp.write_bytes(pickle.dumps({"version": TRACE_CACHE_VERSION, "objects": objects, "masks": masks}))
+    tmp.write_bytes(
+        pickle.dumps(
+            {
+                "version": TRACE_CACHE_VERSION,
+                "trace_options": trace_options,
+                "objects": objects,
+                "masks": masks,
+            }
+        )
+    )
     tmp.replace(cache_path)
     return objects, masks
 
@@ -291,7 +324,11 @@ def _idealize_optimizer_with_trace_cache(
     working = _condition_input(np.asarray(image, dtype=np.uint8), options.working_max_dim)
     h0, w0 = working.shape[:2]
     cache_path = _trace_cache_path(cache_dir, entry, working, options)
-    objects, masks = _load_or_create_trace(cache_path, working, options)
+    objects, masks = _load_or_create_trace(
+        cache_path,
+        working,
+        options,
+    )
     optimized = optimize(objects, masks, _optimizer_passes(options))
     trace_body, trace_defs = _render_optimizer_body(
         objects,
