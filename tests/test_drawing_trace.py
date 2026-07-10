@@ -28,6 +28,19 @@ def test_trace_keeps_small_region_using_absolute_size_only():
     assert [region.id for region in result.regions] == ["r1", "r2"]
 
 
+def test_subpixel_trace_keeps_absolute_floor_region_below_palette_fraction():
+    image = np.full((100, 100, 3), 255, dtype=np.uint8)
+    image[4:8, 4:8] = (255, 100, 0)  # 16 px / 10,000 = 0.16% < 0.2% palette floor
+
+    result = PythonTraceEngine().trace(
+        image,
+        TraceOptions(min_region_size=16, trace_level="subpixel"),
+    )
+
+    small_region = next(region for region in result.regions if region.color == "#FF6400")
+    assert small_region.effective_trace_level == "subpixel"
+
+
 def test_trace_commands_are_scoped_by_region_and_subpath():
     region = PythonTraceEngine().trace(_annulus_image(), TraceOptions()).regions[0]
 

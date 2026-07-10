@@ -71,7 +71,13 @@ COVERAGE_HOLE_TOL = 0.05   # if >5% of a region's eroded interior would fall bel
                            # keep the binary mask there instead of punching holes.
 
 
-def attach_coverage_field(regions: list[Region], rgb: np.ndarray, max_colors: int) -> None:
+def attach_coverage_field(
+    regions: list[Region],
+    rgb: np.ndarray,
+    max_colors: int,
+    *,
+    palette: np.ndarray | None = None,
+) -> None:
     """Attach `region.coverage` from ONE shared soft label field, computed over the given
     regions' colors + background, evaluated on each region's CURRENT mask — so merged and
     reconstructed regions are covered, not just freshly-segmented ones. A region whose field
@@ -84,7 +90,11 @@ def attach_coverage_field(regions: list[Region], rgb: np.ndarray, max_colors: in
     from .segment import _background_color
     if not regions:
         return
-    palette_cols = extract_palette(rgb, max_colors=max_colors)
+    palette_cols = (
+        np.asarray(palette, dtype=np.uint8)
+        if palette is not None
+        else extract_palette(rgb, max_colors=max_colors)
+    )
     q = quantize(rgb, palette_cols)
     bg = _background_color(q)
     # Use ALL image palette colors + background as rows so gradient-competing colors are
@@ -1090,6 +1100,7 @@ def _optimizer_passes(opt: Options):
     if not opt.no_symmetry:
         passes.append(_configured_symmetry_pass)
     passes.append(_configured_seams_pass)
+    passes.append(_configured_simplify_pass)
     passes.append(clones_pass)
     passes.append(_configured_linelet_simplify_pass)
     passes.append(_configured_seams_pass)

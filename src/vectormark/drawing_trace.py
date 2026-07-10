@@ -157,7 +157,7 @@ class PythonTraceEngine:
         palette = extract_palette(image, max_colors=options.max_colors, min_fraction=0.0)
         regions = segment(quantize(image, palette), min_area=options.min_region_size)
         if options.trace_level == "subpixel":
-            attach_coverage_field(regions, image, options.max_colors)
+            attach_coverage_field(regions, image, options.max_colors, palette=palette)
 
         ordered = sorted(
             regions,
