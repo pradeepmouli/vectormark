@@ -401,6 +401,54 @@ def _ring_perimeter(pts: list[tuple[float, float]]) -> float:
     return total
 
 
+def _point_segment_distance(
+    point: tuple[float, float],
+    start: tuple[float, float],
+    end: tuple[float, float],
+) -> float:
+    dx, dy = end[0] - start[0], end[1] - start[1]
+    length_sq = dx * dx + dy * dy
+    if length_sq == 0.0:
+        return math.hypot(point[0] - start[0], point[1] - start[1])
+    t = max(0.0, min(1.0, ((point[0] - start[0]) * dx + (point[1] - start[1]) * dy) / length_sq))
+    return math.hypot(point[0] - (start[0] + t * dx), point[1] - (start[1] + t * dy))
+
+
+def _orientation(a: tuple[float, float], b: tuple[float, float], c: tuple[float, float]) -> float:
+    return (b[0] - a[0]) * (c[1] - a[1]) - (b[1] - a[1]) * (c[0] - a[0])
+
+
+def _segments_intersect(
+    a0: tuple[float, float], a1: tuple[float, float], b0: tuple[float, float], b1: tuple[float, float]
+) -> bool:
+    def on_segment(p: tuple[float, float], q: tuple[float, float], r: tuple[float, float]) -> bool:
+        return min(p[0], r[0]) <= q[0] <= max(p[0], r[0]) and min(p[1], r[1]) <= q[1] <= max(p[1], r[1])
+
+    o1, o2 = _orientation(a0, a1, b0), _orientation(a0, a1, b1)
+    o3, o4 = _orientation(b0, b1, a0), _orientation(b0, b1, a1)
+    if (o1 > 0) != (o2 > 0) and (o3 > 0) != (o4 > 0):
+        return True
+    return (
+        (o1 == 0 and on_segment(a0, b0, a1))
+        or (o2 == 0 and on_segment(a0, b1, a1))
+        or (o3 == 0 and on_segment(b0, a0, b1))
+        or (o4 == 0 and on_segment(b0, a1, b1))
+    )
+
+
+def _segment_distance(
+    a0: tuple[float, float], a1: tuple[float, float], b0: tuple[float, float], b1: tuple[float, float]
+) -> float:
+    if _segments_intersect(a0, a1, b0, b1):
+        return 0.0
+    return min(
+        _point_segment_distance(a0, b0, b1),
+        _point_segment_distance(a1, b0, b1),
+        _point_segment_distance(b0, a0, a1),
+        _point_segment_distance(b1, a0, a1),
+    )
+
+
 def _point_in_ring(point: tuple[float, float], ring: list[tuple[float, float]]) -> bool:
     """Ray-casting point-in-polygon test."""
     x, y = point
@@ -606,16 +654,16 @@ class SkPath:
 
     def _net_area(self, subpaths: list[list[tuple[float, float]]]) -> float:
         """Net area accounting for holes (even-odd containment)."""
-        if not subpaths:
-            return 0.0
-        sorted_sp = sorted(subpaths, key=_ring_area, reverse=True)
-        total = _ring_area(sorted_sp[0])
-        for sp in sorted_sp[1:]:
-            c = _ring_centroid(sp)
-            if _point_in_ring(c, sorted_sp[0]):
-                total -= _ring_area(sp)
-            else:
-                total += _ring_area(sp)
+        total = 0.0
+        for index, ring in enumerate(subpaths):
+            if not ring:
+                continue
+            depth = sum(
+                _point_in_ring(ring[0], other)
+                for other_index, other in enumerate(subpaths)
+                if other_index != index
+            )
+            total += (-1.0 if depth % 2 else 1.0) * _ring_area(ring)
         return max(0.0, total)
 
     @property
@@ -791,21 +839,16 @@ class SkPath:
         other._ensure_subpaths()
         if not self._subpaths or not other._subpaths:
             return 0.0
-        a_pts = [pt for sp in self._subpaths for pt in sp]
-        b_pts = [pt for sp in other._subpaths for pt in sp]
-        if not a_pts or not b_pts:
-            return 0.0
-        a_arr = np.array(a_pts)
-        b_arr = np.array(b_pts)
-        # Vectorised nearest-neighbour check
         min_d = float("inf")
-        for pt in a_arr:
-            dists = np.hypot(b_arr[:, 0] - pt[0], b_arr[:, 1] - pt[1])
-            d = float(dists.min())
-            if d < min_d:
-                min_d = d
-                if min_d == 0.0:
-                    break
+        for a_ring in self._subpaths:
+            for b_ring in other._subpaths:
+                for a_index, a0 in enumerate(a_ring):
+                    a1 = a_ring[(a_index + 1) % len(a_ring)]
+                    for b_index, b0 in enumerate(b_ring):
+                        b1 = b_ring[(b_index + 1) % len(b_ring)]
+                        min_d = min(min_d, _segment_distance(a0, a1, b0, b1))
+                        if min_d == 0.0:
+                            return 0.0
         return min_d
 
     # ------------------------------------------------------------------
