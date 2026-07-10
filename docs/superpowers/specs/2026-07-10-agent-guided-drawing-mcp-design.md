@@ -22,7 +22,7 @@ refine_drawing(plan)
 
 This MVP is stateful and MCP-server-local. `trace_drawing` retains the
 original resolved image bytes, processed RGB array, image metadata, segmented
-regions, masks, contours, raw paths, and command IDs in memory. It returns an
+regions, masks, contour samples, trace paths, and command IDs in memory. It returns an
 opaque `drawing_id`; `refine_drawing` accepts no image and reads the ID from
 the plan.
 
@@ -40,6 +40,40 @@ then performs only deterministic palette segmentation, contour extraction, and
 path fitting. It does **not** run primitive recognition, symmetry detection,
 surface merging, fill inference, clone detection, or optimizer passes.
 
+The public path is named `trace_path`, not `raw_path`. The stored contour samples
+are the raw pixel or coverage evidence; `trace_path` is a pre-simplified line and
+Bézier representation of that evidence. It is deliberately free of semantic
+interpretation while remaining compact enough for stable command IDs and agent
+reasoning.
+
+### Trace options
+
+```json
+{
+  "max_colors": 16,
+  "min_region_size": 16,
+  "trace_level": "pixel",
+  "simplify_tolerance": 1.5,
+  "curve_tolerance": 1.0,
+  "curve_type": "quadratic"
+}
+```
+
+- `max_colors` is the palette-quantization ceiling.
+- `min_region_size` is the minimum retained connected-component pixel count.
+  No relative-to-largest-region cutoff is applied in this workflow.
+- `trace_level` is `pixel` for binary quantized-mask contours or `subpixel` for
+  anti-alias-aware coverage contours. The result reports each region's effective
+  level because the coverage safety guard may fall back to `pixel`.
+- `simplify_tolerance` controls contour simplification and straight-run detection.
+- `curve_tolerance` bounds fitted Bézier error.
+- `curve_type` is `quadratic` by default or `cubic` for intentionally complex
+  contours. Quadratics are the default because they resist raster stair-stepping.
+
+Input crop, resize, and alpha handling remain in the existing preprocess options.
+There are no trace options for symmetry, primitive recognition, fill inference,
+surface merging, flattening, or shadow removal.
+
 The returned structured result contains:
 
 ```json
@@ -53,7 +87,7 @@ The returned structured result contains:
       "color": "#0074F0",
       "area": 42120,
       "bbox": [172, 240, 540, 670],
-      "path": {
+      "trace_path": {
         "d": "M…Z",
         "fill_rule": "nonzero",
         "commands": [
@@ -129,7 +163,7 @@ group as a union would make the agent's raw command references invalid.
 For `set_geometry` with `type: "path"`, the geometry owns an ordered `ops`
 array:
 
-- `group`: raw commands -> named logical segment.
+- `group`: trace-path commands -> named logical segment.
 - `fit`: logical segment -> `line`, `quadratic`, `cubic`, or `keep`.
 - `break`: request a G0 discontinuity after a named segment.
 - `close`: close the current subpath.
@@ -151,6 +185,22 @@ The refinement result includes its new version ID, final SVG, preview
 availability, target-level geometry/fill summaries, and residual measurements
 against the stored raster masks. It also returns warnings for lossy fits without
 silently falling back to automatic idealization.
+
+### Trace-engine boundary and native follow-up
+
+The tracing implementation is VectorMark's own pipeline: palette segmentation,
+`find_contours`, and custom line/Bézier fitting. It is not Potrace or vtracer.
+The MCP MVP wraps it behind a `TraceEngine.trace(rgb, options) -> TraceResult`
+boundary. The initial implementation uses the existing Python/scikit-image
+pipeline; retained `DrawingState` ensures every branch refines a trace once
+rather than retracing it.
+
+Trace-engine substitution is a Phase 2 performance project, after profiling
+representative MCP drawings. A Rust implementation or an adapter for a
+third-party tracer may replace segmentation, contour extraction, and curve
+fitting behind the same `TraceEngine` interface. Any replacement must preserve
+the public trace result, command-ID rules, and trace-options semantics, so it
+does not alter the MCP tools, drawing store, version tree, or plan schema.
 
 ## Non-goals
 
