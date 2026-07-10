@@ -5,14 +5,16 @@
 
 ## Goal
 
-Expose an agent-guided drawing workflow through the MCP server. VectorMark first
-traces a raster into stable, labeled raw paths. An agent then sends a semantic
-refinement plan. VectorMark executes the plan against the retained drawing state
-and returns a clean SVG.
+Replace the logo-specific MCP surface with one drawing-oriented entry point.
+`trace_drawing` either runs the existing one-shot automatic idealizer or creates
+an interactive trace that an agent refines through versioned plans.
 
 ```text
-trace_drawing(image, options)
-  -> drawing_id + version v0 + raw regions + labeled region map
+trace_drawing(image, { refine: "auto", ... })
+  -> one-shot idealized SVG + preview + diagnostics
+
+trace_drawing(image, { refine: "interactive", ... })
+  -> drawing_id + version v0 + trace paths + labeled region map
 
 refine_drawing(plan)
   -> drawing_id + derived version + SVG + refinement report + preview
@@ -20,11 +22,12 @@ refine_drawing(plan)
 
 ## Product boundary
 
-This MVP is stateful and MCP-server-local. `trace_drawing` retains the
+Only `trace_drawing(refine="interactive")` is stateful and MCP-server-local. It retains the
 original resolved image bytes, processed RGB array, image metadata, segmented
 regions, masks, contour samples, trace paths, and command IDs in memory. It returns an
-opaque `drawing_id`; `refine_drawing` accepts no image and reads the ID from
-the plan.
+opaque `drawing_id`; `refine_drawing` accepts no image and reads the ID from the
+plan. Auto calls do not allocate a drawing ID, retain state, or participate in
+versioning.
 
 Each drawing belongs to the originating FastMCP `Context.session`. A drawing ID
 is cryptographically random, valid only within that session, and expires after
@@ -33,9 +36,27 @@ Unknown, expired, or cross-session IDs return the structured error code
 `DRAWING_NOT_FOUND`. The MVP never writes drawing state to disk and does not
 provide a portable trace import/export format.
 
-## Trace contract
+## Trace modes
 
-`trace_drawing` uses the existing secure image resolver and preprocessor,
+`refine` is required and has exactly two values:
+
+- `auto`: run the established automatic idealization pipeline once and return
+  SVG, preview, and diagnostics. It replaces `idealize_logo` and
+  `idealize_logo_data`.
+- `interactive`: create the retained trace artifact described below. It is the
+  only mode that returns `drawing_id` and may be followed by `refine_drawing`.
+
+The shared image-reference, preprocess contract, and six trace options remain
+unchanged. Automatic mode maps `max_colors`, `trace_level`,
+`simplify_tolerance`, `curve_tolerance`, and `curve_type` to the current
+idealizer; `min_region_size` supplies its absolute component-size floor. It does
+not carry forward logo-only flattening or manual symmetry toggles.
+`render_idealized_logo` is renamed `render_drawing` and accepts either result
+shape.
+
+## Interactive trace contract
+
+Interactive `trace_drawing` uses the existing secure image resolver and preprocessor,
 then performs only deterministic palette segmentation, contour extraction, and
 path fitting. It does **not** run primitive recognition, symmetry detection,
 surface merging, fill inference, clone detection, or optimizer passes.
@@ -46,7 +67,7 @@ Bézier representation of that evidence. It is deliberately free of semantic
 interpretation while remaining compact enough for stable command IDs and agent
 reasoning.
 
-### Trace options
+### Interactive trace options
 
 ```json
 {
@@ -209,7 +230,7 @@ does not alter the MCP tools, drawing store, version tree, or plan schema.
 - Auto symmetry, clone inference, path congruency, constraints, ribbons, arcs,
   split regions, or boolean unions.
 - Persistence across an MCP server restart or session end.
-- Altering `idealize_logo` behavior.
+- Retaining state for automatic calls.
 
 ## Testing and acceptance
 
