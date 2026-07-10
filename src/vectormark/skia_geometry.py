@@ -59,12 +59,14 @@ def _fmt(v: float) -> str:
     return f"{v:.2f}".rstrip("0").rstrip(".")
 
 
-def svg_d_to_skia(d: str) -> skia.Path:
+def svg_d_to_skia(d: str, *, fill_rule: str | None = None) -> skia.Path:
     """Parse an SVG path *d* string into a :class:`skia.Path`.
 
     Supports M, L, Q, C, Z, and SVG elliptical-arc A commands.
     """
     path = skia.Path()
+    if fill_rule == "evenodd":
+        path.setFillType(skia.PathFillType.kEvenOdd)
     tokens = _NUM_RE_WITH_A.findall(d)
     i = 0
     while i < len(tokens):
@@ -569,8 +571,8 @@ class SkPath:
         return cls.from_skia(p)
 
     @classmethod
-    def from_svg_d(cls, d: str) -> "SkPath":
-        return cls.from_skia(svg_d_to_skia(d))
+    def from_svg_d(cls, d: str, *, fill_rule: str | None = None) -> "SkPath":
+        return cls.from_skia(svg_d_to_skia(d, fill_rule=fill_rule))
 
     # ------------------------------------------------------------------
     # Lazily-computed subpath cache

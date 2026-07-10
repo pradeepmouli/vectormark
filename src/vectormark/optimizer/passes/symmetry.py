@@ -366,7 +366,7 @@ def _symmetric_refine_half_shape(
     corner_radius: float,
     cubic: bool,
 ) -> Shape | None:
-    if flat.interiors:
+    if flat.interiors or len(flat.geoms) != 1:
         return None
     # A half-ellipse cap is bilaterally symmetric about a vertical line.
     if abs(math.cos(float(axis.theta))) > 1e-6:

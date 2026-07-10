@@ -3,6 +3,7 @@ import numpy as np
 from vectormark.candidate import FlatFill
 from vectormark.fit import Shape
 from vectormark.occlusion import intersection_lens_d
+from vectormark.skia_geometry import SkPath
 from vectormark.optimizer.vector_region import VectorRegion, flatten_points, leaves, to_polygon
 
 
@@ -16,6 +17,14 @@ def test_to_polygon_path_with_hole():
     d = "M0 0 L40 0 L40 40 L0 40 Z M10 10 L30 10 L30 30 L10 30 Z"
     poly = to_polygon(Shape("path", {"d": d}))
     assert abs(poly.area - (40 * 40 - 20 * 20)) < 4
+
+
+def test_to_polygon_honors_evenodd_fill_rule_for_boolean_ops():
+    d = "M0 0 L40 0 L40 40 L0 40 Z M10 10 L30 10 L30 30 L10 30 Z"
+    poly = to_polygon(Shape("path", {"d": d, "fill_rule": "evenodd"}))
+    center = SkPath(shell=[(12, 12), (28, 12), (28, 28), (12, 28)])
+
+    assert poly.intersection(center).is_empty
 
 
 def test_flatten_points_returns_outer_boundary_only_for_multi_subpath_shape():

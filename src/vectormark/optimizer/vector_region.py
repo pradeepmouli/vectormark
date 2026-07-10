@@ -191,7 +191,8 @@ def to_polygon(shape: Shape, *, samples: int = 24) -> SkPath:
     d = shape_to_path_d(shape)
     if not d:
         return SkPath()
-    return SkPath.from_svg_d(d)
+    fill_rule = shape.params.get("fill_rule")
+    return SkPath.from_svg_d(d, fill_rule=str(fill_rule) if fill_rule is not None else None)
 
 
 @dataclass(frozen=True, init=False)
