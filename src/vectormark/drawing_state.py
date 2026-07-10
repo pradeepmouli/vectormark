@@ -1,12 +1,15 @@
-"""Session-scoped storage for editable drawing versions."""
+"""Session-scoped storage for immutable, editable drawing versions."""
 
 from __future__ import annotations
 
 import secrets
 import time
+from collections.abc import Mapping
+from copy import deepcopy
 from dataclasses import dataclass
 from threading import RLock
-from typing import Callable, Mapping
+from types import MappingProxyType
+from typing import Callable
 
 from .drawing_trace import TraceResult
 
@@ -19,6 +22,8 @@ class DrawingNotFound(Exception):
 
 @dataclass(frozen=True)
 class DrawingVersion:
+    """An immutable public snapshot of one retained drawing version."""
+
     id: str
     parent_id: str | None
     plan: Mapping[str, object] | None
@@ -26,13 +31,64 @@ class DrawingVersion:
     label: str | None
 
 
-@dataclass
+@dataclass(frozen=True)
 class DrawingState:
+    """An immutable public snapshot of a drawing and its retained versions."""
+
+    id: str
+    trace: TraceResult
+    versions: Mapping[str, DrawingVersion]
+
+
+@dataclass
+class _StoredDrawing:
+    """Mutable bookkeeping that never leaves ``DrawingStore``."""
+
     id: str
     trace: TraceResult
     versions: dict[str, DrawingVersion]
     child_counts: dict[str, int]
     last_access: float
+
+
+def _freeze(value: object) -> object:
+    """Detach common mutable values and make their container structure read-only."""
+    if isinstance(value, Mapping):
+        return MappingProxyType({key: _freeze(item) for key, item in value.items()})
+    if isinstance(value, list):
+        return tuple(_freeze(item) for item in value)
+    if isinstance(value, tuple):
+        return tuple(_freeze(item) for item in value)
+    if isinstance(value, set | frozenset):
+        return frozenset(_freeze(item) for item in value)
+    return deepcopy(value)
+
+
+def _freeze_plan(plan: Mapping[str, object]) -> Mapping[str, object]:
+    return MappingProxyType({key: _freeze(value) for key, value in plan.items()})
+
+
+def _public_version(version: DrawingVersion) -> DrawingVersion:
+    """Return a detached view so callers can never mutate retained state."""
+    return DrawingVersion(
+        id=version.id,
+        parent_id=version.parent_id,
+        plan=_freeze_plan(version.plan) if version.plan is not None else None,
+        scene=_freeze(version.scene) if version.scene is not None else None,
+        label=version.label,
+    )
+
+
+def _public_drawing(drawing: _StoredDrawing) -> DrawingState:
+    versions = {
+        version_id: _public_version(version)
+        for version_id, version in drawing.versions.items()
+    }
+    return DrawingState(
+        id=drawing.id,
+        trace=drawing.trace,
+        versions=MappingProxyType(versions),
+    )
 
 
 class DrawingStore:
@@ -46,14 +102,14 @@ class DrawingStore:
     ) -> None:
         self._idle_ttl_seconds = idle_ttl_seconds
         self._now = now
-        self._drawings: dict[object, dict[str, DrawingState]] = {}
+        self._drawings: dict[object, dict[str, _StoredDrawing]] = {}
         self._lock = RLock()
 
     def create(self, session: object, trace: TraceResult) -> DrawingState:
         with self._lock:
             now = self._now()
             self._evict_expired(now)
-            drawing = DrawingState(
+            drawing = _StoredDrawing(
                 id=f"drw_{secrets.token_urlsafe(18)}",
                 trace=trace,
                 versions={
@@ -69,7 +125,7 @@ class DrawingStore:
                 last_access=now,
             )
             self._drawings.setdefault(session, {})[drawing.id] = drawing
-            return drawing
+            return _public_drawing(drawing)
 
     def get(
         self,
@@ -82,11 +138,12 @@ class DrawingStore:
             self._evict_expired(now)
             drawing = self._drawing_for(session, drawing_id)
             try:
-                version = drawing.versions[version_id]
-            except KeyError as exc:
-                raise DrawingNotFound from exc
+                drawing.versions[version_id]
+            except KeyError:
+                raise DrawingNotFound from None
             drawing.last_access = now
-            return drawing, version
+            public_drawing = _public_drawing(drawing)
+            return public_drawing, public_drawing.versions[version_id]
 
     def append(
         self,
@@ -103,7 +160,7 @@ class DrawingStore:
             self._evict_expired(now)
             drawing = self._drawing_for(session, drawing_id)
             if base_version not in drawing.versions:
-                raise DrawingNotFound
+                raise DrawingNotFound from None
 
             child_number = drawing.child_counts[base_version]
             version_id = f"{base_version}.{child_number}"
@@ -111,20 +168,20 @@ class DrawingStore:
             version = DrawingVersion(
                 id=version_id,
                 parent_id=base_version,
-                plan=plan,
-                scene=scene,
+                plan=_freeze_plan(plan),
+                scene=_freeze(scene),
                 label=label,
             )
             drawing.versions[version_id] = version
             drawing.child_counts[version_id] = 0
             drawing.last_access = now
-            return version
+            return _public_version(version)
 
-    def _drawing_for(self, session: object, drawing_id: str) -> DrawingState:
+    def _drawing_for(self, session: object, drawing_id: str) -> _StoredDrawing:
         try:
             return self._drawings[session][drawing_id]
-        except KeyError as exc:
-            raise DrawingNotFound from exc
+        except KeyError:
+            raise DrawingNotFound from None
 
     def _evict_expired(self, now: float) -> None:
         for session, drawings in list(self._drawings.items()):

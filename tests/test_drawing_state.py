@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor
-from dataclasses import dataclass
+from dataclasses import FrozenInstanceError, dataclass
 
 import pytest
 
@@ -52,6 +52,38 @@ def test_store_creates_immutable_root_version(fake_clock: FakeClock) -> None:
     assert drawing.versions["v0"].plan is None
     assert drawing.versions["v0"].scene is None
     assert drawing.versions["v0"].label is None
+    with pytest.raises(TypeError):
+        drawing.versions["injected"] = drawing.versions["v0"]
+    with pytest.raises(FrozenInstanceError):
+        drawing.versions = {}
+
+
+def test_store_detaches_and_freezes_appended_plan_and_scene(
+    fake_clock: FakeClock,
+) -> None:
+    store = DrawingStore(now=fake_clock)
+    session = object()
+    drawing = store.create(session, _trace())
+    plan = {"palette": ["blue"], "limits": {"strokes": 2}}
+    scene = {"layers": ["source"]}
+
+    version = store.append(session, drawing.id, "v0", plan=plan, scene=scene)
+    plan["palette"].append("red")
+    plan["limits"]["strokes"] = 3
+    scene["layers"].append("caller mutation")
+
+    assert version.plan == {"palette": ("blue",), "limits": {"strokes": 2}}
+    assert version.scene == {"layers": ("source",)}
+    with pytest.raises(TypeError):
+        version.plan["injected"] = True  # type: ignore[index]
+    with pytest.raises(AttributeError):
+        version.plan["palette"].append("green")  # type: ignore[union-attr]
+    with pytest.raises(TypeError):
+        version.scene["injected"] = True  # type: ignore[index]
+
+    _, stored = store.get(session, drawing.id, version.id)
+    assert stored.plan == {"palette": ("blue",), "limits": {"strokes": 2}}
+    assert stored.scene == {"layers": ("source",)}
 
 
 def test_store_branches_from_any_retained_version(fake_clock: FakeClock) -> None:
@@ -90,11 +122,30 @@ def test_store_rejects_cross_session_and_expired_drawings(fake_clock: FakeClock)
     owner, other = object(), object()
     drawing = store.create(owner, _trace())
 
-    with pytest.raises(DrawingNotFound):
+    with pytest.raises(DrawingNotFound) as cross_session_error:
         store.get(other, drawing.id, "v0")
-    fake_clock.advance(1801)
-    with pytest.raises(DrawingNotFound):
+    assert cross_session_error.value.__cause__ is None
+
+    fake_clock.advance(1800)
+    with pytest.raises(DrawingNotFound) as expired_error:
         store.get(owner, drawing.id, "v0")
+    assert expired_error.value.__cause__ is None
+
+
+def test_store_not_found_errors_do_not_expose_internal_key_errors(
+    fake_clock: FakeClock,
+) -> None:
+    store = DrawingStore(now=fake_clock)
+    session = object()
+    drawing = store.create(session, _trace())
+
+    with pytest.raises(DrawingNotFound) as missing_version_error:
+        store.get(session, drawing.id, "v404")
+    assert missing_version_error.value.__cause__ is None
+
+    with pytest.raises(DrawingNotFound) as missing_parent_error:
+        store.append(session, drawing.id, "v404", plan={}, scene=_scene())
+    assert missing_parent_error.value.__cause__ is None
 
 
 def test_store_get_and_append_refresh_the_sliding_expiry(fake_clock: FakeClock) -> None:
@@ -104,7 +155,7 @@ def test_store_get_and_append_refresh_the_sliding_expiry(fake_clock: FakeClock) 
 
     fake_clock.advance(1799)
     state, root = store.get(session, drawing.id, "v0")
-    assert state is drawing
+    assert state == drawing
     assert root.id == "v0"
 
     fake_clock.advance(1799)
@@ -113,5 +164,5 @@ def test_store_get_and_append_refresh_the_sliding_expiry(fake_clock: FakeClock) 
 
     fake_clock.advance(1799)
     _, retained_child = store.get(session, drawing.id, child.id)
-    assert retained_child is child
-
+    assert retained_child.id == child.id
+    assert retained_child.label == child.label
