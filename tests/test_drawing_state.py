@@ -4,9 +4,10 @@ from concurrent.futures import ThreadPoolExecutor
 from dataclasses import FrozenInstanceError, dataclass
 
 import pytest
+import numpy as np
 
 from vectormark.drawing_state import DrawingNotFound, DrawingStore
-from vectormark.drawing_trace import TraceOptions, TraceResult
+from vectormark.drawing_trace import TraceOptions, TracePath, TraceRegion, TraceResult
 
 
 @dataclass
@@ -37,6 +38,28 @@ def _trace() -> TraceResult:
 
 def _scene() -> object:
     return {"layers": ()}
+
+
+def _mutable_trace() -> TraceResult:
+    mask = np.array([[True, False], [False, False]])
+    contour = np.array([[0.0, 0.0], [1.0, 0.0], [0.0, 1.0]])
+    return TraceResult(
+        width=2,
+        height=2,
+        options=TraceOptions(),
+        regions=(
+            TraceRegion(
+                id="r1",
+                source_label=1,
+                color="#ffffff",
+                mask=mask,
+                contours=(contour,),
+                trace_path=TracePath(d="M0 0Z", fill_rule="nonzero", commands=()),
+                effective_trace_level="pixel",
+            ),
+        ),
+        region_map_svg="<svg/>",
+    )
 
 
 def test_store_creates_immutable_root_version(fake_clock: FakeClock) -> None:
@@ -195,3 +218,51 @@ def test_store_get_and_append_refresh_the_sliding_expiry(fake_clock: FakeClock) 
     _, retained_child = store.get(session, drawing.id, child.id)
     assert retained_child.id == child.id
     assert retained_child.label == child.label
+
+
+def test_store_rejects_non_exact_string_labels_without_consuming_child_number(
+    fake_clock: FakeClock,
+) -> None:
+    class StringSubclass(str):
+        pass
+
+    store = DrawingStore(now=fake_clock)
+    session = object()
+    drawing = store.create(session, _trace())
+
+    for label in (StringSubclass("subclass"), object()):
+        with pytest.raises(TypeError, match="label"):
+            store.append(session, drawing.id, "v0", plan={}, scene=object(), label=label)  # type: ignore[arg-type]
+
+    version = store.append(session, drawing.id, "v0", plan={}, scene=_scene(), label="valid")
+    assert version.id == "v0.0"
+
+
+def test_store_detaches_trace_arrays_from_inputs_and_public_snapshots(
+    fake_clock: FakeClock,
+) -> None:
+    store = DrawingStore(now=fake_clock)
+    session = object()
+    trace = _mutable_trace()
+    source_region = trace.regions[0]
+    source_region.mask.setflags(write=False)
+    source_region.contours[0].setflags(write=False)
+
+    created = store.create(session, trace)
+    source_region.mask.setflags(write=True)
+    source_region.contours[0].setflags(write=True)
+    source_region.mask[0, 0] = False
+    source_region.contours[0][0, 0] = 99.0
+
+    created_region = created.trace.regions[0]
+    assert not created_region.mask.flags.writeable
+    assert not created_region.contours[0].flags.writeable
+    created_region.mask.setflags(write=True)
+    created_region.mask[0, 0] = False
+
+    later, _ = store.get(session, created.id, "v0")
+    later_region = later.trace.regions[0]
+    assert later_region.mask[0, 0]
+    assert later_region.contours[0][0, 0] == 0.0
+    assert not later_region.mask.flags.writeable
+    assert not later_region.contours[0].flags.writeable

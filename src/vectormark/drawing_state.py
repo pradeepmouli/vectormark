@@ -10,7 +10,9 @@ from threading import RLock
 from types import MappingProxyType
 from typing import Callable
 
-from .drawing_trace import TraceResult
+import numpy as np
+
+from .drawing_trace import TraceRegion, TraceResult
 
 
 class DrawingNotFound(Exception):
@@ -84,6 +86,40 @@ def _freeze_plan(plan: Mapping[str, object]) -> Mapping[str, object]:
     return frozen
 
 
+def _snapshot_trace(trace: TraceResult) -> TraceResult:
+    """Detach trace arrays while preserving the trace artifact's public shape."""
+    regions = []
+    for region in trace.regions:
+        mask = np.array(region.mask, copy=True)
+        mask.setflags(write=False)
+        contours = tuple(np.array(contour, copy=True) for contour in region.contours)
+        for contour in contours:
+            contour.setflags(write=False)
+        regions.append(
+            TraceRegion(
+                id=region.id,
+                source_label=region.source_label,
+                color=region.color,
+                mask=mask,
+                contours=contours,
+                trace_path=region.trace_path,
+                effective_trace_level=region.effective_trace_level,
+            )
+        )
+    return TraceResult(
+        width=trace.width,
+        height=trace.height,
+        options=trace.options,
+        regions=tuple(regions),
+        region_map_svg=trace.region_map_svg,
+    )
+
+
+def _validate_label(label: str | None) -> None:
+    if type(label) not in (str, type(None)):
+        raise TypeError("label must be exactly str or None")
+
+
 def _public_version(version: DrawingVersion) -> DrawingVersion:
     """Return a detached view so callers can never mutate retained state."""
     return DrawingVersion(
@@ -102,7 +138,7 @@ def _public_drawing(drawing: _StoredDrawing) -> DrawingState:
     }
     return DrawingState(
         id=drawing.id,
-        trace=drawing.trace,
+        trace=_snapshot_trace(drawing.trace),
         versions=MappingProxyType(versions),
     )
 
@@ -127,7 +163,7 @@ class DrawingStore:
             self._evict_expired(now)
             drawing = _StoredDrawing(
                 id=f"drw_{secrets.token_urlsafe(18)}",
-                trace=trace,
+                trace=_snapshot_trace(trace),
                 versions={
                     "v0": DrawingVersion(
                         id="v0",
@@ -178,6 +214,7 @@ class DrawingStore:
             if base_version not in drawing.versions:
                 raise DrawingNotFound from None
 
+            _validate_label(label)
             frozen_plan = _freeze_plan(plan)
             frozen_scene = _freeze(scene)
             child_number = drawing.child_counts[base_version]
