@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import base64
+import binascii
 import math
 import re
 from collections.abc import Mapping, Sequence
@@ -19,6 +21,7 @@ _BASE_VERSION = re.compile(r"^v\d+(?:\.\d+)*$")
 _GEOMETRY_TYPES = frozenset({"circle", "ellipse", "rect", "polygon", "path"})
 _FILL_TYPES = frozenset({"flat", "linear_gradient", "radial_gradient", "raster"})
 _FIT_TYPES = frozenset({"line", "quadratic", "cubic", "keep"})
+_PNG_SIGNATURE = b"\x89PNG\r\n\x1a\n"
 
 
 class PlanValidationError(ValueError):
@@ -76,9 +79,10 @@ def validate_plan(plan: DrawingPlan, trace: TraceResult, scene: object) -> None:
     target_ids = _scene_target_ids(scene)
     trace_region_ids = {region.id for region in trace.regions}
     commands = _trace_commands(trace)
-    group_ids: set[str] = set()
     known_targets = set(target_ids)
+    used_target_ids = set(target_ids)
     z_order_seen = False
+    z_order: tuple[Mapping[object, object], str] | None = None
 
     for index, raw_op in enumerate(plan.ops):
         pointer = f"/ops/{index}"
@@ -87,17 +91,18 @@ def validate_plan(plan: DrawingPlan, trace: TraceResult, scene: object) -> None:
         if name == "group":
             _reject_unknown_keys(op, {"op", "id", "regions"}, pointer)
             group_id = _required_str(op, "id", pointer)
-            if group_id in group_ids or group_id in known_targets:
+            if group_id in used_target_ids:
                 raise PlanValidationError(f"{pointer}/id", "duplicate operation id")
             regions = _strings(op.get("regions"), f"{pointer}/regions", nonempty=True)
             for region_index, region_id in enumerate(regions):
-                if region_id not in trace_region_ids:
+                if region_id not in trace_region_ids or region_id not in known_targets:
                     raise PlanValidationError(f"{pointer}/regions/{region_index}", "unknown region")
             if len(set(regions)) != len(regions):
                 repeated = _first_repeat(regions)
                 raise PlanValidationError(f"{pointer}/regions/{repeated}", "region is repeated")
-            group_ids.add(group_id)
+            known_targets.difference_update(regions)
             known_targets.add(group_id)
+            used_target_ids.add(group_id)
         elif name == "set_geometry":
             _validate_geometry_op(op, pointer, known_targets, commands)
         elif name == "set_fill":
@@ -105,10 +110,13 @@ def validate_plan(plan: DrawingPlan, trace: TraceResult, scene: object) -> None:
         elif name == "set_z_order":
             if z_order_seen:
                 raise PlanValidationError(pointer, "only one set_z_order operation is allowed")
-            _validate_z_order(op, pointer, target_ids)
             z_order_seen = True
+            z_order = (op, pointer)
         else:
             raise PlanValidationError(f"{pointer}/op", "unsupported operation")
+
+    if z_order is not None:
+        _validate_z_order(*z_order, known_targets)
 
 
 def _validate_geometry_op(
@@ -127,6 +135,8 @@ def _validate_geometry_op(
     path_ops = geometry.get("ops")
     if not isinstance(path_ops, Sequence) or isinstance(path_ops, (str, bytes)):
         raise PlanValidationError(f"{pointer}/geometry/ops", "must be an array")
+    if not path_ops:
+        raise PlanValidationError(f"{pointer}/geometry/ops", "must not be empty")
     _validate_path_ops(path_ops, f"{pointer}/geometry/ops", commands)
 
 
@@ -136,6 +146,8 @@ def _validate_path_ops(
     groups: set[str] = set()
     fitted: set[str] = set()
     since_close = False
+    latest_fitted: str | None = None
+    broken: set[str] = set()
     for index, raw_op in enumerate(path_ops):
         op_pointer = f"{pointer}/{index}"
         op = _mapping(raw_op, op_pointer)
@@ -175,16 +187,19 @@ def _validate_path_ops(
                 raise PlanValidationError(f"{op_pointer}/type", "unsupported fit type")
             fitted.add(target)
             since_close = True
+            latest_fitted = target
         elif name == "break":
             _reject_unknown_keys(op, {"op", "target"}, op_pointer)
             target = _required_str(op, "target", op_pointer)
-            if target not in fitted:
-                raise PlanValidationError(f"{op_pointer}/target", "break requires a previously fitted path group")
+            if target != latest_fitted or target in broken:
+                raise PlanValidationError(f"{op_pointer}/target", "break requires the current unbroken fitted path group")
+            broken.add(target)
         elif name == "close":
             _reject_unknown_keys(op, {"op"}, op_pointer)
             if not since_close:
                 raise PlanValidationError(op_pointer, "close requires a preceding fit")
             since_close = False
+            latest_fitted = None
         else:
             raise PlanValidationError(f"{op_pointer}/op", "unsupported path operation")
     if groups - fitted:
@@ -221,6 +236,12 @@ def _validate_fill_op(op: Mapping[object, object], pointer: str, targets: set[st
             raise PlanValidationError(f"{pointer}/fill/geometry/h", "must be greater than zero")
         if type(fill.get("png_b64")) is not str or not fill["png_b64"]:
             raise PlanValidationError(f"{pointer}/fill/png_b64", "must be a non-empty base64 string")
+        try:
+            png_data = base64.b64decode(fill["png_b64"], validate=True)
+        except (binascii.Error, ValueError):
+            raise PlanValidationError(f"{pointer}/fill/png_b64", "must be valid base64 PNG data") from None
+        if not png_data.startswith(_PNG_SIGNATURE):
+            raise PlanValidationError(f"{pointer}/fill/png_b64", "must contain PNG data")
         return
     stops = fill.get("stops")
     if not isinstance(stops, Sequence) or isinstance(stops, (str, bytes)) or len(stops) < 2:
@@ -235,7 +256,7 @@ def _validate_fill_op(op: Mapping[object, object], pointer: str, targets: set[st
         _color(stop.get("color"), f"{stop_pointer}/color")
 
 
-def _validate_z_order(op: Mapping[object, object], pointer: str, target_ids: tuple[str, ...]) -> None:
+def _validate_z_order(op: Mapping[object, object], pointer: str, target_ids: set[str]) -> None:
     _reject_unknown_keys(op, {"op", "targets"}, pointer)
     targets = _strings(op.get("targets"), f"{pointer}/targets", nonempty=True)
     seen: set[str] = set()
@@ -245,7 +266,7 @@ def _validate_z_order(op: Mapping[object, object], pointer: str, target_ids: tup
         seen.add(target)
         if target not in target_ids:
             raise PlanValidationError(f"{pointer}/targets/{index}", "unknown target")
-    if set(targets) != set(target_ids):
+    if set(targets) != target_ids:
         raise PlanValidationError(f"{pointer}/targets", "must list every target exactly once")
 
 
@@ -346,7 +367,7 @@ def _path_group_id(value: object) -> str | None:
 def _freeze(value: object) -> object:
     if isinstance(value, Mapping):
         return MappingProxyType({key: _freeze(item) for key, item in value.items()})
-    if isinstance(value, list):
+    if isinstance(value, Sequence) and not isinstance(value, (str, bytes)):
         return tuple(_freeze(item) for item in value)
     return value
 

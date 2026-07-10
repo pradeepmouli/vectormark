@@ -1,3 +1,4 @@
+import base64
 from types import SimpleNamespace
 
 import numpy as np
@@ -173,6 +174,115 @@ def test_plan_requires_each_base_target_once_in_z_order():
     )
     with pytest.raises(PlanValidationError, match="/ops/0/targets/1"):
         validate_plan(repeated, _trace(), _scene("r1", "r2"))
+
+
+def test_z_order_uses_the_final_target_created_by_grouping():
+    from vectormark.drawing_plan import parse_plan, validate_plan
+
+    plan = parse_plan(
+        {
+            "version": "vectormark.plan.v1",
+            "drawing_id": "drw_x",
+            "base_version": "v0",
+            "ops": [
+                {"op": "group", "id": "g1", "regions": ["r1"]},
+                {"op": "set_z_order", "targets": ["g1"]},
+            ],
+        }
+    )
+
+    validate_plan(plan, _trace(), _scene("r1"))
+
+
+def test_parse_plan_recursively_freezes_nested_path_op_sequences():
+    from vectormark.drawing_plan import parse_plan, validate_plan
+
+    payload = _path_plan(["r1.p0.c1"])
+    path_ops = tuple(payload["ops"][0]["geometry"]["ops"])
+    payload["ops"][0]["geometry"]["ops"] = path_ops
+
+    plan = parse_plan(payload)
+    path_ops[0]["id"] = "changed-after-parsing"
+
+    assert plan.ops[0]["geometry"]["ops"][0]["id"] == "s1"
+    validate_plan(plan, _trace(), _scene("r1"))
+
+
+@pytest.mark.parametrize(
+    ("path_ops", "pointer"),
+    [
+        (
+            [
+                {"op": "group", "id": "s1", "commands": ["r1.p0.c1"]},
+                {"op": "fit", "target": "s1", "type": "line"},
+                {"op": "group", "id": "s2", "commands": ["r1.p0.c2"]},
+                {"op": "fit", "target": "s2", "type": "line"},
+                {"op": "break", "target": "s1"},
+            ],
+            "/ops/0/geometry/ops/4/target",
+        ),
+        (
+            [
+                {"op": "group", "id": "s1", "commands": ["r1.p0.c1"]},
+                {"op": "fit", "target": "s1", "type": "line"},
+                {"op": "break", "target": "s1"},
+                {"op": "break", "target": "s1"},
+            ],
+            "/ops/0/geometry/ops/3/target",
+        ),
+    ],
+)
+def test_path_break_must_target_the_latest_unbroken_fit(path_ops, pointer):
+    from vectormark.drawing_plan import PlanValidationError, parse_plan, validate_plan
+
+    payload = _path_plan(["r1.p0.c1"])
+    payload["ops"][0]["geometry"]["ops"] = path_ops
+
+    with pytest.raises(PlanValidationError, match=pointer):
+        validate_plan(parse_plan(payload), _trace(), _scene("r1"))
+
+
+@pytest.mark.parametrize(
+    "png_b64",
+    [
+        "this is not base64!",
+        base64.b64encode(b"not a PNG").decode("ascii"),
+    ],
+)
+def test_raster_fill_requires_base64_encoded_png_data(png_b64):
+    from vectormark.drawing_plan import PlanValidationError, parse_plan, validate_plan
+
+    plan = parse_plan(
+        {
+            "version": "vectormark.plan.v1",
+            "drawing_id": "drw_x",
+            "base_version": "v0",
+            "ops": [
+                {
+                    "op": "set_fill",
+                    "target": "r1",
+                    "fill": {
+                        "type": "raster",
+                        "geometry": {"x": 0, "y": 0, "w": 1, "h": 1},
+                        "png_b64": png_b64,
+                    },
+                }
+            ],
+        }
+    )
+
+    with pytest.raises(PlanValidationError, match="/ops/0/fill/png_b64"):
+        validate_plan(plan, _trace(), _scene("r1"))
+
+
+def test_path_geometry_requires_at_least_one_operation():
+    from vectormark.drawing_plan import PlanValidationError, parse_plan, validate_plan
+
+    payload = _path_plan(["r1.p0.c1"])
+    payload["ops"][0]["geometry"]["ops"] = []
+
+    with pytest.raises(PlanValidationError, match="/ops/0/geometry/ops"):
+        validate_plan(parse_plan(payload), _trace(), _scene("r1"))
 
 
 def test_plan_requires_path_dependencies():
