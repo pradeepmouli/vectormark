@@ -62,6 +62,12 @@ def _scene(*target_ids: str) -> object:
     return SimpleNamespace(targets=tuple(SimpleNamespace(id=target_id) for target_id in target_ids))
 
 
+def _grouped_scene(*source_regions: str) -> object:
+    return SimpleNamespace(
+        targets=(SimpleNamespace(id="g1", source_regions=source_regions),)
+    )
+
+
 def _path_plan(commands: list[str]) -> dict[str, object]:
     return {
         "version": "vectormark.plan.v1",
@@ -144,6 +150,38 @@ def test_path_geometry_group_inherits_its_regions_command_provenance():
     validate_plan(plan, _two_region_trace(), _scene("r1", "r2"))
 
 
+def test_path_geometry_base_group_inherits_its_source_regions_command_provenance():
+    from vectormark.drawing_plan import parse_plan, validate_plan
+
+    plan = parse_plan(
+        {
+            "version": "vectormark.plan.v1",
+            "drawing_id": "drw_x",
+            "base_version": "v0",
+            "ops": [
+                {
+                    "op": "set_geometry",
+                    "target": "g1",
+                    "geometry": {
+                        "type": "path",
+                        "ops": [
+                            {"op": "group", "id": "s1", "commands": ["r1.p0.c1"]},
+                            {"op": "fit", "target": "s1", "type": "line"},
+                            {"op": "close"},
+                            {"op": "group", "id": "s2", "commands": ["r2.p0.c1"]},
+                            {"op": "fit", "target": "s2", "type": "line"},
+                            {"op": "close"},
+                        ],
+                    },
+                },
+                {"op": "set_z_order", "targets": ["g1"]},
+            ],
+        }
+    )
+
+    validate_plan(plan, _two_region_trace(), _grouped_scene("r1", "r2"))
+
+
 def test_path_geometry_rejects_trace_command_reused_across_path_groups():
     from vectormark.drawing_plan import PlanValidationError, parse_plan, validate_plan
 
@@ -158,6 +196,29 @@ def test_path_geometry_rejects_trace_command_reused_across_path_groups():
     ]
 
     with pytest.raises(PlanValidationError, match="/ops/0/geometry/ops/3/commands/0"):
+        validate_plan(parse_plan(payload), _trace(), _scene("r1"))
+
+
+def test_path_geometry_rejects_trace_command_reused_across_set_geometry_operations():
+    from vectormark.drawing_plan import PlanValidationError, parse_plan, validate_plan
+
+    payload = _path_plan(["r1.p0.c1"])
+    payload["ops"].append(
+        {
+            "op": "set_geometry",
+            "target": "r1",
+            "geometry": {
+                "type": "path",
+                "ops": [
+                    {"op": "group", "id": "s2", "commands": ["r1.p0.c1"]},
+                    {"op": "fit", "target": "s2", "type": "line"},
+                    {"op": "close"},
+                ],
+            },
+        }
+    )
+
+    with pytest.raises(PlanValidationError, match="/ops/1/geometry/ops/0/commands/0"):
         validate_plan(parse_plan(payload), _trace(), _scene("r1"))
 
 

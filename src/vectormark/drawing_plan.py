@@ -76,11 +76,12 @@ def parse_plan(payload: Mapping[str, object]) -> DrawingPlan:
 
 def validate_plan(plan: DrawingPlan, trace: TraceResult, scene: object) -> None:
     """Validate plan references and semantics against one trace and base scene."""
-    target_ids = _scene_target_ids(scene)
+    source_regions = _scene_target_source_regions(scene)
+    target_ids = tuple(source_regions)
     trace_region_ids = {region.id for region in trace.regions}
     commands = _trace_commands(trace)
     known_targets = set(target_ids)
-    source_regions = {target_id: frozenset({target_id}) for target_id in target_ids}
+    used_commands: set[str] = set()
     used_target_ids = set(target_ids)
     z_order_seen = False
     z_order: tuple[Mapping[object, object], str] | None = None
@@ -109,7 +110,7 @@ def validate_plan(plan: DrawingPlan, trace: TraceResult, scene: object) -> None:
             source_regions[group_id] = group_sources
             used_target_ids.add(group_id)
         elif name == "set_geometry":
-            _validate_geometry_op(op, pointer, known_targets, source_regions, commands)
+            _validate_geometry_op(op, pointer, known_targets, source_regions, commands, used_commands)
         elif name == "set_fill":
             _validate_fill_op(op, pointer, known_targets)
         elif name == "set_z_order":
@@ -130,6 +131,7 @@ def _validate_geometry_op(
     targets: set[str],
     source_regions: Mapping[str, frozenset[str]],
     commands: Mapping[str, tuple[str, int, int, TraceCommand]],
+    used_commands: set[str],
 ) -> None:
     _reject_unknown_keys(op, {"op", "target", "geometry"}, pointer)
     target = _validate_target(op, pointer, targets)
@@ -146,7 +148,13 @@ def _validate_geometry_op(
         raise PlanValidationError(f"{pointer}/geometry/ops", "must be an array")
     if not path_ops:
         raise PlanValidationError(f"{pointer}/geometry/ops", "must not be empty")
-    _validate_path_ops(path_ops, f"{pointer}/geometry/ops", commands, source_regions[target])
+    _validate_path_ops(
+        path_ops,
+        f"{pointer}/geometry/ops",
+        commands,
+        source_regions[target],
+        used_commands,
+    )
 
 
 def _validate_path_ops(
@@ -154,13 +162,13 @@ def _validate_path_ops(
     pointer: str,
     commands: Mapping[str, tuple[str, int, int, TraceCommand]],
     allowed_source_regions: frozenset[str],
+    used_commands: set[str],
 ) -> None:
     groups: set[str] = set()
     fitted: set[str] = set()
     since_close = False
     latest_fitted: str | None = None
     broken: set[str] = set()
-    used_commands: set[str] = set()
     for index, raw_op in enumerate(path_ops):
         op_pointer = f"{pointer}/{index}"
         op = _mapping(raw_op, op_pointer)
@@ -292,19 +300,22 @@ def _validate_z_order(op: Mapping[object, object], pointer: str, target_ids: set
         raise PlanValidationError(f"{pointer}/targets", "must list every target exactly once")
 
 
-def _scene_target_ids(scene: object) -> tuple[str, ...]:
+def _scene_target_source_regions(scene: object) -> dict[str, frozenset[str]]:
     targets = getattr(scene, "targets", None)
     if not isinstance(targets, Sequence) or isinstance(targets, (str, bytes)):
         raise PlanValidationError("/ops", "base scene must expose targets")
-    ids: list[str] = []
+    source_regions: dict[str, frozenset[str]] = {}
     for target in targets:
         target_id = getattr(target, "id", None)
         if type(target_id) is not str:
             raise PlanValidationError("/ops", "base scene target ids must be strings")
-        ids.append(target_id)
-    if len(set(ids)) != len(ids):
-        raise PlanValidationError("/ops", "base scene contains duplicate target ids")
-    return tuple(ids)
+        if target_id in source_regions:
+            raise PlanValidationError("/ops", "base scene contains duplicate target ids")
+        regions = getattr(target, "source_regions", None)
+        source_regions[target_id] = (
+            frozenset({target_id}) if regions is None else frozenset(regions)
+        )
+    return source_regions
 
 
 def _trace_commands(trace: TraceResult) -> dict[str, tuple[str, int, int, TraceCommand]]:
