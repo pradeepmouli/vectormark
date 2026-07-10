@@ -1,41 +1,41 @@
 # Agent-Guided Drawing MCP Design
 
 **Date:** 2026-07-10  
-**Area:** `src/vectormark/mcp_server.py` plus new decomposition, plan, and session-state modules.
+**Area:** `src/vectormark/mcp_server.py` plus new trace, plan, and session-state modules.
 
 ## Goal
 
 Expose an agent-guided drawing workflow through the MCP server. VectorMark first
-decomposes a raster into stable, labeled raw paths. An agent then sends a semantic
-reconstruction plan. VectorMark executes the plan against the retained drawing
-state and returns a clean SVG.
+traces a raster into stable, labeled raw paths. An agent then sends a semantic
+refinement plan. VectorMark executes the plan against the retained drawing state
+and returns a clean SVG.
 
 ```text
-decompose_drawing(image, options)
-  -> drawing_id + raw regions + labeled region map
+trace_drawing(image, options)
+  -> drawing_id + version v0 + raw regions + labeled region map
 
-reconstruct_drawing(plan)
-  -> SVG + reconstruction report + preview
+refine_drawing(plan)
+  -> drawing_id + derived version + SVG + refinement report + preview
 ```
 
 ## Product boundary
 
-This MVP is stateful and MCP-server-local. `decompose_drawing` retains the
+This MVP is stateful and MCP-server-local. `trace_drawing` retains the
 original resolved image bytes, processed RGB array, image metadata, segmented
 regions, masks, contours, raw paths, and command IDs in memory. It returns an
-opaque `drawing_id`; `reconstruct_drawing` accepts no image and reads the ID from
+opaque `drawing_id`; `refine_drawing` accepts no image and reads the ID from
 the plan.
 
 Each drawing belongs to the originating FastMCP `Context.session`. A drawing ID
 is cryptographically random, valid only within that session, and expires after
-30 minutes of inactivity. A successful reconstruction refreshes its idle expiry.
+30 minutes of inactivity. A successful refinement refreshes its idle expiry.
 Unknown, expired, or cross-session IDs return the structured error code
 `DRAWING_NOT_FOUND`. The MVP never writes drawing state to disk and does not
-provide a portable decomposition import/export format.
+provide a portable trace import/export format.
 
-## Decomposition contract
+## Trace contract
 
-`decompose_drawing` uses the existing secure image resolver and preprocessor,
+`trace_drawing` uses the existing secure image resolver and preprocessor,
 then performs only deterministic palette segmentation, contour extraction, and
 path fitting. It does **not** run primitive recognition, symmetry detection,
 surface merging, fill inference, clone detection, or optimizer passes.
@@ -45,6 +45,7 @@ The returned structured result contains:
 ```json
 {
   "drawing_id": "drw_<opaque>",
+  "version": "v0",
   "canvas": { "width": 1024, "height": 1024, "view_box": [0, 0, 1024, 1024] },
   "regions": [
     {
@@ -66,7 +67,7 @@ The returned structured result contains:
 }
 ```
 
-Region IDs are deterministic for one decomposition: sort retained regions by
+Region IDs are deterministic for one trace: sort retained regions by
 descending area, then bounding-box top, bounding-box left, color, and original
 segment label. Command IDs include a subpath index so holes and disconnected
 contours remain unambiguous.
@@ -75,23 +76,40 @@ The region-map SVG renders every raw region with a translucent fill and its
 region ID centered in the region bounding box. It is a diagnostic artifact for
 the agent, not final artwork.
 
-## Reconstruction-plan contract
+## Refinement-plan contract
 
-`reconstruct_drawing` accepts a single typed plan:
+`refine_drawing` accepts a single typed plan:
 
 ```json
 {
   "version": "vectormark.plan.v1",
   "drawing_id": "drw_<opaque>",
+  "base_version": "v0",
+  "label": "optional user-facing description",
   "ops": []
 }
 ```
 
 The server validates the plan before mutation: the drawing exists for the
-current session; every referenced region, group, command, and fill is known;
+current session; the base version exists; every referenced region, group,
+command, and fill is known;
 operation IDs are unique; and path source commands form a directed contiguous
 run within one raw subpath. Validation errors are returned as `INVALID_PLAN`
 with a JSON pointer and actionable message.
+
+### Version tree
+
+Every trace begins at immutable version `v0`. A successful plan creates a new
+immutable child of its base version; it never overwrites its parent. Version IDs
+are branch paths: the first, second, and third refinements of `v0` are `v0.0`,
+`v0.1`, and `v0.2`; the first child of `v0.1` is `v0.1.0`. The server assigns the
+next child segment atomically, so agents provide only `base_version` and cannot
+collide when submitting alternatives concurrently.
+
+Each version stores its parent version, the accepted plan, derived render
+targets, SVG, report, preview availability, and the optional plan `label`.
+Agents can branch from any retained version and present sibling alternatives to
+users without retracing the original raster.
 
 ### MVP region operations
 
@@ -122,21 +140,21 @@ not author final path coordinates.
 
 ## Execution model
 
-The decomposition module produces an internal `DrawingState` and a public,
+The trace module produces an internal `DrawingState` and a public,
 JSON-safe summary. The plan executor creates fresh render targets from this
 immutable state, fits requested geometry to its raw contour evidence, maps
 declared fills to the existing fill classes, and serializes through the existing
-SVG emitter. It does not mutate the stored decomposition, so the agent may issue
-multiple plans for one drawing.
+SVG emitter. It does not mutate the stored trace. Each accepted plan creates an
+immutable version, so the agent may issue multiple branches for one drawing.
 
-The reconstruction result includes final SVG, preview availability, target-level
-geometry/fill summaries, and residual measurements against the stored raster
-masks. It also returns warnings for lossy fits without silently falling back to
-automatic idealization.
+The refinement result includes its new version ID, final SVG, preview
+availability, target-level geometry/fill summaries, and residual measurements
+against the stored raster masks. It also returns warnings for lossy fits without
+silently falling back to automatic idealization.
 
 ## Non-goals
 
-- CLI commands or a portable decomposition file.
+- CLI commands or a portable trace file.
 - Automatic primitive/candidate suggestions.
 - Auto symmetry, clone inference, path congruency, constraints, ribbons, arcs,
   split regions, or boolean unions.
@@ -151,6 +169,6 @@ fill emission, z-order, and no mutation of stored state. MCP integration tests
 call both tools over stdio using a data URI.
 
 Given a flat folded-ribbon-style raster, acceptance requires a labeled region
-map, a plan that makes equal dots native circles and assigns a flat or gradient
-fill, a final SVG with those native elements, and no automatic symmetry or
-candidate inference during decomposition.
+map, two sibling plans from `v0` with distinct labels, a child plan from one
+sibling, native circles for equal dots, a flat or gradient fill, and no automatic
+symmetry or candidate inference during tracing.
