@@ -36,7 +36,7 @@ def _trace() -> TraceResult:
 
 
 def _scene() -> object:
-    return object()
+    return {"layers": ()}
 
 
 def test_store_creates_immutable_root_version(fake_clock: FakeClock) -> None:
@@ -84,6 +84,35 @@ def test_store_detaches_and_freezes_appended_plan_and_scene(
     _, stored = store.get(session, drawing.id, version.id)
     assert stored.plan == {"palette": ("blue",), "limits": {"strokes": 2}}
     assert stored.scene == {"layers": ("source",)}
+
+
+def test_store_rejects_values_that_cannot_be_safely_frozen(
+    fake_clock: FakeClock,
+) -> None:
+    class SelfCopyingMutable:
+        def __init__(self) -> None:
+            self.values = ["source"]
+
+        def __deepcopy__(self, memo: object) -> SelfCopyingMutable:
+            return self
+
+    store = DrawingStore(now=fake_clock)
+    session = object()
+    drawing = store.create(session, _trace())
+    hostile = SelfCopyingMutable()
+
+    with pytest.raises(TypeError, match="unsupported value type"):
+        store.append(
+            session,
+            drawing.id,
+            "v0",
+            plan={"palette": ["blue"]},
+            scene={"layers": hostile},
+        )
+
+    hostile.values.append("caller mutation")
+    _, root = store.get(session, drawing.id, "v0")
+    assert root.scene is None
 
 
 def test_store_branches_from_any_retained_version(fake_clock: FakeClock) -> None:

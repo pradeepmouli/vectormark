@@ -5,7 +5,6 @@ from __future__ import annotations
 import secrets
 import time
 from collections.abc import Mapping
-from copy import deepcopy
 from dataclasses import dataclass
 from threading import RLock
 from types import MappingProxyType
@@ -51,21 +50,38 @@ class _StoredDrawing:
     last_access: float
 
 
-def _freeze(value: object) -> object:
-    """Detach common mutable values and make their container structure read-only."""
-    if isinstance(value, Mapping):
-        return MappingProxyType({key: _freeze(item) for key, item in value.items()})
-    if isinstance(value, list):
-        return tuple(_freeze(item) for item in value)
-    if isinstance(value, tuple):
-        return tuple(_freeze(item) for item in value)
-    if isinstance(value, set | frozenset):
-        return frozenset(_freeze(item) for item in value)
-    return deepcopy(value)
+_IMMUTABLE_SCALAR_TYPES = (type(None), bool, int, float, complex, str, bytes)
+
+
+def _freeze(value: object, ancestors: set[int] | None = None) -> object:
+    """Detach supported containers and reject values without a safe frozen form."""
+    if type(value) in _IMMUTABLE_SCALAR_TYPES:
+        return value
+
+    if not isinstance(value, Mapping | list | tuple | set | frozenset):
+        raise TypeError(f"unsupported value type: {type(value).__qualname__}")
+
+    ancestors = set() if ancestors is None else ancestors
+    value_id = id(value)
+    if value_id in ancestors:
+        raise TypeError("cyclic container values are unsupported")
+    ancestors.add(value_id)
+    try:
+        if isinstance(value, Mapping):
+            return MappingProxyType(
+                {_freeze(key, ancestors): _freeze(item, ancestors) for key, item in value.items()}
+            )
+        if isinstance(value, list | tuple):
+            return tuple(_freeze(item, ancestors) for item in value)
+        return frozenset(_freeze(item, ancestors) for item in value)
+    finally:
+        ancestors.remove(value_id)
 
 
 def _freeze_plan(plan: Mapping[str, object]) -> Mapping[str, object]:
-    return MappingProxyType({key: _freeze(value) for key, value in plan.items()})
+    frozen = _freeze(plan)
+    assert isinstance(frozen, Mapping)
+    return frozen
 
 
 def _public_version(version: DrawingVersion) -> DrawingVersion:
@@ -162,14 +178,16 @@ class DrawingStore:
             if base_version not in drawing.versions:
                 raise DrawingNotFound from None
 
+            frozen_plan = _freeze_plan(plan)
+            frozen_scene = _freeze(scene)
             child_number = drawing.child_counts[base_version]
             version_id = f"{base_version}.{child_number}"
             drawing.child_counts[base_version] = child_number + 1
             version = DrawingVersion(
                 id=version_id,
                 parent_id=base_version,
-                plan=_freeze_plan(plan),
-                scene=_freeze(scene),
+                plan=frozen_plan,
+                scene=frozen_scene,
                 label=label,
             )
             drawing.versions[version_id] = version
