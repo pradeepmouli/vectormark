@@ -1,4 +1,5 @@
 import numpy as np
+import pytest
 
 from vectormark.drawing_trace import PythonTraceEngine, TraceOptions
 
@@ -62,3 +63,12 @@ def test_trace_result_public_dict_excludes_pixel_arrays():
     assert public["width"] == 80
     assert public["regions"][0]["trace_path"]["commands"][0]["id"] == "r1.p0.c0"
     assert "mask" not in public["regions"][0]
+
+
+def test_trace_result_region_arrays_are_read_only():
+    region = PythonTraceEngine().trace(_two_region_image(), TraceOptions()).regions[0]
+
+    with pytest.raises(ValueError):
+        region.mask[0, 0] = not region.mask[0, 0]
+    with pytest.raises(ValueError):
+        region.contours[0][0, 0] = 0

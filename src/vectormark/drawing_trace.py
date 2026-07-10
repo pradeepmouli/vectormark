@@ -191,13 +191,18 @@ class PythonTraceEngine:
                 for subpath_index, d in enumerate(path_ds)
                 for command in _path_commands(d, region_id, subpath_index)
             )
+            mask = region.mask.copy()
+            mask.setflags(write=False)
+            immutable_contours = tuple(contour.copy() for contour in contours)
+            for contour in immutable_contours:
+                contour.setflags(write=False)
             traced.append(
                 TraceRegion(
                     id=region_id,
                     source_label=region.label,
                     color=region.color_hex,
-                    mask=region.mask.copy(),
-                    contours=tuple(contour.copy() for contour in contours),
+                    mask=mask,
+                    contours=immutable_contours,
                     trace_path=TracePath(
                         d=" ".join(path_ds),
                         fill_rule="evenodd" if len(path_ds) > 1 else "nonzero",
