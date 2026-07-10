@@ -80,6 +80,7 @@ def validate_plan(plan: DrawingPlan, trace: TraceResult, scene: object) -> None:
     trace_region_ids = {region.id for region in trace.regions}
     commands = _trace_commands(trace)
     known_targets = set(target_ids)
+    source_regions = {target_id: frozenset({target_id}) for target_id in target_ids}
     used_target_ids = set(target_ids)
     z_order_seen = False
     z_order: tuple[Mapping[object, object], str] | None = None
@@ -100,11 +101,15 @@ def validate_plan(plan: DrawingPlan, trace: TraceResult, scene: object) -> None:
             if len(set(regions)) != len(regions):
                 repeated = _first_repeat(regions)
                 raise PlanValidationError(f"{pointer}/regions/{repeated}", "region is repeated")
+            group_sources = frozenset().union(*(source_regions[region_id] for region_id in regions))
             known_targets.difference_update(regions)
             known_targets.add(group_id)
+            for region_id in regions:
+                del source_regions[region_id]
+            source_regions[group_id] = group_sources
             used_target_ids.add(group_id)
         elif name == "set_geometry":
-            _validate_geometry_op(op, pointer, known_targets, commands)
+            _validate_geometry_op(op, pointer, known_targets, source_regions, commands)
         elif name == "set_fill":
             _validate_fill_op(op, pointer, known_targets)
         elif name == "set_z_order":
@@ -120,10 +125,14 @@ def validate_plan(plan: DrawingPlan, trace: TraceResult, scene: object) -> None:
 
 
 def _validate_geometry_op(
-    op: Mapping[object, object], pointer: str, targets: set[str], commands: Mapping[str, tuple[int, int, TraceCommand]],
+    op: Mapping[object, object],
+    pointer: str,
+    targets: set[str],
+    source_regions: Mapping[str, frozenset[str]],
+    commands: Mapping[str, tuple[str, int, int, TraceCommand]],
 ) -> None:
     _reject_unknown_keys(op, {"op", "target", "geometry"}, pointer)
-    _validate_target(op, pointer, targets)
+    target = _validate_target(op, pointer, targets)
     geometry = _mapping(op.get("geometry"), f"{pointer}/geometry")
     geometry_type = _required_str(geometry, "type", f"{pointer}/geometry")
     if geometry_type not in _GEOMETRY_TYPES:
@@ -137,17 +146,21 @@ def _validate_geometry_op(
         raise PlanValidationError(f"{pointer}/geometry/ops", "must be an array")
     if not path_ops:
         raise PlanValidationError(f"{pointer}/geometry/ops", "must not be empty")
-    _validate_path_ops(path_ops, f"{pointer}/geometry/ops", commands)
+    _validate_path_ops(path_ops, f"{pointer}/geometry/ops", commands, source_regions[target])
 
 
 def _validate_path_ops(
-    path_ops: Sequence[object], pointer: str, commands: Mapping[str, tuple[int, int, TraceCommand]],
+    path_ops: Sequence[object],
+    pointer: str,
+    commands: Mapping[str, tuple[str, int, int, TraceCommand]],
+    allowed_source_regions: frozenset[str],
 ) -> None:
     groups: set[str] = set()
     fitted: set[str] = set()
     since_close = False
     latest_fitted: str | None = None
     broken: set[str] = set()
+    used_commands: set[str] = set()
     for index, raw_op in enumerate(path_ops):
         op_pointer = f"{pointer}/{index}"
         op = _mapping(raw_op, op_pointer)
@@ -158,22 +171,31 @@ def _validate_path_ops(
             if group_id in groups:
                 raise PlanValidationError(f"{op_pointer}/id", "duplicate path group id")
             selected = _strings(op.get("commands"), f"{op_pointer}/commands", nonempty=True)
-            records: list[tuple[int, int, TraceCommand]] = []
+            records: list[tuple[str, int, int, TraceCommand]] = []
             for command_index, command_id in enumerate(selected):
                 try:
                     record = commands[command_id]
                 except KeyError:
                     raise PlanValidationError(f"{op_pointer}/commands/{command_index}", "unknown trace command") from None
-                if record[2].command in {"M", "Z"}:
+                if record[0] not in allowed_source_regions:
+                    raise PlanValidationError(
+                        f"{op_pointer}/commands/{command_index}", "trace command is not owned by the target"
+                    )
+                if command_id in used_commands:
+                    raise PlanValidationError(
+                        f"{op_pointer}/commands/{command_index}", "trace command is already used by another path group"
+                    )
+                if record[3].command in {"M", "Z"}:
                     raise PlanValidationError(f"{op_pointer}/commands/{command_index}", "M and Z commands cannot be grouped")
                 records.append(record)
             for command_index in range(1, len(records)):
                 previous, current = records[command_index - 1], records[command_index]
-                if current[:2] != (previous[0], previous[1] + 1):
+                if current[:3] != (previous[0], previous[1], previous[2] + 1):
                     raise PlanValidationError(
                         f"{op_pointer}/commands/{command_index}",
                         "commands must be a contiguous run from one trace subpath",
                     )
+            used_commands.update(selected)
             groups.add(group_id)
         elif name == "fit":
             _reject_unknown_keys(op, {"op", "target", "type"}, op_pointer)
@@ -285,8 +307,8 @@ def _scene_target_ids(scene: object) -> tuple[str, ...]:
     return tuple(ids)
 
 
-def _trace_commands(trace: TraceResult) -> dict[str, tuple[int, int, TraceCommand]]:
-    commands: dict[str, tuple[int, int, TraceCommand]] = {}
+def _trace_commands(trace: TraceResult) -> dict[str, tuple[str, int, int, TraceCommand]]:
+    commands: dict[str, tuple[str, int, int, TraceCommand]] = {}
     for region in trace.regions:
         subpath = -1
         index = 0
@@ -296,15 +318,16 @@ def _trace_commands(trace: TraceResult) -> dict[str, tuple[int, int, TraceComman
                 index = 0
             if command.id in commands:
                 raise PlanValidationError("/ops", "trace contains duplicate command ids")
-            commands[command.id] = (subpath, index, command)
+            commands[command.id] = (region.id, subpath, index, command)
             index += 1
     return commands
 
 
-def _validate_target(op: Mapping[object, object], pointer: str, targets: set[str]) -> None:
+def _validate_target(op: Mapping[object, object], pointer: str, targets: set[str]) -> str:
     target = _required_str(op, "target", pointer)
     if target not in targets:
         raise PlanValidationError(f"{pointer}/target", "unknown target")
+    return target
 
 
 def _required_str(mapping: Mapping[object, object], key: str, pointer: str) -> str:

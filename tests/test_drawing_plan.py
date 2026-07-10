@@ -37,6 +37,27 @@ def _trace() -> TraceResult:
     return TraceResult(1, 1, TraceOptions(), (region,), "<svg/>")
 
 
+def _two_region_trace() -> TraceResult:
+    r1 = _trace().regions[0]
+    r2 = TraceRegion(
+        id="r2",
+        source_label=2,
+        color="#445566",
+        mask=np.ones((1, 1), dtype=bool),
+        contours=(np.array([[0.0, 0.0], [1.0, 0.0], [1.0, 1.0]]),),
+        trace_path=TracePath(
+            d=r1.trace_path.d,
+            fill_rule=r1.trace_path.fill_rule,
+            commands=tuple(
+                TraceCommand(command.id.replace("r1.", "r2."), command.command, command.values)
+                for command in r1.trace_path.commands
+            ),
+        ),
+        effective_trace_level="pixel",
+    )
+    return TraceResult(1, 1, TraceOptions(), (r1, r2), "<svg/>")
+
+
 def _scene(*target_ids: str) -> object:
     return SimpleNamespace(targets=tuple(SimpleNamespace(id=target_id) for target_id in target_ids))
 
@@ -79,6 +100,65 @@ def test_plan_reports_pointer_for_non_contiguous_path_commands():
 
     with pytest.raises(PlanValidationError, match="/ops/0/geometry/ops/0/commands/1"):
         validate_plan(plan, _trace(), _scene("r1"))
+
+
+def test_path_geometry_rejects_commands_owned_by_another_region():
+    from vectormark.drawing_plan import PlanValidationError, parse_plan, validate_plan
+
+    plan = parse_plan(_path_plan(["r2.p0.c1"]))
+
+    with pytest.raises(PlanValidationError, match="/ops/0/geometry/ops/0/commands/0"):
+        validate_plan(plan, _two_region_trace(), _scene("r1", "r2"))
+
+
+def test_path_geometry_group_inherits_its_regions_command_provenance():
+    from vectormark.drawing_plan import parse_plan, validate_plan
+
+    plan = parse_plan(
+        {
+            "version": "vectormark.plan.v1",
+            "drawing_id": "drw_x",
+            "base_version": "v0",
+            "ops": [
+                {"op": "group", "id": "g1", "regions": ["r1", "r2"]},
+                {
+                    "op": "set_geometry",
+                    "target": "g1",
+                    "geometry": {
+                        "type": "path",
+                        "ops": [
+                            {"op": "group", "id": "s1", "commands": ["r1.p0.c1"]},
+                            {"op": "fit", "target": "s1", "type": "line"},
+                            {"op": "close"},
+                            {"op": "group", "id": "s2", "commands": ["r2.p0.c1"]},
+                            {"op": "fit", "target": "s2", "type": "line"},
+                            {"op": "close"},
+                        ],
+                    },
+                },
+                {"op": "set_z_order", "targets": ["g1"]},
+            ],
+        }
+    )
+
+    validate_plan(plan, _two_region_trace(), _scene("r1", "r2"))
+
+
+def test_path_geometry_rejects_trace_command_reused_across_path_groups():
+    from vectormark.drawing_plan import PlanValidationError, parse_plan, validate_plan
+
+    payload = _path_plan(["r1.p0.c1"])
+    payload["ops"][0]["geometry"]["ops"] = [
+        {"op": "group", "id": "s1", "commands": ["r1.p0.c1"]},
+        {"op": "fit", "target": "s1", "type": "line"},
+        {"op": "close"},
+        {"op": "group", "id": "s2", "commands": ["r1.p0.c1"]},
+        {"op": "fit", "target": "s2", "type": "line"},
+        {"op": "close"},
+    ]
+
+    with pytest.raises(PlanValidationError, match="/ops/0/geometry/ops/3/commands/0"):
+        validate_plan(parse_plan(payload), _trace(), _scene("r1"))
 
 
 @pytest.mark.parametrize(
