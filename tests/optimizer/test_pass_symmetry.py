@@ -1,6 +1,6 @@
 import numpy as np
-from shapely.geometry import Polygon
 
+from vectormark.skia_geometry import SkPath
 from vectormark.candidate import FlatFill, LinearGradientFill
 from vectormark.optimizer.framework import optimize
 from vectormark.optimizer.gate import rasterize
@@ -9,11 +9,11 @@ from vectormark.optimizer.passes.symmetry import symmetry_pass
 from vectormark.fit import Shape
 
 
-def _mask_for_polygon(poly: Polygon, shape_hw: tuple[int, int] = (96, 96)) -> np.ndarray:
+def _mask_for_polygon(poly: SkPath, shape_hw: tuple[int, int] = (96, 96)) -> np.ndarray:
     return rasterize(poly, shape_hw)
 
 
-def _path_from_poly(poly: Polygon) -> Shape:
+def _path_from_poly(poly: SkPath) -> Shape:
     coords = list(poly.exterior.coords)
     body = " ".join(f"L{x} {y}" for x, y in coords[1:])
     return Shape("path", {"d": f"M{coords[0][0]} {coords[0][1]} {body} Z"})
@@ -21,7 +21,7 @@ def _path_from_poly(poly: Polygon) -> Shape:
 
 def _obj(
     obj_id: int,
-    poly: Polygon,
+    poly: SkPath,
     *,
     fill: object = FlatFill("#112233"),
     z: int = 0,
@@ -36,7 +36,7 @@ def _rect(
     fill: object = FlatFill("#112233"),
 ) -> VectorRegion:
     minx, miny, maxx, maxy = bounds
-    poly = Polygon([(minx, miny), (maxx, miny), (maxx, maxy), (minx, maxy)])
+    poly = SkPath(shell=[(minx, miny), (maxx, miny), (maxx, maxy), (minx, maxy)])
     return _obj(obj_id, poly, fill=fill)
 
 
@@ -61,7 +61,7 @@ def test_symmetry_pass_replaces_mirror_pair_with_baked_path():
 
 def test_symmetry_pass_reconstructs_self_symmetric_object_as_single_region():
     angles = np.linspace(0.0, 2.0 * np.pi, 32, endpoint=False)
-    symmetric_contour = Polygon(
+    symmetric_contour = SkPath(shell=
         [(48.0 + 20.0 * np.cos(theta), 48.0 + 30.0 * np.sin(theta)) for theta in angles]
     )
     obj = _obj(1, symmetric_contour)
@@ -252,7 +252,7 @@ def test_symmetric_half_fit_fits_prefixed_half_only_once(monkeypatch):
 
 def test_symmetry_pass_reconstructs_gradient_self_symmetry_as_internal_branch():
     angles = np.linspace(0.0, 2.0 * np.pi, 32, endpoint=False)
-    symmetric_contour = Polygon(
+    symmetric_contour = SkPath(shell=
         [(48.0 + 20.0 * np.cos(theta), 48.0 + 30.0 * np.sin(theta)) for theta in angles]
     )
     obj = _obj(
@@ -274,7 +274,7 @@ def test_symmetry_pass_reconstructs_gradient_self_symmetry_as_internal_branch():
 
 
 def test_symmetry_pass_preserves_self_symmetric_native_primitive():
-    poly = Polygon([(20.0, 20.0), (60.0, 20.0), (60.0, 60.0), (20.0, 60.0)])
+    poly = SkPath(shell=[(20.0, 20.0), (60.0, 20.0), (60.0, 60.0), (20.0, 60.0)])
     obj = VectorRegion(
         1,
         Shape("rect", {"x": 20.0, "y": 20.0, "w": 40.0, "h": 40.0}),
@@ -287,7 +287,7 @@ def test_symmetry_pass_preserves_self_symmetric_native_primitive():
 
 
 def test_symmetry_pass_records_simple_self_symmetric_path_without_rewriting():
-    poly = Polygon([(20.0, 60.0), (40.0, 20.0), (60.0, 60.0)])
+    poly = SkPath(shell=[(20.0, 60.0), (40.0, 20.0), (60.0, 60.0)])
     obj = _obj(1, poly)
 
     out = optimize([obj], {obj.id: _mask_for_polygon(poly)}, [symmetry_pass])
@@ -353,7 +353,7 @@ def test_symmetry_pass_does_not_use_raster_mask_as_acceptance_gate():
     right = _rect(2, bounds=(58.0, 20.0, 70.0, 34.0), fill=FlatFill("#112233"))
     masks = {
         left.id: _mask_for_polygon(left.footprint),
-        right.id: _mask_for_polygon(Polygon([(0.0, 0.0), (5.0, 0.0), (5.0, 5.0), (0.0, 5.0)])),
+        right.id: _mask_for_polygon(SkPath(shell=[(0.0, 0.0), (5.0, 0.0), (5.0, 5.0), (0.0, 5.0)])),
     }
 
     proposals = symmetry_pass([left, right], masks)

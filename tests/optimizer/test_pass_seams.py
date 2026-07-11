@@ -463,4 +463,4 @@ def test_optimizer_runs_seams_after_symmetry_before_render_inlining():
 
     assert pass_names.count("clones_pass") == 1
     assert pass_names.count("seams_pass") == 2
-    assert pass_names[-5:] == ["symmetry_pass", "seams_pass", "clones_pass", "simplify_pass", "seams_pass"]
+    assert pass_names[-6:] == ["symmetry_pass", "seams_pass", "simplify_pass", "clones_pass", "simplify_pass", "seams_pass"]

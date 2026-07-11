@@ -1,8 +1,8 @@
 from __future__ import annotations
 
 import numpy as np
-from shapely.geometry import Polygon
 
+from ...skia_geometry import SkPath
 from ...candidate import Fill, FlatFill, LinearGradientFill, RadialGradientFill
 from ...fit import Shape
 from ..framework import Proposal
@@ -48,7 +48,7 @@ def _source_coverage(child_raster: np.ndarray, source_mask: np.ndarray | None) -
 
 def _fill_from_render_evidence(
     child_raster: np.ndarray,
-    child_footprint: Polygon,
+    child_footprint: SkPath,
     *,
     source: VectorRegion,
     source_mask: np.ndarray | None,
@@ -127,10 +127,10 @@ def split_compound_pass(
             source_mask = obj.raster
         shape_hw = source_mask.shape if source_mask is not None else None
 
-        footprints: list[Polygon] = []
+        footprints: list[SkPath] = []
         for _subpath_index, tokens, _area in kept:
             footprint = to_polygon(_subpath_shape(tokens))
-            if not isinstance(footprint, Polygon) or footprint.is_empty:
+            if footprint.is_empty:
                 break
             footprints.append(footprint)
         if len(footprints) != len(kept):

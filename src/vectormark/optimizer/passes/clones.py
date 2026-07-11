@@ -3,9 +3,8 @@ from __future__ import annotations
 import math
 
 import numpy as np
-from shapely import affinity
-from shapely.geometry import MultiPolygon, Polygon
 
+from ...skia_geometry import SkPath, affinity
 from ...candidate import FlatFill
 from ..framework import Proposal
 from ..shape_transform import bake_shape_transform
@@ -17,8 +16,8 @@ _PERIMETER_RATIO_TOL = 0.01
 _GEOM_RESIDUAL_TOL = 0.01
 
 
-def _polygonal_flat(flat: object) -> Polygon | MultiPolygon | None:
-    if isinstance(flat, (Polygon, MultiPolygon)) and not flat.is_empty:
+def _polygonal_flat(flat: object) -> SkPath | None:
+    if isinstance(flat, SkPath) and not flat.is_empty:
         return flat
     return None
 
@@ -34,7 +33,7 @@ def _has_self_symmetry(region: VectorRegion) -> bool:
     return isinstance(symmetry, dict) and symmetry.get("mode") == "self"
 
 
-def _shape_descriptor(flat: Polygon | MultiPolygon) -> tuple[float, float, int]:
+def _shape_descriptor(flat: SkPath) -> tuple[float, float, int]:
     return (float(flat.area), float(flat.length), len(getattr(flat, "geoms", ()) or []))
 
 
@@ -53,9 +52,9 @@ def _normalize_angle(theta: float) -> float:
     return out
 
 
-def _orientation_candidates(flat: Polygon | MultiPolygon) -> list[float]:
+def _orientation_candidates(flat: SkPath) -> list[float]:
     rect = flat.minimum_rotated_rectangle
-    if rect.is_empty or not isinstance(rect, Polygon):
+    if rect.is_empty:
         return [0.0]
 
     coords = list(rect.exterior.coords)
@@ -89,23 +88,23 @@ def _matrix_for_rotation_and_centroids(
 
 
 def _apply_svg_matrix(
-    flat: Polygon | MultiPolygon,
+    flat: SkPath,
     matrix: tuple[float, float, float, float, float, float],
-) -> Polygon | MultiPolygon:
+) -> SkPath:
     a, b, c, d, e, f = matrix
     return affinity.affine_transform(flat, [a, c, b, d, e, f])
 
 
 def _best_transform(
-    canonical: Polygon | MultiPolygon,
-    target: Polygon | MultiPolygon,
-) -> tuple[tuple[float, float, float, float, float, float], Polygon | MultiPolygon] | None:
+    canonical: SkPath,
+    target: SkPath,
+) -> tuple[tuple[float, float, float, float, float, float], SkPath] | None:
     canonical_centroid = (float(canonical.centroid.x), float(canonical.centroid.y))
     target_centroid = (float(target.centroid.x), float(target.centroid.y))
     canonical_angles = _orientation_candidates(canonical)
     target_angles = _orientation_candidates(target)
 
-    candidates: list[tuple[float, tuple[float, float, float, float, float, float], Polygon | MultiPolygon]] = []
+    candidates: list[tuple[float, tuple[float, float, float, float, float, float], SkPath]] = []
     for canon_angle in canonical_angles:
         for target_angle in target_angles:
             theta = _normalize_angle(target_angle - canon_angle)
@@ -136,7 +135,7 @@ def clones_pass(
     masks: dict[int, np.ndarray],
 ) -> list[Proposal]:
     del masks
-    usable: list[tuple[VectorRegion, Polygon | MultiPolygon, tuple[float, float, int], str]] = []
+    usable: list[tuple[VectorRegion, SkPath, tuple[float, float, int], str]] = []
     for obj in sorted(objects, key=lambda current: int(current.id)):
         if not obj.is_leaf or obj.current is None:
             continue

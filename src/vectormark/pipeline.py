@@ -71,7 +71,13 @@ COVERAGE_HOLE_TOL = 0.05   # if >5% of a region's eroded interior would fall bel
                            # keep the binary mask there instead of punching holes.
 
 
-def attach_coverage_field(regions: list[Region], rgb: np.ndarray, max_colors: int) -> None:
+def attach_coverage_field(
+    regions: list[Region],
+    rgb: np.ndarray,
+    max_colors: int,
+    *,
+    palette: np.ndarray | None = None,
+) -> None:
     """Attach `region.coverage` from ONE shared soft label field, computed over the given
     regions' colors + background, evaluated on each region's CURRENT mask — so merged and
     reconstructed regions are covered, not just freshly-segmented ones. A region whose field
@@ -84,7 +90,11 @@ def attach_coverage_field(regions: list[Region], rgb: np.ndarray, max_colors: in
     from .segment import _background_color
     if not regions:
         return
-    palette_cols = extract_palette(rgb, max_colors=max_colors)
+    palette_cols = (
+        np.asarray(palette, dtype=np.uint8)
+        if palette is not None
+        else extract_palette(rgb, max_colors=max_colors)
+    )
     q = quantize(rgb, palette_cols)
     bg = _background_color(q)
     # Use ALL image palette colors + background as rows so gradient-competing colors are
@@ -702,9 +712,18 @@ def _idealize_rectified(arr: np.ndarray, opt: Options, rho: float, w0: int, h0: 
     return doc, cands, axes, sym_diags, diag_extra
 
 
-def _render_optimizer_body(objects, *, flatten: bool = False) -> tuple[list[str], list[str]]:
+def _render_optimizer_body(
+    objects,
+    *,
+    flatten: bool = False,
+    epsilon: float = 1.0,
+    max_error: float = 1.0,
+    cubic: bool = False,
+) -> tuple[list[str], list[str]]:
     """Serialize optimized objects, resolving object-id based <use> references."""
-    from .optimizer.vector_region import VectorRegion, _parse_subpaths
+    from .optimizer.vector_region import VectorRegion, _parse_subpaths, _sample_subpath
+    from .optimizer.passes.simplify import _rounded_rect_path, _simplified_path_shape
+    from .skia_geometry import SkPath
 
     defs: list[str] = []
     fill_cache: dict[str, str] = {}
@@ -863,6 +882,45 @@ def _render_optimizer_body(objects, *, flatten: bool = False) -> tuple[list[str]
             parts.append(part)
         return Shape("path", {"d": " ".join(parts)})
 
+    def _path_command_count(d: str) -> int:
+        return sum(1 for char in d if char in "MLQCAZ")
+
+    def _shape_residual(a: Shape, b: Shape) -> float:
+        a_poly = SkPath.from_svg_d(shape_to_path_d(a))
+        b_poly = SkPath.from_svg_d(shape_to_path_d(b))
+        if a_poly.is_empty or b_poly.is_empty:
+            return float("inf")
+        return float(a_poly.symmetric_difference(b_poly).area / max(float(a_poly.area), float(b_poly.area), 1.0))
+
+    def _simplify_stitched_region_shape(shape: Shape) -> Shape:
+        if shape.kind != "path" or shape.params.get("fill_rule"):
+            return shape
+        current_commands = _path_command_count(str(shape.params["d"]))
+        if current_commands < 12:
+            return shape
+        simplified = _simplified_path_shape(
+            shape,
+            epsilon=epsilon,
+            max_error=max_error,
+            samples=24,
+            preserve_subpaths=True,
+            cubic=cubic,
+            check_geometry=True,
+        )
+        if simplified is not None:
+            return simplified
+        subpaths = _parse_subpaths(shape_to_path_d(shape))
+        if len(subpaths) != 1:
+            return shape
+        points = _sample_subpath(subpaths[0], 12)
+        rounded = _rounded_rect_path(points, epsilon=epsilon)
+        if rounded is None or _path_command_count(rounded) >= current_commands:
+            return shape
+        candidate = Shape("path", {"d": rounded})
+        if _shape_residual(shape, candidate) > 0.02:
+            return shape
+        return candidate
+
     def _combined_self_symmetry_region(region: VectorRegion) -> VectorRegion | None:
         symmetry = region.diagnostics.get("symmetry")
         if not isinstance(symmetry, Mapping) or symmetry.get("mode") != "self":
@@ -882,6 +940,7 @@ def _render_optimizer_body(objects, *, flatten: bool = False) -> tuple[list[str]
         if source_shape is not None and mirror_shape is not None:
             stitched_shape = _stitched_self_symmetry_shape(source_shape, mirror_shape)
             if stitched_shape is not None:
+                stitched_shape = _simplify_stitched_region_shape(stitched_shape)
                 return VectorRegion(
                     region.id,
                     stitched_shape,
@@ -1041,6 +1100,7 @@ def _optimizer_passes(opt: Options):
     if not opt.no_symmetry:
         passes.append(_configured_symmetry_pass)
     passes.append(_configured_seams_pass)
+    passes.append(_configured_simplify_pass)
     passes.append(clones_pass)
     passes.append(_configured_linelet_simplify_pass)
     passes.append(_configured_seams_pass)
@@ -1061,10 +1121,9 @@ def _svg_path_segment_count(svg: str) -> int:
 
 
 def _prefer_optimizer_svg(trace_svg: str, optimized_svg: str) -> bool:
-    """Use optimized output unless it has more path segments."""
-    trace_path_segments = _svg_path_segment_count(trace_svg)
-    optimized_path_segments = _svg_path_segment_count(optimized_svg)
-    return optimized_path_segments <= trace_path_segments
+    """Use optimizer output; structural counts are diagnostics, not gates."""
+    del trace_svg, optimized_svg
+    return True
 
 
 def _optimizer_report(objects, opt: Options, *, fallback_reason: str | None = None) -> IdealizeReport:
@@ -1135,9 +1194,21 @@ def _idealize_optimizer(arr: np.ndarray, opt: Options, width: int, height: int) 
         masks,
         _optimizer_passes(opt),
     )
-    trace_body, trace_defs = _render_optimizer_body(objects, flatten=opt.flatten)
+    trace_body, trace_defs = _render_optimizer_body(
+        objects,
+        flatten=opt.flatten,
+        epsilon=opt.epsilon,
+        max_error=opt.max_error,
+        cubic=opt.cubic_paths,
+    )
     trace_svg = render_svg_doc(width, height, trace_body, trace_defs)
-    optimized_body, optimized_defs = _render_optimizer_body(optimized, flatten=opt.flatten)
+    optimized_body, optimized_defs = _render_optimizer_body(
+        optimized,
+        flatten=opt.flatten,
+        epsilon=opt.epsilon,
+        max_error=opt.max_error,
+        cubic=opt.cubic_paths,
+    )
     optimized_svg = render_svg_doc(width, height, optimized_body, optimized_defs)
     fallback_reason = None
     if not _prefer_optimizer_svg(trace_svg, optimized_svg):

@@ -1,5 +1,6 @@
 from pathlib import Path
 import math
+import re
 
 import numpy as np
 from PIL import Image
@@ -122,13 +123,13 @@ def test_optimizer_report_includes_object_diagnostics():
     assert data["optimizer_objects"][0]["shape"] == "circle"
 
 
-def test_optimizer_structural_fallback_rejects_larger_svg():
+def test_optimizer_structural_counts_do_not_reject_optimizer_output():
     trace = '<svg><path d="M0 0 Z"/></svg>'
     larger = '<svg><path d="M0 0 Z"/><path d="M1 1 Z"/></svg>'
     longer = '<svg><path d="M0 0 L1 1 L2 2 L3 3 Z"/></svg>'
 
-    assert not _prefer_optimizer_svg(trace, larger)
-    assert not _prefer_optimizer_svg(trace, longer)
+    assert _prefer_optimizer_svg(trace, larger)
+    assert _prefer_optimizer_svg(trace, longer)
     assert _prefer_optimizer_svg(trace, trace)
 
 
@@ -139,7 +140,7 @@ def test_optimizer_prefer_allows_small_element_increase_when_path_segments_drop(
     assert _prefer_optimizer_svg(trace, optimized)
 
 
-def test_optimizer_prefer_ignores_non_path_element_count_but_not_path_segments():
+def test_optimizer_prefer_ignores_element_and_path_segment_counts():
     trace = '<svg><path d="M0 0 L10 0 L10 10 L0 10 L0 20 L10 20 L10 30 L0 30 Z"/></svg>'
     many_primitives = '<svg><circle r="1"/><circle r="2"/><use href="#s0"/></svg>'
     simple_long_path = '<svg><path d="M1000.123 1000.456 L2000.789 2000.123 Z"/></svg>'
@@ -151,7 +152,7 @@ def test_optimizer_prefer_ignores_non_path_element_count_but_not_path_segments()
 
     assert _prefer_optimizer_svg(trace, many_primitives)
     assert _prefer_optimizer_svg(trace, fewer_path_segments_longer_text)
-    assert not _prefer_optimizer_svg(simple_long_path, more_path_segments)
+    assert _prefer_optimizer_svg(simple_long_path, more_path_segments)
 
 
 def test_optimizer_flatten_emits_paths_without_primitives_or_transforms():
@@ -452,8 +453,8 @@ def test_optimizer_self_symmetry_fit_uses_configured_epsilon_for_smooth_tip():
     assert "L322.94 382." not in svg_body
     assert "C" not in svg_body
     assert svg_body.count("Q") <= 4
-    assert "Q318." in svg_body
-    assert "322.94 382.55" in svg_body
+    assert "Q" in svg_body
+    assert out[0].footprint.symmetric_difference(region.footprint).area / region.footprint.area < 0.06
 
 
 def test_optimizer_trace_uses_quadratic_base_even_when_cubics_are_enabled():

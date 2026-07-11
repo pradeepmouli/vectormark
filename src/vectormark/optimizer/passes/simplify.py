@@ -4,18 +4,20 @@ import math
 import re
 
 import numpy as np
-from shapely.geometry import MultiPolygon, Polygon
-from shapely.ops import unary_union
 
-from ...fit import Shape, _fmt, fit_path, minimum_line_length
+from ...skia_geometry import SkPath, unary_union
+from ...fit import Shape, SIMPLE_CURVE_RESIDUAL_TOL, _fmt, fit_path, minimum_line_length
 from ..framework import Proposal
 from ..vector_region import VectorRegion, _parse_subpaths, _ring_area, _sample_subpath
 
 _PATH_COMMAND = re.compile(r"[MLQCAZ]")
-_MAX_GEOMETRY_RESIDUAL = 0.02
+_MAX_GEOMETRY_RESIDUAL = SIMPLE_CURVE_RESIDUAL_TOL + 0.001
+_MAX_SMOOTH_CURVE_GEOMETRY_RESIDUAL = SIMPLE_CURVE_RESIDUAL_TOL + 0.004
 _MAX_SHORT_LINELET_GEOMETRY_RESIDUAL = 0.06
 _COMMAND_COST = {"M": 0, "Z": 0, "L": 1, "Q": 2, "C": 3, "A": 3}
 _FORCED_CURVE_JOIN_DEG = 35.0
+_MIN_SUBPATH_AREA = 1.0
+_MIN_SUBPATH_AREA_FRACTION = 1e-4
 
 
 def _command_count(d: str) -> int:
@@ -104,6 +106,22 @@ def _path_segments(tokens: list[tuple[str, list[float]]]) -> list[dict[str, obje
         )
         current = end
     return segments
+
+
+def _curve_join_angle_penalty_d(d: str) -> float:
+    penalty = 0.0
+    for tokens in _parse_subpaths(d):
+        segments = _path_segments(tokens)
+        for left, right in zip(segments, segments[1:], strict=False):
+            if not (
+                (left["command"] in {"Q", "C", "A"} and right["command"] in {"Q", "C", "A"})
+                or (left["command"] == "Q" and right["command"] == "L")
+            ):
+                continue
+            if not np.allclose(left["end"], right["start"]):
+                continue
+            penalty = max(penalty, _angle_between(left["end_tangent"], right["start_tangent"]))
+    return penalty
 
 
 def _sharp_curve_join_points(tokens: list[tuple[str, list[float]]]) -> list[tuple[float, float]]:
@@ -282,7 +300,7 @@ def _side_radius_estimates(points: np.ndarray, x0: float, y0: float, x1: float, 
     return estimates
 
 
-def _rounded_rect_radius(points: np.ndarray, poly: Polygon, epsilon: float) -> tuple[float, tuple[float, float, float, float]] | None:
+def _rounded_rect_radius(points: np.ndarray, poly: SkPath, epsilon: float) -> tuple[float, tuple[float, float, float, float]] | None:
     x0, y0, x1, y1 = (float(v) for v in poly.bounds)
     width = x1 - x0
     height = y1 - y0
@@ -316,14 +334,12 @@ def _rounded_rect_path(points: list[tuple[float, float]], *, epsilon: float) -> 
     contour = _closed_points(points)
     if contour is None:
         return None
-    ring = contour[:-1]
-    poly = Polygon(ring)
-    if not poly.is_valid:
-        poly = poly.buffer(0)
-    if not isinstance(poly, Polygon) or poly.is_empty:
+    poly = SkPath(shell=list(contour[:-1]))
+    poly = poly.buffer(0)
+    if poly.is_empty:
         return None
 
-    fit = _rounded_rect_radius(ring, poly, epsilon)
+    fit = _rounded_rect_radius(contour[:-1], poly, epsilon)
     if fit is None:
         return None
     radius, (x0, y0, x1, y1) = fit
@@ -347,7 +363,7 @@ def _candidate_shape(
     preserve_fill_rule: bool = True,
 ) -> Shape:
     params = {"d": " ".join(parts)}
-    if preserve_fill_rule and shape.params.get("fill_rule"):
+    if preserve_fill_rule and len(parts) > 1 and shape.params.get("fill_rule"):
         params["fill_rule"] = shape.params["fill_rule"]
     return Shape("path", params)
 
@@ -357,6 +373,16 @@ def _ordered_subpath_indices(subpaths) -> list[int]:
         return []
     outer_index = max(range(len(subpaths)), key=lambda i: subpaths[i][2])
     return [outer_index, *(i for i in range(len(subpaths)) if i != outer_index)]
+
+
+def _significant_subpaths(subpaths):
+    max_area = max((float(area) for _tokens, _points, area in subpaths), default=0.0)
+    area_floor = max(_MIN_SUBPATH_AREA, max_area * _MIN_SUBPATH_AREA_FRACTION)
+    return [
+        subpath
+        for subpath in subpaths
+        if float(subpath[2]) >= area_floor
+    ]
 
 
 def _simplified_subpath_d(
@@ -375,6 +401,7 @@ def _simplified_subpath_d(
 
     contour = _closed_points(points)
     if contour is not None:
+        forced_corners = _forced_corners(tokens)
         if _has_short_linelet(tokens, epsilon=epsilon):
             linelet_epsilon = max(epsilon, minimum_line_length(epsilon) * 0.375)
             candidates.append(
@@ -384,6 +411,7 @@ def _simplified_subpath_d(
                         epsilon=linelet_epsilon,
                         max_error=max_error,
                         cubic=False,
+                        prefer_simple_curves=True,
                     ).params["d"]
                 )
             )
@@ -395,6 +423,7 @@ def _simplified_subpath_d(
                             epsilon=linelet_epsilon,
                             max_error=max_error,
                             cubic=True,
+                            prefer_simple_curves=True,
                         ).params["d"]
                     )
                 )
@@ -405,10 +434,35 @@ def _simplified_subpath_d(
                     epsilon=epsilon,
                     max_error=max_error,
                     cubic=False,
-                    forced_corners=_forced_corners(tokens),
+                    forced_corners=forced_corners,
+                    prefer_simple_curves=True,
                 ).params["d"]
             )
         )
+        if forced_corners is not None and _line_command_count_d(original) == 0:
+            candidates.append(
+                str(
+                    fit_path(
+                        contour,
+                        epsilon=epsilon,
+                        max_error=max_error,
+                        cubic=False,
+                        prefer_simple_curves=True,
+                    ).params["d"]
+                )
+            )
+        if forced_corners is not None and _line_command_count_d(original) == 0 and cubic:
+            candidates.append(
+                str(
+                    fit_path(
+                        contour,
+                        epsilon=epsilon,
+                        max_error=max_error,
+                        cubic=True,
+                        prefer_simple_curves=True,
+                    ).params["d"]
+                )
+            )
         if cubic:
             candidates.append(
                 str(
@@ -417,7 +471,8 @@ def _simplified_subpath_d(
                         epsilon=epsilon,
                         max_error=max_error,
                         cubic=True,
-                        forced_corners=_forced_corners(tokens),
+                        forced_corners=forced_corners,
+                        prefer_simple_curves=True,
                     ).params["d"]
                 )
             )
@@ -425,8 +480,41 @@ def _simplified_subpath_d(
     def candidate_key(d: str) -> tuple[int, int, int]:
         return (_short_linelet_count_d(d, epsilon=epsilon), _path_command_cost_d(d), _path_segment_count_d(d))
 
-    best = min(candidates, key=candidate_key)
-    return best if candidate_key(best) < candidate_key(original) else original
+    if _short_linelet_count_d(original, epsilon=epsilon) == 0 and _line_command_count_d(original) == 0:
+        all_curve_candidates = [candidate for candidate in candidates if _line_command_count_d(candidate) == 0]
+        if all_curve_candidates:
+            improved_candidates = [
+                candidate
+                for candidate in all_curve_candidates
+                if candidate_key(candidate) < candidate_key(original)
+                or _is_smoother_curve_join_candidate(original, candidate)
+            ]
+            candidates = improved_candidates or all_curve_candidates
+            best = min(
+                candidates,
+                key=lambda d: (
+                    _short_linelet_count_d(d, epsilon=epsilon),
+                    _curve_join_angle_penalty_d(d),
+                    _path_command_cost_d(d),
+                    _path_segment_count_d(d),
+                ),
+            )
+            if candidate_key(best) < candidate_key(original) or _is_smoother_curve_join_candidate(original, best):
+                return best
+            return original
+
+    best = min(
+        candidates,
+        key=lambda d: (
+            _short_linelet_count_d(d, epsilon=epsilon),
+            _path_command_cost_d(d),
+            _curve_join_angle_penalty_d(d),
+            _path_segment_count_d(d),
+        ),
+    )
+    if candidate_key(best) < candidate_key(original) or _is_smoother_curve_join_candidate(original, best):
+        return best
+    return original
 
 
 def _candidate_parts(
@@ -437,6 +525,8 @@ def _candidate_parts(
     cubic: bool,
     preserve_subpaths: bool,
 ) -> list[str]:
+    if preserve_subpaths:
+        subpaths = _significant_subpaths(subpaths)
     indices = _ordered_subpath_indices(subpaths)
     if not preserve_subpaths:
         indices = indices[:1]
@@ -480,6 +570,14 @@ def _line_command_count_d(d: str) -> int:
     return sum(1 for command in _PATH_COMMAND.findall(d) if command == "L")
 
 
+def _is_smoother_curve_join_candidate(current_d: str, candidate_d: str) -> bool:
+    if _line_command_count_d(candidate_d) != _line_command_count_d(current_d):
+        return False
+    if _path_command_cost_d(candidate_d) > _path_command_cost_d(current_d):
+        return False
+    return _curve_join_angle_penalty_d(candidate_d) + 1e-6 < _curve_join_angle_penalty_d(current_d)
+
+
 def _geometry_residual(current: Shape, candidate: Shape) -> float:
     from ..vector_region import to_polygon
 
@@ -500,6 +598,7 @@ def _is_improvement(
     check_geometry: bool = True,
     epsilon: float = 1.0,
     linelet_only: bool = False,
+    allow_new_lines: bool = False,
 ) -> bool:
     candidate_segments = _path_segment_count(candidate)
     current_segments = _path_segment_count(current)
@@ -515,7 +614,10 @@ def _is_improvement(
         return False
     current_d = str(current.params.get("d", ""))
     candidate_d = str(candidate.params.get("d", ""))
+    smoother_curve_join = _is_smoother_curve_join_candidate(current_d, candidate_d)
     if (
+        not allow_new_lines
+        and
         current_short_linelets == 0
         and _line_command_count_d(current_d) == 0
         and _line_command_count_d(candidate_d) > 0
@@ -524,12 +626,19 @@ def _is_improvement(
     if not (
         candidate_short_linelets < current_short_linelets
         or candidate_cost < current_cost
+        or smoother_curve_join
     ):
         return False
     if check_geometry:
         residual_limit = _MAX_GEOMETRY_RESIDUAL
         if candidate_short_linelets < current_short_linelets:
             residual_limit = _MAX_SHORT_LINELET_GEOMETRY_RESIDUAL
+        if (
+            current_short_linelets == 0
+            and candidate_short_linelets == 0
+            and _line_command_count_d(candidate_d) == _line_command_count_d(current_d)
+        ):
+            residual_limit = max(residual_limit, _MAX_SMOOTH_CURVE_GEOMETRY_RESIDUAL)
         if _geometry_residual(current, candidate) > residual_limit:
             return False
     original_segments = _path_segment_count(original) if original is not None else None
@@ -537,6 +646,8 @@ def _is_improvement(
     if original_segments is None:
         return True
     if candidate_short_linelets < current_short_linelets:
+        return True
+    if smoother_curve_join:
         return True
     if original_cost is None:
         return True
@@ -554,6 +665,7 @@ def _simplified_path_shape(
     original: Shape | None = None,
     check_geometry: bool = True,
     linelet_only: bool = False,
+    allow_new_lines: bool = False,
 ) -> Shape | None:
     if shape.kind != "path":
         return None
@@ -582,13 +694,14 @@ def _simplified_path_shape(
         check_geometry=check_geometry,
         epsilon=epsilon,
         linelet_only=linelet_only,
+        allow_new_lines=allow_new_lines,
     ):
         return None
     return candidate
 
 
 def _simplifiable_polygon(flat: object) -> bool:
-    return isinstance(flat, Polygon) and not flat.is_empty
+    return isinstance(flat, SkPath) and not flat.is_empty
 
 
 def _covering_later_ids(
@@ -604,31 +717,34 @@ def _covering_later_ids(
     if len(subpaths) <= 1:
         return []
     outer_index = max(range(len(subpaths)), key=lambda index: subpaths[index][2])
-    dropped_polygons = []
+    dropped_polygons: list[SkPath] = []
     for index, (_tokens, points, _area) in enumerate(subpaths):
         if index == outer_index:
             continue
-        poly = Polygon(points)
-        if not poly.is_valid:
-            poly = poly.buffer(0)
-        if isinstance(poly, Polygon) and not poly.is_empty:
+        poly = SkPath(shell=list(points))
+        poly = poly.buffer(0)
+        if not poly.is_empty:
             dropped_polygons.append(poly)
     if not dropped_polygons:
         return []
     dropped = unary_union(dropped_polygons)
 
     cover_ids: list[int] = []
-    cover_geoms = []
+    cover_geoms: list[SkPath] = []
     for other in sorted(objects, key=lambda item: (float(item.z), int(item.id))):
         if other.id == obj.id or other.z <= obj.z:
             continue
         try:
-            overlap_area = float(other.footprint.intersection(dropped).area)
+            if isinstance(other.footprint, SkPath):
+                overlap_area = float(other.footprint.intersection(dropped).area)
+            else:
+                overlap_area = 0.0
         except Exception:
             overlap_area = 0.0
         if overlap_area > 1e-9:
             cover_ids.append(int(other.id))
-            cover_geoms.append(other.footprint)
+            if isinstance(other.footprint, SkPath):
+                cover_geoms.append(other.footprint)
 
     if not cover_geoms:
         return None
@@ -668,7 +784,7 @@ def simplify_pass(
             continue
         if int(obj.id) in referenced_source_ids:
             continue
-        if isinstance(obj.footprint, MultiPolygon) or not _simplifiable_polygon(obj.footprint):
+        if not _simplifiable_polygon(obj.footprint):
             continue
         if obj.current.kind == "path" and obj.current.params.get("fill_rule"):
             solid = _simplified_path_shape(

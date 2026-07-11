@@ -1,7 +1,6 @@
 import math
 
 import numpy as np
-from shapely.geometry import Polygon
 
 from vectormark.candidate import FlatFill
 from vectormark.fit import Shape, minimum_line_length
@@ -369,7 +368,11 @@ def test_simplify_pass_does_not_introduce_line_facets_into_all_curve_path():
 
     proposals = simplify_pass([obj], {obj.id: _mask_for_obj(obj, (140, 360))}, epsilon=1.0, max_error=1.0, cubic=True)
 
-    assert proposals == []
+    assert proposals
+    simplified = proposals[0].new_objects[0].current
+    simplified_d = simplified.params["d"]
+    assert "L" not in simplified_d
+    assert _command_count(simplified_d) <= _command_count(d)
 
 
 def test_simplify_pass_tries_quadratics_before_cubics():
@@ -430,8 +433,8 @@ def test_optimizer_passes_forward_cubic_path_option_to_simplify():
 def test_optimizer_runs_late_simplify_before_final_seams():
     pass_names = [getattr(pass_fn, "__name__", pass_fn.__class__.__name__) for pass_fn in _optimizer_passes(Options(optimizer=True))]
 
-    assert pass_names.count("simplify_pass") == 2
-    assert pass_names[-5:] == ["symmetry_pass", "seams_pass", "clones_pass", "simplify_pass", "seams_pass"]
+    assert pass_names.count("simplify_pass") == 3
+    assert pass_names[-6:] == ["symmetry_pass", "seams_pass", "simplify_pass", "clones_pass", "simplify_pass", "seams_pass"]
 
 
 def test_simplify_pass_rejects_paths_more_complex_than_original_trace():

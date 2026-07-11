@@ -112,6 +112,33 @@ def test_generate_corpus_html_reuses_optimizer_trace_cache(tmp_path, monkeypatch
     assert any((output / "cache").glob("trace-tiny_disk-*.pkl"))
 
 
+def test_generate_corpus_html_retraces_when_trace_options_change(tmp_path, monkeypatch):
+    trace_calls = 0
+
+    def _fake_trace_regions(arr, opt):
+        nonlocal trace_calls
+        trace_calls += 1
+        shape = Shape("circle", {"cx": 24.0, "cy": 24.0, "r": 12.0})
+        region = VectorRegion(
+            0,
+            shape,
+            FlatFill("#c81e1e"),
+            0,
+            footprint=to_polygon(shape),
+            raster=np.any(arr != 255, axis=2),
+        )
+        return [region], {0: region.raster}
+
+    monkeypatch.setattr(trace_module, "trace_regions", _fake_trace_regions)
+    output = tmp_path / "corpus"
+    entries = [CorpusEntry("tiny_disk", "optimizer", _tiny_disk, Options(optimizer=True))]
+
+    generate_corpus_html(output, entries)
+    generate_corpus_html(output, entries, epsilon=0.75)
+
+    assert trace_calls == 2
+
+
 def test_corpus_image_factory_composites_alpha_on_white(tmp_path):
     rgba = np.zeros((3, 3, 4), dtype=np.uint8)
     rgba[1, 1] = (200, 30, 30, 255)

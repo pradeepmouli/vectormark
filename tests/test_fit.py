@@ -124,6 +124,40 @@ def _cubic_controls(d: str):
     return controls
 
 
+def _quadratic_join_dots(d: str) -> list[float]:
+    dots = []
+    previous = None
+    current = start = None
+    for subpath in _parse_subpaths(d):
+        for command, values in subpath:
+            if command == "M":
+                current = np.array(values[:2], dtype=float)
+                start = current
+                previous = None
+            elif command == "Q" and current is not None:
+                ctrl = np.array(values[:2], dtype=float)
+                end = np.array(values[2:4], dtype=float)
+                if previous is not None and np.allclose(previous[2], current):
+                    incoming = current - previous[1]
+                    outgoing = ctrl - current
+                    incoming_norm = np.hypot(*incoming)
+                    outgoing_norm = np.hypot(*outgoing)
+                    if incoming_norm > 1e-9 and outgoing_norm > 1e-9:
+                        dots.append(float((incoming @ outgoing) / (incoming_norm * outgoing_norm)))
+                previous = (current, ctrl, end)
+                current = end
+            elif command == "L":
+                current = np.array(values[:2], dtype=float)
+                previous = None
+            elif command == "C":
+                current = np.array(values[4:6], dtype=float)
+                previous = None
+            elif command == "Z":
+                current = start
+                previous = None
+    return dots
+
+
 def test_fit_path_of_square_uses_only_lines():
     mask = np.zeros((30, 30), bool); mask[6:24, 6:24] = True
     c = outer_contour(mask)
@@ -222,6 +256,47 @@ def test_fit_path_does_not_introduce_medium_line_facets_on_smooth_leaf():
     contour = np.asarray(flatten_points(source, samples=12), dtype=float)
     contour = np.vstack([contour, contour[0]])
 
-    fitted = fit_path(contour, epsilon=1.0, max_error=1.0)
+    fitted = fit_path(contour, epsilon=1.0, max_error=1.0, prefer_simple_curves=True)
 
     assert fitted.params["d"].count("L") == 0
+
+
+def test_fit_path_smooths_quadratic_joins_on_smooth_leaf():
+    from vectormark.optimizer.vector_region import flatten_points
+
+    source = Shape(
+        "path",
+        {
+            "d": (
+                "M319 113.5 "
+                "Q310.09 112.49 302 109.5 "
+                "Q277.89 107.5 262.5 88 "
+                "Q259.31 81.29 257.5 74 "
+                "Q257.05 65.28 262.5 59 "
+                "Q270.27 53.67 281 55.5 "
+                "Q287.66 57.61 294 60.5 "
+                "Q316.77 76.92 320.5 104 "
+                "Q320.15 108.78 319 113.5 Z"
+            )
+        },
+    )
+    contour = np.asarray(flatten_points(source, samples=12), dtype=float)
+    contour = np.vstack([contour, contour[0]])
+
+    fitted = fit_path(contour, epsilon=1.0, max_error=1.0, prefer_simple_curves=True)
+
+    assert fitted.params["d"].count("L") == 0
+    assert _quadratic_join_dots(fitted.params["d"])
+    assert min(_quadratic_join_dots(fitted.params["d"])) > 0.99
+
+
+def test_quadratic_to_line_smoothing_only_adjusts_quadratic_control():
+    from vectormark.fit import _smooth_quadratic_path_d
+
+    d = "M0 0 Q10 10 20 0 L30 0 L40 0 Z"
+    smoothed = _smooth_quadratic_path_d(d)
+
+    assert smoothed.startswith("M0 0 Q5.86 0 20 0")
+    assert "L30 0" in smoothed
+    assert "L40 0" in smoothed
+    assert smoothed.endswith("Z")
