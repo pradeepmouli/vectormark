@@ -322,7 +322,9 @@ class TraceDrawingOptions(BaseModel):
 def _trace_result(image: ImageRef, options: TraceDrawingOptions):
     resolved = resolve_image(image.model_dump(exclude_none=True), local_trust=_LOCAL_TRUST)
     pre = options.preprocess
-    rgb, _meta = preprocess_image(resolved.bytes, crop_to_content=pre.crop_to_content,
+    # Raw region tracing needs a border/background plate; cropping it away makes a
+    # single-colour drawing indistinguishable from the background.
+    rgb, _meta = preprocess_image(resolved.bytes, crop_to_content=False,
         max_size_px=pre.max_size_px, preserve_transparency=pre.preserve_transparency, quantize=pre.quantize)
     trace = PythonTraceEngine().trace(rgb, TraceOptions(max_colors=options.max_colors,
         min_region_size=options.min_region_size, trace_level=options.trace_level,
@@ -348,7 +350,7 @@ def trace_drawing(image: ImageRef, options: TraceDrawingOptions | None = None, c
     preview = _render_preview_png(scene.svg, trace.width, trace.height, [])
     artifact_base = f"drawing://{drawing.id}/v0"
     result = {"drawing_id": drawing.id, "version": "v0", "trace": trace.to_public_dict(),
-        "artifacts": {"svg": artifact_base + ".svg", "preview": artifact_base + ".png", "labeled_svg": artifact_base + ".labels.svg"}, "report": scene.report}
+        "artifacts": {"svg": artifact_base + ".svg", "preview": artifact_base + ".png", "labeled_svg": artifact_base + ".labels.svg"}, "report": dict(scene.report)}
     content: list[TextContent | ImageContent] = [TextContent(type="text", text=json.dumps(result))]
     if preview is not None:
         content.append(ImageContent(type="image", data=base64.b64encode(preview).decode(), mimeType="image/png"))
@@ -370,7 +372,7 @@ def refine_drawing(plan: dict[str, object], ctx: Context | None = None) -> CallT
     preview = _render_preview_png(scene.svg, drawing.trace.width, drawing.trace.height, [])
     artifact_base = f"drawing://{parsed.drawing_id}/{child.id}"
     result = {"drawing_id": parsed.drawing_id, "version": child.id, "parent_version": parsed.base_version,
-        "artifacts": {"svg": artifact_base + ".svg", "preview": artifact_base + ".png", "labeled_svg": artifact_base + ".labels.svg"}, "report": scene.report}
+        "artifacts": {"svg": artifact_base + ".svg", "preview": artifact_base + ".png", "labeled_svg": artifact_base + ".labels.svg"}, "report": dict(scene.report)}
     content: list[TextContent | ImageContent] = [TextContent(type="text", text=json.dumps(result))]
     if preview is not None:
         content.append(ImageContent(type="image", data=base64.b64encode(preview).decode(), mimeType="image/png"))
