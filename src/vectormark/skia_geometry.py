@@ -340,9 +340,7 @@ def _linearize_skia_path(
             current.extend(_sample_cubic(p0, p1, p2, p3, curve_samples))
 
         elif v == _V_CLOSE:
-            # Closing line back to start_pt is implicit; dedup if repeated.
-            if start_pt is not None and current and current[-1] != start_pt:
-                current.append(start_pt)
+            # Closing line back to start_pt is implicit in every ring consumer.
             if current:
                 subpaths.append(current)
             current = []
@@ -691,9 +689,23 @@ class SkPath:
         assert self._subpaths is not None
         if not self._subpaths:
             return _Centroid(0.0, 0.0)
-        exterior = max(self._subpaths, key=_ring_area)
-        cx, cy = _ring_centroid(exterior)
-        return _Centroid(cx, cy)
+        weighted_x = weighted_y = signed_area = 0.0
+        for index, ring in enumerate(self._subpaths):
+            if not ring:
+                continue
+            depth = sum(
+                _point_in_ring(ring[0], other)
+                for other_index, other in enumerate(self._subpaths)
+                if other_index != index
+            )
+            weight = (-1.0 if depth % 2 else 1.0) * _ring_area(ring)
+            cx, cy = _ring_centroid(ring)
+            weighted_x += weight * cx
+            weighted_y += weight * cy
+            signed_area += weight
+        if abs(signed_area) < 1e-12:
+            return _Centroid(0.0, 0.0)
+        return _Centroid(weighted_x / signed_area, weighted_y / signed_area)
 
     @property
     def exterior(self) -> _Ring:

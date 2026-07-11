@@ -156,7 +156,7 @@ def _canonical_half(flat: SkPath, axis: Axis2D) -> SkPath | None:
     half = flat.intersection(_half_plane(flat, axis))
     if half.is_empty or not isinstance(half, SkPath):
         return None
-    return half if half.is_valid else half.buffer(0)
+    return half.buffer(0)
 
 
 def _ring_d(coords) -> str:
