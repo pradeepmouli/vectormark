@@ -41,7 +41,10 @@ def recognize_primitive(contour: np.ndarray, *, epsilon: float) -> Shape | None:
     if len(pts) < 8:
         return None
     poly = SkPath(shell=list(map(tuple, pts)))
-    if not poly.is_valid or poly.area < 1:
+    normalized = poly.buffer(0)
+    if normalized.is_empty or poly.area < 1:
+        return None
+    if abs(normalized.area - poly.area) / max(poly.area, 1.0) > 0.02:
         return None
 
     # circle
