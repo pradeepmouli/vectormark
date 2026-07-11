@@ -400,21 +400,6 @@ def get_drawing_artifact(drawing_id: str, version: str = "v0", artifact: str = "
     raise ToolError("[ARTIFACT_UNKNOWN] artifact must be svg, preview_png, or labeled_svg")
 
 
-@mcp.tool(
-    title="Idealize logo",
-    description=(
-        "Idealize a raster logo into clean editable SVG. Pass the image by reference: a "
-        "ChatGPT/host file (download_url+file_id), a local path, an https url, a data: URI, "
-        "or base64. The server resolves and preprocesses it; no client-side base64 needed."
-    ),
-    meta={
-        "openai/fileParams": ["image"],
-        "ui": {"resourceUri": WIDGET_URI},
-        "openai/outputTemplate": WIDGET_URI,
-        "openai/toolInvocation/invoking": "Idealizing logo...",
-        "openai/toolInvocation/invoked": "Idealized logo.",
-    },
-)
 def idealize_logo(image: ImageRef, options: IdealizeOptions | None = None) -> CallToolResult:
     """File-first logo idealization. Returns structured content plus a best-effort image block."""
     image_dict = image.model_dump(exclude_none=True)
@@ -437,20 +422,6 @@ def idealize_logo(image: ImageRef, options: IdealizeOptions | None = None) -> Ca
     return CallToolResult(content=content, structuredContent=result, isError=False)
 
 
-@mcp.tool(
-    title="Idealize logo from data",
-    description=(
-        "DEPRECATED fallback. Prefer `idealize_logo` with an image reference. Idealize a "
-        "base64-encoded raster (bare base64 or a data:image/...;base64,... URI) into SVG, "
-        "for hosts that cannot pass a file reference."
-    ),
-    meta={
-        "ui": {"resourceUri": WIDGET_URI},
-        "openai/outputTemplate": WIDGET_URI,
-        "openai/toolInvocation/invoking": "Idealizing image...",
-        "openai/toolInvocation/invoked": "Idealized image.",
-    },
-)
 def idealize_logo_data(
     image_base64: str,
     output_path: str | None = None,
@@ -475,8 +446,8 @@ def idealize_logo_data(
 
 
 @mcp.tool(
-    title="Render idealized logo",
-    description="Render an idealize_logo result in the ChatGPT/MCP Apps widget. Pass the whole result object.",
+    title="Render drawing",
+    description="Render a drawing SVG in the ChatGPT/MCP Apps widget.",
     meta={
         "ui": {"resourceUri": WIDGET_URI},
         "openai/outputTemplate": WIDGET_URI,
@@ -484,7 +455,7 @@ def idealize_logo_data(
         "openai/toolInvocation/invoked": "Rendered SVG preview.",
     },
 )
-def render_idealized_logo(result: dict | None = None, image_path: str = "", svg: str = "",
+def render_drawing(result: dict | None = None, image_path: str = "", svg: str = "",
                           width: int = 0, height: int = 0) -> dict[str, object]:
     """Render an existing idealized SVG result in the vectormark app. Accepts the full
     `idealize_logo` result (preferred) or the legacy flat fields."""
