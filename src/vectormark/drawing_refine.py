@@ -30,6 +30,15 @@ class DrawingScene:
     svg: str
     report: Mapping[str, object]
 
+    def __drawing_state_snapshot__(self) -> "DrawingScene":
+        """Return a detached immutable scene suitable for DrawingStore retention."""
+        targets = tuple(
+            RenderTarget(target.id, tuple(target.source_regions), Shape(target.shape.kind, dict(target.shape.params)),
+                _copy_fill(target.fill), target.z)
+            for target in self.targets
+        )
+        return DrawingScene(targets, str(self.svg), MappingProxyType(dict(self.report)))
+
 
 def _render(trace: TraceResult, targets: list[RenderTarget]) -> DrawingScene:
     ordered = sorted(targets, key=lambda target: target.z)
@@ -131,3 +140,10 @@ def _fill(spec: Mapping[str, object]) -> Fill:
     if kind == "linear_gradient": return LinearGradientFill(dict(spec["geometry"]), list(spec["stops"]))
     if kind == "radial_gradient": return RadialGradientFill(dict(spec["geometry"]), list(spec["stops"]))
     return RasterFill(dict(spec["geometry"]), spec["png_b64"])
+
+
+def _copy_fill(fill: Fill) -> Fill:
+    if isinstance(fill, FlatFill): return FlatFill(fill.hex)
+    if isinstance(fill, LinearGradientFill): return LinearGradientFill(dict(fill.geometry), list(fill.stops))
+    if isinstance(fill, RadialGradientFill): return RadialGradientFill(dict(fill.geometry), list(fill.stops))
+    return RasterFill(dict(fill.geometry), fill.png_b64)

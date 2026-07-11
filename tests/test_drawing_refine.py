@@ -2,6 +2,7 @@ import numpy as np
 
 from vectormark.drawing_plan import parse_plan
 from vectormark.drawing_refine import refine, root_scene
+from vectormark.drawing_state import DrawingStore
 from vectormark.drawing_trace import PythonTraceEngine, TraceOptions
 
 
@@ -43,3 +44,14 @@ def test_refine_uses_declared_z_order():
     scene = refine(trace, root_scene(trace), plan)
 
     assert scene.svg.index('id="r2"') < scene.svg.index('id="r1"')
+
+
+def test_refined_scene_can_be_retained_as_a_version_snapshot():
+    trace = PythonTraceEngine().trace(_disk(), TraceOptions())
+    scene = root_scene(trace)
+    store = DrawingStore()
+    session = object()
+    drawing = store.create(session, trace)
+    version = store.append(session, drawing.id, "v0", plan={}, scene=scene)
+
+    assert version.scene.svg == scene.svg

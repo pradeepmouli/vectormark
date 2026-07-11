@@ -346,8 +346,9 @@ def trace_drawing(image: ImageRef, options: TraceDrawingOptions | None = None, c
     drawing = _DRAWINGS.create(ctx.session, trace)
     scene = root_scene(trace)
     preview = _render_preview_png(scene.svg, trace.width, trace.height, [])
+    artifact_base = f"drawing://{drawing.id}/v0"
     result = {"drawing_id": drawing.id, "version": "v0", "trace": trace.to_public_dict(),
-        "artifacts": {"svg": scene.svg, "labeled_svg": trace.region_map_svg}, "report": scene.report}
+        "artifacts": {"svg": artifact_base + ".svg", "preview": artifact_base + ".png", "labeled_svg": artifact_base + ".labels.svg"}, "report": scene.report}
     content: list[TextContent | ImageContent] = [TextContent(type="text", text=json.dumps(result))]
     if preview is not None:
         content.append(ImageContent(type="image", data=base64.b64encode(preview).decode(), mimeType="image/png"))
@@ -367,12 +368,36 @@ def refine_drawing(plan: dict[str, object], ctx: Context | None = None) -> CallT
     except (PlanValidationError, DrawingNotFound) as err:
         raise ToolError(f"[{getattr(err, 'error_code', 'PLAN_INVALID')}] {err}") from err
     preview = _render_preview_png(scene.svg, drawing.trace.width, drawing.trace.height, [])
+    artifact_base = f"drawing://{parsed.drawing_id}/{child.id}"
     result = {"drawing_id": parsed.drawing_id, "version": child.id, "parent_version": parsed.base_version,
-        "artifacts": {"svg": scene.svg}, "report": scene.report}
+        "artifacts": {"svg": artifact_base + ".svg", "preview": artifact_base + ".png", "labeled_svg": artifact_base + ".labels.svg"}, "report": scene.report}
     content: list[TextContent | ImageContent] = [TextContent(type="text", text=json.dumps(result))]
     if preview is not None:
         content.append(ImageContent(type="image", data=base64.b64encode(preview).decode(), mimeType="image/png"))
     return CallToolResult(content=content, structuredContent=result, isError=False)
+
+
+@mcp.tool(title="Get drawing artifact", description="Fetch an SVG, clean PNG preview, or labeled trace SVG for a live drawing version.")
+def get_drawing_artifact(drawing_id: str, version: str = "v0", artifact: str = "svg", ctx: Context | None = None) -> CallToolResult:
+    if ctx is None:
+        raise ToolError("[DRAWING_CONTEXT_REQUIRED] artifact retrieval requires an MCP session context")
+    try:
+        drawing, stored = _DRAWINGS.get(ctx.session, drawing_id, version)
+    except DrawingNotFound as err:
+        raise ToolError("[DRAWING_NOT_FOUND] drawing or version is unavailable") from err
+    scene = stored.scene if stored.scene is not None else root_scene(drawing.trace)
+    if artifact == "labeled_svg":
+        payload = drawing.trace.region_map_svg
+        return CallToolResult(content=[TextContent(type="text", text=payload)], structuredContent={"mime_type": "image/svg+xml", "svg": payload})
+    if artifact == "svg":
+        return CallToolResult(content=[TextContent(type="text", text=scene.svg)], structuredContent={"mime_type": "image/svg+xml", "svg": scene.svg})
+    if artifact == "preview_png":
+        preview = _render_preview_png(scene.svg, drawing.trace.width, drawing.trace.height, [])
+        if preview is None:
+            raise ToolError("[PREVIEW_UNAVAILABLE] PNG preview renderer is unavailable")
+        content = ImageContent(type="image", data=base64.b64encode(preview).decode(), mimeType="image/png")
+        return CallToolResult(content=[content], structuredContent={"mime_type": "image/png"})
+    raise ToolError("[ARTIFACT_UNKNOWN] artifact must be svg, preview_png, or labeled_svg")
 
 
 @mcp.tool(

@@ -57,6 +57,9 @@ _IMMUTABLE_SCALAR_TYPES = (type(None), bool, int, float, complex, str, bytes)
 
 def _freeze(value: object, ancestors: set[int] | None = None) -> object:
     """Detach supported containers and reject values without a safe frozen form."""
+    snapshot = getattr(value, "__drawing_state_snapshot__", None)
+    if callable(snapshot):
+        return snapshot()
     if type(value) in _IMMUTABLE_SCALAR_TYPES:
         return value
 
