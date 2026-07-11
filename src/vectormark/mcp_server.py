@@ -208,6 +208,7 @@ def idealize_logo_image(
         max_colors=options.get("colors", DEFAULT_COLORS),
         flatten=options.get("flatten", False),
         no_symmetry=options.get("no_symmetry", False),
+        optimizer=options.get("optimizer", False),
     )
     try:
         svg = idealize(arr, options=opts)
@@ -303,6 +304,7 @@ class IdealizeOptions(BaseModel):
     colors: int = Field(DEFAULT_COLORS, description="Max palette colors. A CEILING, not a target — flats stay flat; raise it to let gradients keep their bands.")
     flatten: bool = Field(False, description="Emit plain paths instead of native SVG primitives and <use> mirror.")
     no_symmetry: bool = Field(False, description="Disable symmetry detection.")
+    optimizer: bool = Field(False, description="Run the existing geometry optimizer passes.")
     epsilon: float = Field(1.5, description="Primitive/polygon recognition tolerance in pixels.")
     max_error: float = Field(1.0, description="Bézier fit tolerance in pixels.")
     preprocess: PreprocessOpts = Field(default_factory=PreprocessOpts, description="Server-side preprocessing options.")
@@ -338,7 +340,7 @@ def trace_drawing(image: ImageRef, options: TraceDrawingOptions | None = None, c
     options = options or TraceDrawingOptions()
     if options.refine == "auto":
         return idealize_logo(image, IdealizeOptions(colors=options.max_colors, epsilon=options.simplify_tolerance,
-            max_error=options.curve_tolerance, preprocess=options.preprocess))
+            max_error=options.curve_tolerance, optimizer=True, preprocess=options.preprocess))
     if options.refine != "interactive" or ctx is None:
         raise ToolError("[DRAWING_CONTEXT_REQUIRED] interactive tracing requires an MCP session context")
     try:
