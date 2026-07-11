@@ -207,6 +207,8 @@ class VectorRegion:
     children: tuple["VectorRegion", ...]
     source_label: int | None = None
     color_hex: str | None = None
+    drawing_id: str | None = None
+    source_regions: tuple[str, ...] = ()
     coverage: np.ndarray | None = field(default=None, compare=False)
     diagnostics: Mapping[str, Any] = field(default_factory=dict, compare=False)
 
@@ -223,6 +225,8 @@ class VectorRegion:
         children: Sequence["VectorRegion"] = (),
         source_label: int | None = None,
         color_hex: str | None = None,
+        drawing_id: str | None = None,
+        source_regions: Sequence[str] = (),
         coverage: np.ndarray | None = None,
         diagnostics: Mapping[str, Any] | None = None,
     ) -> None:
@@ -251,6 +255,8 @@ class VectorRegion:
         object.__setattr__(self, "children", child_tuple)
         object.__setattr__(self, "source_label", source_label)
         object.__setattr__(self, "color_hex", color_hex)
+        object.__setattr__(self, "drawing_id", drawing_id)
+        object.__setattr__(self, "source_regions", tuple(str(region) for region in source_regions))
         object.__setattr__(self, "coverage", None if coverage is None else np.asarray(coverage).copy())
         object.__setattr__(self, "diagnostics", dict(diagnostics or {}))
 
@@ -266,6 +272,8 @@ class VectorRegion:
         footprint: SkPath | object | None = None,
         source_label: int | None = None,
         color_hex: str | None = None,
+        drawing_id: str | None = None,
+        source_regions: Sequence[str] = (),
         coverage: np.ndarray | None = None,
         diagnostics: Mapping[str, Any] | None = None,
     ) -> "VectorRegion":
@@ -279,6 +287,8 @@ class VectorRegion:
             original=shape,
             source_label=source_label,
             color_hex=color_hex,
+            drawing_id=drawing_id,
+            source_regions=source_regions,
             coverage=coverage,
             diagnostics=diagnostics,
         )
@@ -295,6 +305,8 @@ class VectorRegion:
         fill: Fill | None = None,
         source_label: int | None = None,
         color_hex: str | None = None,
+        drawing_id: str | None = None,
+        source_regions: Sequence[str] = (),
         diagnostics: Mapping[str, Any] | None = None,
     ) -> "VectorRegion":
         if not children:
@@ -309,6 +321,8 @@ class VectorRegion:
             children=children,
             source_label=source_label,
             color_hex=color_hex,
+            drawing_id=drawing_id,
+            source_regions=source_regions,
             diagnostics=diagnostics,
         )
 
@@ -353,6 +367,8 @@ class VectorRegion:
             original=self.original,
             source_label=self.source_label,
             color_hex=self.color_hex,
+            drawing_id=self.drawing_id,
+            source_regions=self.source_regions,
             coverage=self.coverage,
             diagnostics=merged_diagnostics,
         )
@@ -377,6 +393,8 @@ class VectorRegion:
                 original=self.original,
                 source_label=self.source_label,
                 color_hex=self.color_hex,
+                drawing_id=self.drawing_id,
+                source_regions=self.source_regions,
                 coverage=self.coverage,
                 diagnostics=merged_diagnostics,
             )
@@ -389,6 +407,8 @@ class VectorRegion:
             fill=self.fill,
             source_label=self.source_label,
             color_hex=self.color_hex,
+            drawing_id=self.drawing_id,
+            source_regions=self.source_regions,
             diagnostics=merged_diagnostics,
         )
 
@@ -410,6 +430,8 @@ class VectorRegion:
             fill=self.fill,
             source_label=self.source_label,
             color_hex=self.color_hex,
+            drawing_id=self.drawing_id,
+            source_regions=self.source_regions,
             diagnostics=merged_diagnostics,
         )
 

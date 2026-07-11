@@ -23,9 +23,10 @@ refine_drawing(plan)
 ## Product boundary
 
 Only `trace_drawing(refine="interactive")` is stateful and MCP-server-local. It retains the
-original resolved image bytes, processed RGB array, image metadata, segmented
-regions, masks, contour samples, trace paths, and command IDs in memory. It returns an
-opaque `drawing_id`; `refine_drawing` accepts no image and reads the ID from the
+immutable trace artifact plus the native `VectorRegion` roots for every retained
+version. A root carries its optimizer ID, current/original geometry, fill,
+z-order, raster evidence, stable `drawing_id`, and `source_regions` provenance.
+`refine_drawing` accepts no image and reads the opaque `drawing_id` from the
 plan. Auto calls do not allocate a drawing ID, retain state, or participate in
 versioning.
 
@@ -95,14 +96,17 @@ Input crop, resize, and alpha handling remain in the existing preprocess options
 There are no trace options for symmetry, primitive recognition, fill inference,
 surface merging, flattening, or shadow removal.
 
-The returned structured result contains:
+The returned structured result contains compact trace data plus artifact
+references; it does not embed large SVG strings in the trace response:
 
 ```json
 {
   "drawing_id": "drw_<opaque>",
   "version": "v0",
-  "canvas": { "width": 1024, "height": 1024, "view_box": [0, 0, 1024, 1024] },
-  "regions": [
+  "trace": {
+    "width": 1024,
+    "height": 1024,
+    "regions": [
     {
       "id": "r1",
       "color": "#0074F0",
@@ -117,8 +121,14 @@ The returned structured result contains:
         ]
       }
     }
-  ],
-  "region_map_svg": "<svg …/>"
+    ]
+  },
+  "artifacts": {
+    "svg": "drawing://drw_<opaque>/v0.svg",
+    "preview": "drawing://drw_<opaque>/v0.png",
+    "labeled_svg": "drawing://drw_<opaque>/v0.labels.svg"
+  },
+  "report": { "targets": [{ "id": "r1", "source_regions": ["r1"], "geometry": "path", "z": 0 }] }
 }
 ```
 
@@ -161,25 +171,32 @@ are branch paths: the first, second, and third refinements of `v0` are `v0.0`,
 next child segment atomically, so agents provide only `base_version` and cannot
 collide when submitting alternatives concurrently.
 
-Each version stores its parent version, the accepted plan, derived render
-targets, SVG, report, preview availability, and the optional plan `label`.
-Agents can branch from any retained version and present sibling alternatives to
-users without retracing the original raster.
+Each version stores its parent version, accepted plan, immutable tuple of native
+`VectorRegion` roots, and optional plan `label`. SVG, preview, labeled SVG, and
+the target report are rendered on demand from those roots. There is no parallel
+`DrawingScene` or `RenderTarget` tree. Agents can branch from any retained
+version and present sibling alternatives without retracing the original raster.
 
 ### Scene operations
 
 - `merge`: create a semantic target from regions and retain their combined
   source-region ancestry. Path-local `group` remains separate.
-- `split`: derive hyphenated child targets (`r1-1`, `r1-2`) when an explicit
-  split operation is requested.
+- `split`: invoke the existing compound-region splitter for the selected target.
+  Its returned branch children are addressed in the next plan using the existing
+  hyphenated convention (`r1-1`, `r1-2`).
 - `detect_primitives`, `detect_symmetry`, and `detect_clones`: run the named
   existing automatic inference pass globally, or with an optional `target`.
-- `set_symmetry`: apply an agent-supplied axis/mode rather than infer one.
+- `set_symmetry`: apply an agent-supplied mirror relationship between `source`
+  and `target` using an axis `{theta, cx, cy}` rather than infer one.
 - `clone`: apply an agent-supplied source/target/transform relationship.
 - `set_geometry`: assign a target to `circle`, `ellipse`, `rect`, `polygon`, or
   `path`.
 - `set_fill`: assign `flat`, `linear_gradient`, `radial_gradient`, or `raster`.
 - `set_z_order`: establish final paint order for all emitted targets.
+
+`split` and `detect_symmetry` are structural operations and must be the final
+operation in a plan. Inspect their returned report, then address the derived
+hyphenated children in a new versioned plan.
 
 Automatic one-shot refinement runs the existing optimizer pass sequence,
 including occlusion, compound splitting, symmetry, clones, simplification, and
@@ -204,16 +221,16 @@ not author final path coordinates.
 ## Execution model
 
 The trace module produces an internal `DrawingState` and a public,
-JSON-safe summary. The plan executor creates fresh render targets from this
-immutable state, fits requested geometry to its raw contour evidence, maps
-declared fills to the existing fill classes, and serializes through the existing
-SVG emitter. It does not mutate the stored trace. Each accepted plan creates an
-immutable version, so the agent may issue multiple branches for one drawing.
+JSON-safe summary. The plan executor transforms only cached `VectorRegion`
+roots, fits requested geometry to raw contour evidence, maps declared fills to
+the existing fill classes, and runs named `detect_*` operations through the
+existing optimizer passes. It does not mutate the stored trace. Each accepted
+plan creates an immutable version, so the agent may issue multiple branches for
+one drawing.
 
-The refinement result includes its new version ID, final SVG, preview
-availability, target-level geometry/fill summaries, and residual measurements
-against the stored raster masks. It also returns warnings for lossy fits without
-silently falling back to automatic idealization.
+The refinement result includes its new version ID, artifact references, and
+target-level geometry/fill/provenance summaries. Call
+`get_drawing_artifact` to retrieve the SVG, clean PNG preview, or labeled SVG.
 
 ### Trace-engine boundary and native follow-up
 

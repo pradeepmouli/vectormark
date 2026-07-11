@@ -59,9 +59,9 @@ class TraceResult:
     regions: tuple[TraceRegion, ...]
     region_map_svg: str
 
-    def to_public_dict(self) -> dict[str, object]:
+    def to_public_dict(self, *, include_region_map: bool = False) -> dict[str, object]:
         """Return the stable, JSON-ready portion of the trace artifact."""
-        return {
+        result: dict[str, object] = {
             "width": self.width,
             "height": self.height,
             "options": asdict(self.options),
@@ -86,8 +86,10 @@ class TraceResult:
                 }
                 for region in self.regions
             ],
-            "region_map_svg": self.region_map_svg,
         }
+        if include_region_map:
+            result["region_map_svg"] = self.region_map_svg
+        return result
 
 
 class TraceEngine(Protocol):

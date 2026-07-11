@@ -1,9 +1,9 @@
 import base64
-from types import SimpleNamespace
 
 import numpy as np
 import pytest
 
+from vectormark.candidate import FlatFill
 from vectormark.drawing_trace import (
     TraceCommand,
     TraceOptions,
@@ -11,6 +11,8 @@ from vectormark.drawing_trace import (
     TraceRegion,
     TraceResult,
 )
+from vectormark.fit import Shape
+from vectormark.optimizer.vector_region import VectorRegion
 
 
 def _trace() -> TraceResult:
@@ -58,13 +60,32 @@ def _two_region_trace() -> TraceResult:
     return TraceResult(1, 1, TraceOptions(), (r1, r2), "<svg/>")
 
 
-def _scene(*target_ids: str) -> object:
-    return SimpleNamespace(targets=tuple(SimpleNamespace(id=target_id) for target_id in target_ids))
+def _scene(*target_ids: str) -> tuple[VectorRegion, ...]:
+    return tuple(
+        VectorRegion.from_shape(
+            id=index + 1,
+            shape=Shape("path", {"d": "M0 0Z"}),
+            fill=FlatFill("#112233"),
+            z=index,
+            raster=np.ones((1, 1), dtype=bool),
+            drawing_id=target_id,
+            source_regions=(target_id,),
+        )
+        for index, target_id in enumerate(target_ids)
+    )
 
 
-def _grouped_scene(*source_regions: str) -> object:
-    return SimpleNamespace(
-        targets=(SimpleNamespace(id="g1", source_regions=source_regions),)
+def _grouped_scene(*source_regions: str) -> tuple[VectorRegion, ...]:
+    return (
+        VectorRegion.from_shape(
+            id=1,
+            shape=Shape("path", {"d": "M0 0Z"}),
+            fill=FlatFill("#112233"),
+            z=0,
+            raster=np.ones((1, 1), dtype=bool),
+            drawing_id="g1",
+            source_regions=source_regions,
+        ),
     )
 
 
@@ -99,6 +120,44 @@ def test_plan_accepts_path_group_fit_break_and_close():
     validate_plan(plan, _trace(), _scene("r1"))
 
 
+def test_plan_accepts_native_detection_and_explicit_relationship_operations():
+    from vectormark.drawing_plan import parse_plan, validate_plan
+
+    plan = parse_plan(
+        {
+            "version": "vectormark.plan.v1",
+            "drawing_id": "drw_x",
+            "base_version": "v0",
+            "ops": [
+                {"op": "detect_primitives", "target": "r1"},
+                {"op": "detect_clones", "target": "r2"},
+                {"op": "clone", "source": "r1", "target": "r2", "transform": [1, 0, 0, 1, 5, 0]},
+                {"op": "set_symmetry", "source": "r1", "target": "r2", "axis": {"theta": 0, "cx": 1, "cy": 1}},
+                {"op": "detect_symmetry"},
+            ],
+        }
+    )
+
+    validate_plan(plan, _two_region_trace(), _scene("r1", "r2"))
+
+
+@pytest.mark.parametrize("operation", ["split", "detect_symmetry"])
+def test_structural_operations_require_a_version_boundary(operation: str):
+    from vectormark.drawing_plan import PlanValidationError, parse_plan, validate_plan
+
+    plan = parse_plan(
+        {
+            "version": "vectormark.plan.v1",
+            "drawing_id": "drw_x",
+            "base_version": "v0",
+            "ops": [{"op": operation, "target": "r1"}, {"op": "set_fill", "target": "r1", "fill": {"type": "flat", "color": "#112233"}}],
+        }
+    )
+
+    with pytest.raises(PlanValidationError, match="final operation"):
+        validate_plan(plan, _trace(), _scene("r1"))
+
+
 def test_plan_reports_pointer_for_non_contiguous_path_commands():
     from vectormark.drawing_plan import PlanValidationError, parse_plan, validate_plan
 
@@ -126,7 +185,7 @@ def test_path_geometry_group_inherits_its_regions_command_provenance():
             "drawing_id": "drw_x",
             "base_version": "v0",
             "ops": [
-                {"op": "group", "id": "g1", "regions": ["r1", "r2"]},
+                {"op": "merge", "id": "g1", "regions": ["r1", "r2"]},
                 {
                     "op": "set_geometry",
                     "target": "g1",
@@ -240,8 +299,8 @@ def test_path_geometry_rejects_trace_command_reused_across_set_geometry_operatio
                 "drawing_id": "drw_x",
                 "base_version": "v0",
                 "ops": [
-                    {"op": "group", "id": "g1", "regions": ["r1"]},
-                    {"op": "group", "id": "g1", "regions": ["r1"]},
+                    {"op": "merge", "id": "g1", "regions": ["r1"]},
+                    {"op": "merge", "id": "g1", "regions": ["r1"]},
                 ],
             },
             "/ops/1/id",
@@ -326,7 +385,7 @@ def test_z_order_uses_the_final_target_created_by_grouping():
             "drawing_id": "drw_x",
             "base_version": "v0",
             "ops": [
-                {"op": "group", "id": "g1", "regions": ["r1"]},
+                {"op": "merge", "id": "g1", "regions": ["r1"]},
                 {"op": "set_z_order", "targets": ["g1"]},
             ],
         }

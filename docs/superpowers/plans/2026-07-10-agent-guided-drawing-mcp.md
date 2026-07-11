@@ -1,5 +1,12 @@
 # Agent-Guided Drawing MCP Implementation Plan
 
+> **Architecture amendment (implemented):** the earlier `DrawingScene` /
+> `RenderTarget` executor described below has been superseded. A drawing version
+> caches only `tuple[VectorRegion, ...]`; `drawing_id` and `source_regions` are
+> first-class `VectorRegion` fields, child handles are derived as `r1-<id>`, and
+> SVG/report/preview are on-demand projections. The task history remains below
+> for implementation provenance.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (- [ ]) syntax for tracking.
 
 **Goal:** Replace logo-specific MCP tools with trace_drawing, which either one-shot auto-idealizes or retains an interactive trace for immutable branching refinements.

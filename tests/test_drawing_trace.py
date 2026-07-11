@@ -63,6 +63,8 @@ def test_trace_result_public_dict_excludes_pixel_arrays():
     assert public["width"] == 80
     assert public["regions"][0]["trace_path"]["commands"][0]["id"] == "r1.p0.c0"
     assert "mask" not in public["regions"][0]
+    assert "region_map_svg" not in public
+    assert result.to_public_dict(include_region_map=True)["region_map_svg"] == result.region_map_svg
 
 
 def test_trace_result_region_arrays_are_read_only():
