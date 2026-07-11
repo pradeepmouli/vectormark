@@ -25,7 +25,13 @@ from .mcp_image import (
 )
 from .pipeline import Options, _flatten_on_white, idealize
 from .drawing_plan import PlanValidationError, parse_plan
-from .drawing_refine import refine, render_drawing as render_drawing_regions, root_regions
+from .drawing_refine import (
+    drawing_summary,
+    labeled_drawing_svg,
+    refine,
+    render_drawing as render_drawing_regions,
+    root_regions,
+)
 from .drawing_state import DrawingNotFound, DrawingStore
 from .drawing_trace import PythonTraceEngine, TraceOptions
 
@@ -314,6 +320,7 @@ class TraceDrawingOptions(BaseModel):
     refine: str = Field("interactive", description="interactive retains a live drawing; auto returns a one-shot idealization.")
     max_colors: int = 16
     min_region_size: int = 16
+    min_region_fraction: float = Field(0.02, ge=0, lt=1, description="Relative area floor for interactive root regions; raw trace remains available on demand.")
     trace_level: str = "pixel"
     simplify_tolerance: float = 1.5
     curve_tolerance: float = 1.0
@@ -332,7 +339,7 @@ def _trace_result(image: ImageRef, options: TraceDrawingOptions):
         min_region_size=options.min_region_size, trace_level=options.trace_level,
         simplify_tolerance=options.simplify_tolerance, curve_tolerance=options.curve_tolerance,
         curve_type=options.curve_type))
-    return trace
+    return trace, rgb
 
 
 @mcp.tool(
@@ -348,16 +355,16 @@ def trace_drawing(image: ImageRef, options: TraceDrawingOptions | None = None, c
     if options.refine != "interactive" or ctx is None:
         raise ToolError("[DRAWING_CONTEXT_REQUIRED] interactive tracing requires an MCP session context")
     try:
-        trace = _trace_result(image, options)
+        trace, rgb = _trace_result(image, options)
     except ImageError as err:
         raise ToolError(f"[{err.error_code}] {err.message}") from err
-    regions = root_regions(trace)
+    regions = root_regions(trace, rgb, min_region_fraction=options.min_region_fraction)
     drawing = _DRAWINGS.create(ctx.session, trace, regions=regions)
     rendered = render_drawing_regions(trace, regions)
     preview = _render_preview_png(rendered.svg, trace.width, trace.height, [])
     artifact_base = f"drawing://{drawing.id}/v0"
-    result = {"drawing_id": drawing.id, "version": "v0", "trace": trace.to_public_dict(),
-        "artifacts": {"svg": artifact_base + ".svg", "preview": artifact_base + ".png", "labeled_svg": artifact_base + ".labels.svg"}, "report": dict(rendered.report)}
+    result = {"drawing_id": drawing.id, "version": "v0", "trace": drawing_summary(trace, regions),
+        "artifacts": {"svg": artifact_base + ".svg", "preview": artifact_base + ".png", "labeled_svg": artifact_base + ".labels.svg", "raw_trace": artifact_base + ".trace.json"}, "report": dict(rendered.report)}
     content: list[TextContent | ImageContent] = [TextContent(type="text", text=json.dumps(result))]
     if preview is not None:
         content.append(ImageContent(type="image", data=base64.b64encode(preview).decode(), mimeType="image/png"))
@@ -381,7 +388,7 @@ def refine_drawing(plan: dict[str, object], ctx: Context | None = None) -> CallT
     preview = _render_preview_png(rendered.svg, drawing.trace.width, drawing.trace.height, [])
     artifact_base = f"drawing://{parsed.drawing_id}/{child.id}"
     result = {"drawing_id": parsed.drawing_id, "version": child.id, "parent_version": parsed.base_version,
-        "artifacts": {"svg": artifact_base + ".svg", "preview": artifact_base + ".png", "labeled_svg": artifact_base + ".labels.svg"}, "report": dict(rendered.report)}
+        "artifacts": {"svg": artifact_base + ".svg", "preview": artifact_base + ".png", "labeled_svg": artifact_base + ".labels.svg", "raw_trace": artifact_base + ".trace.json"}, "report": dict(rendered.report)}
     content: list[TextContent | ImageContent] = [TextContent(type="text", text=json.dumps(result))]
     if preview is not None:
         content.append(ImageContent(type="image", data=base64.b64encode(preview).decode(), mimeType="image/png"))
@@ -400,8 +407,14 @@ def get_drawing_artifact(drawing_id: str, version: str = "v0", artifact: str = "
     regions = stored.regions
     rendered = render_drawing_regions(drawing.trace, regions)
     if artifact == "labeled_svg":
-        payload = drawing.trace.region_map_svg
+        payload = labeled_drawing_svg(drawing.trace, regions)
         return CallToolResult(content=[TextContent(type="text", text=payload)], structuredContent={"mime_type": "image/svg+xml", "svg": payload})
+    if artifact == "raw_trace":
+        payload = drawing.trace.to_public_dict(include_region_map=True)
+        return CallToolResult(
+            content=[TextContent(type="text", text=json.dumps(payload))],
+            structuredContent={"mime_type": "application/json", "trace": payload},
+        )
     if artifact == "svg":
         return CallToolResult(content=[TextContent(type="text", text=rendered.svg)], structuredContent={"mime_type": "image/svg+xml", "svg": rendered.svg})
     if artifact == "preview_png":
@@ -410,7 +423,7 @@ def get_drawing_artifact(drawing_id: str, version: str = "v0", artifact: str = "
             raise ToolError("[PREVIEW_UNAVAILABLE] PNG preview renderer is unavailable")
         content = ImageContent(type="image", data=base64.b64encode(preview).decode(), mimeType="image/png")
         return CallToolResult(content=[content], structuredContent={"mime_type": "image/png"})
-    raise ToolError("[ARTIFACT_UNKNOWN] artifact must be svg, preview_png, or labeled_svg")
+    raise ToolError("[ARTIFACT_UNKNOWN] artifact must be svg, preview_png, labeled_svg, or raw_trace")
 
 
 def idealize_logo(image: ImageRef, options: IdealizeOptions | None = None) -> CallToolResult:

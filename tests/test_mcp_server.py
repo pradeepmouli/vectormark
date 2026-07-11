@@ -40,6 +40,10 @@ def test_interactive_trace_refine_and_artifact_share_one_live_region_forest():
     assert trace["version"] == "v0"
     assert trace["report"]["targets"]
     assert "region_map_svg" not in trace["trace"]
+    assert "geometry" in trace["trace"]["regions"][0]
+    raw_trace = get_drawing_artifact(drawing_id, "v0", "raw_trace", ctx).structuredContent
+    assert raw_trace is not None
+    assert "trace_path" in raw_trace["trace"]["regions"][0]
 
     refined = refine_drawing(
         {
@@ -56,6 +60,37 @@ def test_interactive_trace_refine_and_artifact_share_one_live_region_forest():
 
     artifact = get_drawing_artifact(drawing_id, "v0.0", "svg", ctx).structuredContent
     assert artifact is not None and '<circle id="r1"' in artifact["svg"]
+
+
+def test_mcp_detect_symmetry_exposes_an_axis_for_a_follow_up_set_symmetry_plan():
+    ctx = SimpleNamespace(session=object())
+    traced = trace_drawing(ImageRef(data_uri=_png_data_uri()), TraceDrawingOptions(), ctx).structuredContent
+    assert traced is not None
+    drawing_id = traced["drawing_id"]
+
+    detected = refine_drawing(
+        {
+            "version": "vectormark.plan.v1", "drawing_id": drawing_id, "base_version": "v0",
+            "ops": [{"op": "detect_symmetry", "target": "r1", "epsilon": 0.5}],
+        },
+        ctx,
+    ).structuredContent
+    assert detected is not None
+    children = [target for target in detected["report"]["targets"] if target["id"].startswith("r1-")]
+    source = next(target for target in children if target["diagnostics"].get("symmetry", {}).get("mode") == "self")
+    target = next(target for target in children if target["id"] != source["id"])
+
+    set_result = refine_drawing(
+        {
+            "version": "vectormark.plan.v1", "drawing_id": drawing_id, "base_version": detected["version"],
+            "ops": [{"op": "set_symmetry", "source": source["id"], "target": target["id"],
+                     "axis": source["diagnostics"]["symmetry"]["axis"]}],
+        },
+        ctx,
+    ).structuredContent
+    assert set_result is not None
+    updated = next(item for item in set_result["report"]["targets"] if item["id"] == target["id"])
+    assert updated["diagnostics"]["symmetry"]["mode"] == "pair"
 
 
 def test_trace_auto_returns_a_one_shot_svg_without_live_state():

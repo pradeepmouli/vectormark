@@ -1,9 +1,12 @@
 import math
+from pathlib import Path
 
 import numpy as np
+from PIL import Image
 
 from vectormark.drawing_plan import parse_plan
-from vectormark.drawing_refine import refine, render_drawing, root_regions
+from vectormark import drawing_refine
+from vectormark.drawing_refine import drawing_summary, refine, render_drawing, root_regions
 from vectormark.drawing_state import DrawingStore
 from vectormark.drawing_trace import PythonTraceEngine, TraceOptions
 from vectormark.candidate import FlatFill
@@ -25,6 +28,14 @@ def _two_regions() -> np.ndarray:
     return image
 
 
+def _gradient_bands() -> np.ndarray:
+    image = np.full((48, 96, 3), 255, dtype=np.uint8)
+    for x in range(16, 80):
+        t = (x - 16) / 63
+        image[12:36, x] = (int(20 + 60 * t), int(90 + 80 * t), int(220 + 25 * t))
+    return image
+
+
 def test_refine_forces_circle_and_flat_fill_without_mutating_trace():
     trace = PythonTraceEngine().trace(_disk(), TraceOptions())
     original = trace.regions[0].trace_path.d
@@ -39,6 +50,19 @@ def test_refine_forces_circle_and_flat_fill_without_mutating_trace():
     assert '<circle id="r1"' in rendered.svg
     assert 'fill="#FF6600"' in rendered.svg
     assert trace.regions[0].trace_path.d == original
+
+
+def test_root_regions_surface_merge_soft_gradient_bands_and_keep_raw_provenance():
+    image = _gradient_bands()
+    trace = PythonTraceEngine().trace(image, TraceOptions(max_colors=8))
+
+    regions = root_regions(trace, image)
+    summary = drawing_summary(trace, regions)
+
+    assert len(regions) < len(trace.regions)
+    assert any(len(region.source_regions) > 1 for region in regions)
+    assert len(summary["regions"]) == len(regions)
+    assert all("geometry" in region and "source_regions" in region for region in summary["regions"])
 
 
 def test_refine_uses_declared_z_order():
@@ -64,7 +88,7 @@ def test_merge_creates_one_native_target_with_combined_source_provenance():
     report = render_drawing(trace, regions).report
 
     assert len(regions) == 1
-    assert report["targets"] == ({"id": "g1", "source_regions": ("r1", "r2"), "geometry": "path", "fill": "FlatFill", "z": 0.0},)
+    assert report["targets"] == ({"id": "g1", "source_regions": ("r1", "r2"), "geometry": "path", "fill": "FlatFill", "z": 0.0, "diagnostics": {}},)
 
 
 def test_path_local_simplify_and_seams_run_after_the_requested_path_is_fitted():
@@ -90,6 +114,56 @@ def test_path_local_simplify_and_seams_run_after_the_requested_path_is_fitted():
     refined = refine(trace, root_regions(trace), plan)
 
     assert refined[0].current is not None and refined[0].current.kind == "path"
+
+
+def test_plan_tolerances_apply_defaults_then_an_operation_override(monkeypatch):
+    trace = PythonTraceEngine().trace(_disk(), TraceOptions())
+    commands = [command.id for command in trace.regions[0].trace_path.commands if command.command not in {"M", "Z"}]
+    observed: list[tuple[float, float]] = []
+    original_fit_path = drawing_refine.fit_path
+
+    def observe_fit_path(points, *, epsilon, max_error, cubic):
+        observed.append((epsilon, max_error))
+        return original_fit_path(points, epsilon=epsilon, max_error=max_error, cubic=cubic)
+
+    monkeypatch.setattr(drawing_refine, "fit_path", observe_fit_path)
+    plan = parse_plan({"version": "vectormark.plan.v1", "drawing_id": "drw_x", "base_version": "v0",
+        "defaults": {"epsilon": 0.25, "max_error": 0.75}, "ops": [
+            {"op": "set_geometry", "target": "r1", "epsilon": 0.5, "geometry": {"type": "path", "ops": [
+                {"op": "group", "id": "s1", "commands": commands},
+                {"op": "fit", "target": "s1", "type": "quadratic"},
+                {"op": "close"},
+            ]}},
+        ]})
+
+    refine(trace, root_regions(trace), plan)
+
+    assert observed == [(0.5, 0.75)]
+
+
+def test_daikonic_root_symmetry_can_be_detected_then_explicitly_set():
+    image = np.asarray(Image.open(Path("tests/fixtures/daikonic/source.png")).convert("RGB"))
+    trace = PythonTraceEngine().trace(image, TraceOptions())
+    roots = root_regions(trace, image)
+
+    detected = refine(trace, roots, parse_plan({
+        "version": "vectormark.plan.v1", "drawing_id": "drw_x", "base_version": "v0",
+        "ops": [{"op": "detect_symmetry", "target": "r1"}],
+    }))
+    symmetric_root = next(region for region in detected if region.drawing_id == "r1")
+    assert symmetric_root.is_branch and len(symmetric_root.children) == 2
+    axis = symmetric_root.diagnostics["symmetry"]["axis"]
+    source, target = (f"r1-{child.id}" for child in symmetric_root.children)
+
+    refined = refine(trace, detected, parse_plan({
+        "version": "vectormark.plan.v1", "drawing_id": "drw_x", "base_version": "v0.0",
+        "ops": [{"op": "set_symmetry", "source": source, "target": target, "axis": axis}],
+    }))
+    updated_root = next(region for region in refined if region.drawing_id == "r1")
+
+    assert updated_root.children[1].diagnostics["symmetry"]["mode"] == "pair"
+    reported_target = next(target for target in render_drawing(trace, detected).report["targets"] if target["id"] == source)
+    assert reported_target["diagnostics"]["symmetry"]["axis"] == axis
 
 
 def test_refined_regions_are_the_retained_version_state_and_svg_is_a_projection():

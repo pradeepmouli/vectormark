@@ -8,11 +8,13 @@ from __future__ import annotations
 
 import math
 from collections.abc import Callable, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 
 import numpy as np
 
 from .candidate import Fill, FlatFill, LinearGradientFill, RadialGradientFill, RasterFill
+from .components import decompose_components
+from .contour import region_contours
 from .drawing_plan import DrawingPlan, validate_plan
 from .drawing_trace import TraceResult
 from .emit import render_svg_doc, resolve_fill, resolve_use_shape, shape_to_svg
@@ -21,7 +23,10 @@ from .optimizer.vector_region import VectorRegion
 from .optimizer.framework import optimize
 from .optimizer.passes import clones_pass, primitives_pass, seams_pass, simplify_pass, split_compound_pass, symmetry_pass
 from .optimizer.shape_transform import bake_shape_transform
+from .pipeline import Options, _segment_image
 from .skia_geometry import SkPath, affinity
+from .surface_merge import merge_surfaces
+from .types import Region
 
 
 DrawingRegions = tuple[VectorRegion, ...]
@@ -42,8 +47,73 @@ class _Target:
     source_regions: frozenset[str]
 
 
-def root_regions(trace: TraceResult) -> DrawingRegions:
-    """Create the native region roots retained for an interactive trace."""
+def root_regions(
+    trace: TraceResult,
+    rgb: np.ndarray | None = None,
+    *,
+    min_region_fraction: float = 0.02,
+) -> DrawingRegions:
+    """Create retained roots, optionally reducing one-shot surfaces into roots.
+
+    The raw trace deliberately preserves every palette fragment so path-command
+    provenance is available on demand.  Its regions are therefore not the
+    agent-facing roots.  When pixels are available, create those roots from the
+    same segmentation and surface-merge contract as the one-shot pipeline.
+    """
+    if rgb is None:
+        return _raw_root_regions(trace)
+    if not 0.0 <= min_region_fraction < 1.0:
+        raise ValueError("min_region_fraction must be at least 0 and less than 1")
+    if rgb.shape[:2] != (trace.height, trace.width):
+        raise ValueError("surface merge RGB dimensions must match the trace canvas")
+
+    pipeline_options = Options(
+        epsilon=trace.options.simplify_tolerance,
+        max_error=trace.options.curve_tolerance,
+        cubic_paths=trace.options.curve_type == "cubic",
+        aa_contours=trace.options.trace_level == "subpixel",
+        max_colors=trace.options.max_colors,
+        min_region_fraction=min_region_fraction,
+    )
+    _, _, raw_regions = _segment_image(rgb, pipeline_options)
+    surfaces: list[tuple[Region, Fill]] = []
+    for component in decompose_components(raw_regions, (trace.height, trace.width)):
+        surfaces.extend(merge_surfaces([(region, FlatFill(region.color_hex)) for region in component], rgb))
+
+    roots: list[tuple[Region, Fill, tuple[str, ...]]] = []
+    for surface, fill in surfaces:
+        source_regions = tuple(
+            region.id for region in trace.regions if np.any(surface.mask & region.mask)
+        )
+        if not source_regions:
+            continue
+        roots.append((surface, fill, source_regions))
+
+    vector_regions: list[VectorRegion] = []
+    for index, (surface, fill, source_regions) in enumerate(
+        sorted(roots, key=lambda item: (-item[0].area, item[0].label, item[0].color_hex)), start=1
+    ):
+        shape = _surface_shape(surface, trace)
+        if shape is None:
+            continue
+        vector_regions.append(
+            VectorRegion.from_shape(
+                id=index,
+                shape=shape,
+                fill=fill,
+                z=index - 1,
+                raster=surface.mask,
+                source_label=surface.label,
+                color_hex=surface.color_hex,
+                drawing_id=f"r{index}",
+                source_regions=source_regions,
+                diagnostics={"surface_merge": {"sources": source_regions, "merged": len(source_regions) > 1}},
+            )
+        )
+    return tuple(vector_regions)
+
+
+def _raw_root_regions(trace: TraceResult) -> DrawingRegions:
     return tuple(
         VectorRegion.from_shape(
             id=index + 1,
@@ -58,6 +128,27 @@ def root_regions(trace: TraceResult) -> DrawingRegions:
         )
         for index, region in enumerate(trace.regions)
     )
+
+
+def _surface_shape(surface: Region, trace: TraceResult) -> Shape | None:
+    contours = [contour for contour in region_contours(surface.mask) if len(contour) >= 3]
+    if not contours:
+        return None
+    paths = [
+        str(
+            fit_path(
+                contour,
+                epsilon=trace.options.simplify_tolerance,
+                max_error=trace.options.curve_tolerance,
+                cubic=trace.options.curve_type == "cubic",
+            ).params["d"]
+        )
+        for contour in contours
+    ]
+    params: dict[str, object] = {"d": " ".join(paths)}
+    if len(paths) > 1:
+        params["fill_rule"] = "evenodd"
+    return Shape("path", params)
 
 
 def render_drawing(trace: TraceResult, regions: Sequence[VectorRegion]) -> RenderedDrawing:
@@ -82,12 +173,57 @@ def render_drawing(trace: TraceResult, regions: Sequence[VectorRegion]) -> Rende
                 "geometry": shape.kind,
                 "fill": type(fill).__name__,
                 "z": target.region.z,
+                "diagnostics": _public_diagnostics(target.region.diagnostics),
             }
         )
     return RenderedDrawing(
         render_svg_doc(trace.width, trace.height, body, defs),
         {"targets": tuple(report_targets)},
     )
+
+
+def drawing_summary(trace: TraceResult, regions: Sequence[VectorRegion]) -> dict[str, object]:
+    """Return the compact, merged-root view agents receive after interactive trace."""
+    targets = _targets(regions)
+    ordered = sorted(targets.values(), key=lambda target: (target.region.z, target.region.id))
+    summaries: list[dict[str, object]] = []
+    for target in ordered:
+        assert target.region.current is not None
+        shape = target.region.current
+        geometry: dict[str, object] = {"type": shape.kind}
+        if shape.kind == "path":
+            geometry["d"] = shape.params["d"]
+            if shape.params.get("fill_rule"):
+                geometry["fill_rule"] = shape.params["fill_rule"]
+        summaries.append(
+            {
+                "id": target.id,
+                "source_regions": tuple(sorted(target.source_regions)),
+                "geometry": geometry,
+                "fill": _public_fill(target.region.fill),
+            }
+        )
+    return {"width": trace.width, "height": trace.height, "options": asdict(trace.options), "regions": summaries}
+
+
+def labeled_drawing_svg(trace: TraceResult, regions: Sequence[VectorRegion]) -> str:
+    """Render a root-level label map, rather than exposing raw trace fragments."""
+    targets = _targets(regions)
+    ordered = sorted(targets.values(), key=lambda target: (target.region.z, target.region.id))
+    id_map = {target.region.id: target.id for target in ordered}
+    body: list[str] = []
+    for target in ordered:
+        assert target.region.current is not None
+        shape = resolve_use_shape(target.region.current, id_map)
+        body.append(f'<g opacity="0.45">{shape_to_svg(shape, "#4C9AFF", f"map-{target.id}")}</g>')
+        footprint = target.region.footprint
+        if isinstance(footprint, SkPath) and not footprint.is_empty:
+            min_x, min_y, max_x, max_y = footprint.bounds
+            body.append(
+                f'<text x="{_fmt((min_x + max_x) / 2)}" y="{_fmt((min_y + max_y) / 2)}" '
+                f'text-anchor="middle" dominant-baseline="middle">{target.id}</text>'
+            )
+    return render_svg_doc(trace.width, trace.height, body)
 
 
 def refine(trace: TraceResult, base: Sequence[VectorRegion], plan: DrawingPlan) -> DrawingRegions:
@@ -99,12 +235,13 @@ def refine(trace: TraceResult, base: Sequence[VectorRegion], plan: DrawingPlan) 
     for raw in plan.ops:
         op = raw
         name = op["op"]
+        epsilon, max_error = _tolerances(trace, plan, op)
         if name == "merge":
             regions = _group_regions(regions, op)
         elif name == "split":
-            regions = _run_detection(regions, trace, "split", op["target"])
+            regions = _run_detection(regions, trace, "split", op["target"], epsilon=epsilon, max_error=max_error)
         elif name in {"detect_primitives", "detect_symmetry", "detect_clones"}:
-            regions = _run_detection(regions, trace, name, op.get("target"))
+            regions = _run_detection(regions, trace, name, op.get("target"), epsilon=epsilon, max_error=max_error)
         elif name == "set_symmetry":
             regions = _set_symmetry(regions, op)
         elif name == "clone":
@@ -113,16 +250,16 @@ def refine(trace: TraceResult, base: Sequence[VectorRegion], plan: DrawingPlan) 
             target = _targets(regions)[op["target"]]
             geometry = op["geometry"]
             shape = (
-                _path_shape(trace, target, geometry)
+                _path_shape(trace, target, geometry, epsilon=epsilon, max_error=max_error)
                 if geometry["type"] == "path"
                 else _primitive_shape(trace, target, geometry["type"])
             )
             regions = _replace_leaf(regions, target.id, lambda region: region.with_current(shape))
             path_ops = geometry.get("ops", ()) if geometry["type"] == "path" else ()
             if any(path_op["op"] == "simplify" for path_op in path_ops):
-                regions = _run_detection(regions, trace, "simplify", target.id)
+                regions = _run_detection(regions, trace, "simplify", target.id, epsilon=epsilon, max_error=max_error)
             if any(path_op["op"] == "seams" for path_op in path_ops):
-                regions = _run_detection(regions, trace, "seams", target.id)
+                regions = _run_detection(regions, trace, "seams", target.id, epsilon=epsilon, max_error=max_error)
         elif name == "set_fill":
             target_id = op["target"]
             fill = _fill(op["fill"])
@@ -141,10 +278,11 @@ def _run_detection(
     trace: TraceResult,
     operation: str,
     target_id: object | None,
+    *,
+    epsilon: float,
+    max_error: float,
 ) -> DrawingRegions:
     """Run one existing optimizer pass over the cached region forest."""
-    epsilon = trace.options.simplify_tolerance
-    max_error = trace.options.curve_tolerance
     cubic = trace.options.curve_type == "cubic"
     if operation == "detect_primitives":
         def pass_fn(objects, masks):
@@ -391,7 +529,14 @@ def _command_start(trace: TraceResult, command_id: str) -> tuple[float, float]:
     raise KeyError(command_id)
 
 
-def _path_shape(trace: TraceResult, target: _Target, geometry: Mapping[str, object]) -> Shape:
+def _path_shape(
+    trace: TraceResult,
+    target: _Target,
+    geometry: Mapping[str, object],
+    *,
+    epsilon: float,
+    max_error: float,
+) -> Shape:
     command_map = {command.id: command for region in trace.regions for command in region.trace_path.commands}
     groups: dict[str, list[object]] = {}
     pieces: list[str] = []
@@ -410,13 +555,21 @@ def _path_shape(trace: TraceResult, target: _Target, geometry: Mapping[str, obje
                 body = " ".join(command.command + " ".join(_fmt(value) for value in command.values) for command in commands)
                 pieces.append(f"M{_fmt(start[0])} {_fmt(start[1])} {body}")
             else:
-                pieces.append(str(fit_path(points, epsilon=0.0, max_error=1.0, cubic=kind == "cubic").params["d"]))
+                pieces.append(str(fit_path(points, epsilon=epsilon, max_error=max_error, cubic=kind == "cubic").params["d"]))
         elif op["op"] == "close":
             close = True
     d = " ".join(pieces)
     if close and not d.endswith("Z"):
         d += " Z"
     return Shape("path", {"d": d})
+
+
+def _tolerances(trace: TraceResult, plan: DrawingPlan, op: Mapping[str, object]) -> tuple[float, float]:
+    """Resolve trace defaults, plan defaults, then an operation override."""
+    defaults = plan.defaults
+    epsilon = float(defaults.get("epsilon", trace.options.simplify_tolerance))
+    max_error = float(defaults.get("max_error", trace.options.curve_tolerance))
+    return float(op.get("epsilon", epsilon)), float(op.get("max_error", max_error))
 
 
 def _fill(spec: Mapping[str, object]) -> Fill:
@@ -428,3 +581,28 @@ def _fill(spec: Mapping[str, object]) -> Fill:
     if kind == "radial_gradient":
         return RadialGradientFill(dict(spec["geometry"]), list(spec["stops"]))
     return RasterFill(dict(spec["geometry"]), spec["png_b64"])
+
+
+def _public_fill(fill: Fill | None) -> dict[str, object]:
+    if isinstance(fill, FlatFill):
+        return {"type": "flat", "color": fill.hex}
+    if isinstance(fill, LinearGradientFill):
+        return {"type": "linear_gradient", "geometry": dict(fill.geometry), "stops": list(fill.stops)}
+    if isinstance(fill, RadialGradientFill):
+        return {"type": "radial_gradient", "geometry": dict(fill.geometry), "stops": list(fill.stops)}
+    if isinstance(fill, RasterFill):
+        return {"type": "raster", "geometry": dict(fill.geometry)}
+    return {"type": "none"}
+
+
+def _public_diagnostics(value: object) -> object:
+    """Make optimizer diagnostics safe to return in an MCP structured result."""
+    if isinstance(value, Mapping):
+        return {str(key): _public_diagnostics(item) for key, item in value.items()}
+    if isinstance(value, tuple | list):
+        return [_public_diagnostics(item) for item in value]
+    if isinstance(value, np.generic):
+        return value.item()
+    if value is None or type(value) in {bool, int, float, str}:
+        return value
+    return repr(value)

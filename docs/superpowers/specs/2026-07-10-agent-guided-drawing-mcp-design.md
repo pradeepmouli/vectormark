@@ -58,9 +58,12 @@ shape.
 ## Interactive trace contract
 
 Interactive `trace_drawing` uses the existing secure image resolver and preprocessor,
-then performs only deterministic palette segmentation, contour extraction, and
-path fitting. It does **not** run primitive recognition, symmetry detection,
-surface merging, fill inference, clone detection, or optimizer passes.
+then retains both deterministic raw paths and a compact agent-facing root
+forest. Raw paths are produced by palette segmentation, contour extraction, and
+path fitting; roots use the one-shot pipeline's size filtering and soft-surface
+merge so an agent does not need to reason about every palette fragment. It does
+**not** run primitive recognition, symmetry detection, clone detection, or
+optimizer passes.
 
 The public path is named `trace_path`, not `raw_path`. The stored contour samples
 are the raw pixel or coverage evidence; `trace_path` is a pre-simplified line and
@@ -74,6 +77,7 @@ reasoning.
 {
   "max_colors": 16,
   "min_region_size": 16,
+  "min_region_fraction": 0.02,
   "trace_level": "pixel",
   "simplify_tolerance": 1.5,
   "curve_tolerance": 1.0,
@@ -83,7 +87,10 @@ reasoning.
 
 - `max_colors` is the palette-quantization ceiling.
 - `min_region_size` is the minimum retained connected-component pixel count.
-  No relative-to-largest-region cutoff is applied in this workflow.
+- `min_region_fraction` is the relative-to-largest-region floor used when
+  constructing the agent-facing root regions. The complete raw trace remains
+  available on demand, but small fragments do not become editable roots by
+  default.
 - `trace_level` is `pixel` for binary quantized-mask contours or `subpixel` for
   anti-alias-aware coverage contours. The result reports each region's effective
   level because the coverage safety guard may fall back to `pixel`.
@@ -96,8 +103,10 @@ Input crop, resize, and alpha handling remain in the existing preprocess options
 There are no trace options for symmetry, primitive recognition, fill inference,
 surface merging, flattening, or shadow removal.
 
-The returned structured result contains compact trace data plus artifact
-references; it does not embed large SVG strings in the trace response:
+The returned structured result contains compact root data plus artifact
+references; it does not embed large SVG strings or raw command lists in the
+trace response. `raw_trace` is the on-demand artifact for the underlying raw
+paths and stable command IDs:
 
 ```json
 {
@@ -109,37 +118,29 @@ references; it does not embed large SVG strings in the trace response:
     "regions": [
     {
       "id": "r1",
-      "color": "#0074F0",
-      "area": 42120,
-      "bbox": [172, 240, 540, 670],
-      "trace_path": {
-        "d": "M…Z",
-        "fill_rule": "nonzero",
-        "commands": [
-          { "id": "r1.p0.c0", "command": "M", "values": [172, 240] },
-          { "id": "r1.p0.c1", "command": "Q", "values": [310, 242, 390, 260] }
-        ]
-      }
+      "source_regions": ["r1", "r7"],
+      "geometry": { "type": "path", "d": "M…Z" },
+      "fill": { "type": "linear_gradient" }
     }
     ]
   },
   "artifacts": {
     "svg": "drawing://drw_<opaque>/v0.svg",
     "preview": "drawing://drw_<opaque>/v0.png",
-    "labeled_svg": "drawing://drw_<opaque>/v0.labels.svg"
+    "labeled_svg": "drawing://drw_<opaque>/v0.labels.svg",
+    "raw_trace": "drawing://drw_<opaque>/v0.trace.json"
   },
   "report": { "targets": [{ "id": "r1", "source_regions": ["r1"], "geometry": "path", "z": 0 }] }
 }
 ```
 
-Region IDs are deterministic for one trace: sort retained regions by
-descending area, then bounding-box top, bounding-box left, color, and original
-segment label. Command IDs include a subpath index so holes and disconnected
-contours remain unambiguous.
+Root IDs are deterministic for one trace: the retained one-shot surfaces sort
+by descending area, segment label, and color. Raw command IDs include a
+subpath index so holes and disconnected contours remain unambiguous.
 
-The region-map SVG renders every raw region with a translucent fill and its
-region ID centered in the region bounding box. It is a diagnostic artifact for
-the agent, not final artwork.
+The default labeled SVG renders editable roots and their region IDs. The raw
+trace artifact contains the exhaustive raw-path region map for command-level
+planning when a root needs a custom path.
 
 ## Refinement-plan contract
 
@@ -151,6 +152,7 @@ the agent, not final artwork.
   "drawing_id": "drw_<opaque>",
   "base_version": "v0",
   "label": "optional user-facing description",
+  "defaults": { "epsilon": 1.5, "max_error": 1.0 },
   "ops": []
 }
 ```
@@ -161,6 +163,15 @@ command, and fill is known;
 operation IDs are unique; and path source commands form a directed contiguous
 run within one raw subpath. Validation errors are returned as `INVALID_PLAN`
 with a JSON pointer and actionable message.
+
+`defaults.epsilon` and `defaults.max_error` override the retained trace
+defaults for the plan. `set_geometry`, `detect_primitives`, and
+`detect_symmetry` may each supply either field directly; an operation value
+overrides the plan default. `epsilon` governs simplification/primitive fitting
+and `max_error` bounds Bézier fitting. Both must be finite and non-negative.
+Detection diagnostics are included with each returned target. In particular,
+`detect_symmetry` returns its accepted axis there, so the next versioned plan
+can use that axis directly in `set_symmetry`.
 
 ### Version tree
 

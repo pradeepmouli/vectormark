@@ -141,6 +141,34 @@ def test_plan_accepts_native_detection_and_explicit_relationship_operations():
     validate_plan(plan, _two_region_trace(), _scene("r1", "r2"))
 
 
+def test_plan_accepts_global_fitting_defaults_and_detect_override():
+    from vectormark.drawing_plan import parse_plan, validate_plan
+
+    plan = parse_plan(
+        {
+            "version": "vectormark.plan.v1",
+            "drawing_id": "drw_x",
+            "base_version": "v0",
+            "defaults": {"epsilon": 0.25, "max_error": 0.75},
+            "ops": [{"op": "detect_primitives", "target": "r1", "epsilon": 0.5}],
+        }
+    )
+
+    assert dict(plan.defaults) == {"epsilon": 0.25, "max_error": 0.75}
+    validate_plan(plan, _trace(), _scene("r1"))
+
+
+@pytest.mark.parametrize("defaults", [{"epsilon": -0.1}, {"max_error": float("inf")}, {"unknown": 1}])
+def test_plan_rejects_invalid_global_fitting_defaults(defaults):
+    from vectormark.drawing_plan import PlanValidationError, parse_plan
+
+    with pytest.raises(PlanValidationError, match="/defaults"):
+        parse_plan({
+            "version": "vectormark.plan.v1", "drawing_id": "drw_x", "base_version": "v0",
+            "defaults": defaults, "ops": [],
+        })
+
+
 @pytest.mark.parametrize("operation", ["split", "detect_symmetry"])
 def test_structural_operations_require_a_version_boundary(operation: str):
     from vectormark.drawing_plan import PlanValidationError, parse_plan, validate_plan

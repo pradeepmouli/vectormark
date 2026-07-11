@@ -16,7 +16,8 @@ from .optimizer.vector_region import VectorRegion
 
 
 _VERSION = "vectormark.plan.v1"
-_PLAN_KEYS = frozenset({"version", "drawing_id", "base_version", "label", "ops"})
+_PLAN_KEYS = frozenset({"version", "drawing_id", "base_version", "label", "defaults", "ops"})
+_TOLERANCE_KEYS = frozenset({"epsilon", "max_error"})
 _HEX_COLOR = re.compile(r"^#[0-9A-Fa-f]{6}$")
 _BASE_VERSION = re.compile(r"^v\d+(?:\.\d+)*$")
 _GEOMETRY_TYPES = frozenset({"circle", "ellipse", "rect", "polygon", "path"})
@@ -41,6 +42,7 @@ class DrawingPlan:
     drawing_id: str
     base_version: str
     label: str | None
+    defaults: Mapping[str, float]
     ops: tuple[object, ...]
 
 
@@ -66,6 +68,9 @@ def parse_plan(payload: Mapping[str, object]) -> DrawingPlan:
         raise PlanValidationError("/label", "must be a string or null")
     if isinstance(label, str) and len(label) > 200:
         raise PlanValidationError("/label", "must be at most 200 characters")
+    defaults_value = _mapping(payload.get("defaults", {}), "/defaults")
+    _reject_unknown_keys(defaults_value, set(_TOLERANCE_KEYS), "/defaults")
+    defaults = _tolerances(defaults_value, "/defaults")
     ops = payload.get("ops")
     if not isinstance(ops, list):
         raise PlanValidationError("/ops", "must be an array")
@@ -73,14 +78,13 @@ def parse_plan(payload: Mapping[str, object]) -> DrawingPlan:
     for index, op in enumerate(frozen_ops):
         if not isinstance(op, Mapping):
             raise PlanValidationError(f"/ops/{index}", "must be an object")
-    return DrawingPlan(_VERSION, drawing_id, base_version, label, frozen_ops)
+    return DrawingPlan(_VERSION, drawing_id, base_version, label, MappingProxyType(defaults), frozen_ops)
 
 
 def validate_plan(plan: DrawingPlan, trace: TraceResult, regions: Sequence[VectorRegion]) -> None:
     """Validate plan references and semantics against one trace and region roots."""
     source_regions = _region_target_source_regions(regions)
     target_ids = tuple(source_regions)
-    trace_region_ids = {region.id for region in trace.regions}
     commands = _trace_commands(trace)
     known_targets = set(target_ids)
     used_commands: set[str] = set()
@@ -99,7 +103,7 @@ def validate_plan(plan: DrawingPlan, trace: TraceResult, regions: Sequence[Vecto
                 raise PlanValidationError(f"{pointer}/id", "duplicate operation id")
             regions = _strings(op.get("regions"), f"{pointer}/regions", nonempty=True)
             for region_index, region_id in enumerate(regions):
-                if region_id not in trace_region_ids or region_id not in known_targets:
+                if region_id not in known_targets:
                     raise PlanValidationError(f"{pointer}/regions/{region_index}", "unknown region")
             if len(set(regions)) != len(regions):
                 repeated = _first_repeat(regions)
@@ -148,7 +152,8 @@ def _validate_geometry_op(
     commands: Mapping[str, tuple[str, int, int, TraceCommand]],
     used_commands: set[str],
 ) -> None:
-    _reject_unknown_keys(op, {"op", "target", "geometry"}, pointer)
+    _reject_unknown_keys(op, {"op", "target", "geometry"} | _TOLERANCE_KEYS, pointer)
+    _tolerances(op, pointer)
     target = _validate_target(op, pointer, targets)
     geometry = _mapping(op.get("geometry"), f"{pointer}/geometry")
     geometry_type = _required_str(geometry, "type", f"{pointer}/geometry")
@@ -173,7 +178,8 @@ def _validate_geometry_op(
 
 
 def _validate_detect_op(op: Mapping[object, object], pointer: str, targets: set[str]) -> None:
-    _reject_unknown_keys(op, {"op", "target"}, pointer)
+    _reject_unknown_keys(op, {"op", "target"} | _TOLERANCE_KEYS, pointer)
+    _tolerances(op, pointer)
     if "target" in op:
         _validate_target(op, pointer, targets)
 
@@ -447,6 +453,20 @@ def _color(value: object, pointer: str) -> None:
 
 def _finite_number(value: object) -> bool:
     return type(value) in (int, float) and math.isfinite(float(value))
+
+
+def _tolerances(value: object, pointer: str) -> dict[str, float]:
+    """Validate optional fitting tolerances at plan or operation scope."""
+    tolerances = _mapping(value, pointer)
+    result: dict[str, float] = {}
+    for key in _TOLERANCE_KEYS:
+        if key not in tolerances:
+            continue
+        raw = tolerances[key]
+        if not _finite_number(raw) or float(raw) < 0:
+            raise PlanValidationError(f"{pointer}/{key}", "must be a finite number greater than or equal to zero")
+        result[key] = float(raw)
+    return result
 
 
 def _first_repeat(items: Sequence[str]) -> int:
