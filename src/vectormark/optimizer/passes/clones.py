@@ -6,6 +6,7 @@ import numpy as np
 
 from ...skia_geometry import SkPath, affinity
 from ...candidate import FlatFill
+from ...fit import Shape
 from ..framework import Proposal
 from ..shape_transform import bake_shape_transform
 from ..vector_region import VectorRegion
@@ -14,6 +15,7 @@ _ANGLE_EPS = 1e-9
 _AREA_RATIO_TOL = 0.01
 _PERIMETER_RATIO_TOL = 0.01
 _GEOM_RESIDUAL_TOL = 0.01
+_REFLECTION_RESIDUAL_TOL = 0.02
 
 
 def _polygonal_flat(flat: object) -> SkPath | None:
@@ -104,7 +106,7 @@ def _best_transform(
     canonical_angles = _orientation_candidates(canonical)
     target_angles = _orientation_candidates(target)
 
-    candidates: list[tuple[float, tuple[float, float, float, float, float, float], SkPath]] = []
+    candidates: list[tuple[float, int, tuple[float, float, float, float, float, float], SkPath]] = []
     for canon_angle in canonical_angles:
         for target_angle in target_angles:
             theta = _normalize_angle(target_angle - canon_angle)
@@ -112,20 +114,41 @@ def _best_transform(
             transformed = _apply_svg_matrix(canonical, matrix)
             scale = max(float(target.area), float(transformed.area), 1.0)
             residual = float(transformed.symmetric_difference(target).area / scale)
-            candidates.append((residual, matrix, transformed))
+            candidates.append((residual, 0, matrix, transformed))
+
+    dx = target_centroid[0] - canonical_centroid[0]
+    dy = target_centroid[1] - canonical_centroid[1]
+    if abs(dx) > _ANGLE_EPS or abs(dy) > _ANGLE_EPS:
+        # Reflection across the line through the centroid midpoint whose tangent
+        # is perpendicular to the source->target direction maps one centroid to
+        # the other. This covers mirrored siblings such as the Daikonic leaves.
+        theta = math.atan2(dy, dx) + math.pi / 2.0
+        ux, uy = math.cos(theta), math.sin(theta)
+        a, b, c, d = 2 * ux * ux - 1, 2 * ux * uy, 2 * ux * uy, 2 * uy * uy - 1
+        mx = (canonical_centroid[0] + target_centroid[0]) / 2.0
+        my = (canonical_centroid[1] + target_centroid[1]) / 2.0
+        e = mx - (a * mx + c * my)
+        f = my - (b * mx + d * my)
+        matrix = tuple(0.0 if abs(value) < 1e-12 else float(value) for value in (a, b, c, d, e, f))
+        transformed = _apply_svg_matrix(canonical, matrix)
+        scale = max(float(target.area), float(transformed.area), 1.0)
+        candidates.append((float(transformed.symmetric_difference(target).area / scale), 1, matrix, transformed))
 
     if not candidates:
         return None
 
-    residual, matrix, transformed = min(
+    residual, _reflection_rank, matrix, transformed = min(
         candidates,
         key=lambda item: (
             round(item[0], 12),
-            abs(_normalize_angle(math.atan2(item[1][1], item[1][0]))),
-            tuple(round(v, 12) for v in item[1]),
+            item[1],
+            abs(_normalize_angle(math.atan2(item[2][1], item[2][0]))),
+            tuple(round(v, 12) for v in item[2]),
         ),
     )
-    if residual > _GEOM_RESIDUAL_TOL:
+    determinant = matrix[0] * matrix[3] - matrix[1] * matrix[2]
+    tolerance = _REFLECTION_RESIDUAL_TOL if determinant < 0.0 else _GEOM_RESIDUAL_TOL
+    if residual > tolerance:
         return None
     return matrix, transformed
 
@@ -133,7 +156,10 @@ def _best_transform(
 def clones_pass(
     objects: list[VectorRegion],
     masks: dict[int, np.ndarray],
+    *,
+    symbolic: bool = True,
 ) -> list[Proposal]:
+    """Find congruent regions; interactive callers may retain symbolic clones."""
     del masks
     usable: list[tuple[VectorRegion, SkPath, tuple[float, float, int], str]] = []
     for obj in sorted(objects, key=lambda current: int(current.id)):
@@ -169,7 +195,11 @@ def clones_pass(
                     (target_obj.id,),
                     [
                         target_obj.with_current(
-                            bake_shape_transform(canonical_obj.current, matrix),
+                            (
+                                Shape("use", {"href_obj_id": canonical_obj.id, "transform": matrix})
+                                if symbolic
+                                else bake_shape_transform(canonical_obj.current, matrix)
+                            ),
                             footprint=transformed,
                             diagnostics={
                                 "clones": {

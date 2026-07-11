@@ -187,27 +187,48 @@ Each version stores its parent version, accepted plan, immutable tuple of native
 the target report are rendered on demand from those roots. There is no parallel
 `DrawingScene` or `RenderTarget` tree. Agents can branch from any retained
 version and present sibling alternatives without retracing the original raster.
+Each operation is a pure transform that returns fresh affected `VectorRegion`
+objects; the complete plan is atomically committed as one child drawing version.
+No operation mutates the base version or creates a separately persisted partial
+version.
 
 ### Scene operations
 
-- `merge`: create a semantic target from regions and retain their combined
-  source-region ancestry. Path-local `group` remains separate.
+- `merge`: create a semantic target from regions, retain their combined
+  source-region ancestry, and serialize their `SkPath` boolean union as one
+  outline. This removes shared interior edges before SVG emission so adjacent
+  same-fill regions cannot produce anti-aliased hairlines. Path-local `group`
+  remains separate.
 - `split`: invoke the existing compound-region splitter for the selected target.
   Its returned branch children are addressed in the next plan using the existing
   hyphenated convention (`r1-1`, `r1-2`).
 - `detect_primitives`, `detect_symmetry`, and `detect_clones`: run the named
-  existing automatic inference pass globally, or with an optional `target`.
+  existing automatic inference pass globally when `target` is omitted, or only
+  for an explicitly supplied target. A targeted symmetry operation also permits
+  a mirror-pair match involving that target. Clone detection includes
+  translation, rotation, and reflected affine clones; accepted clones emit SVG
+  `<use>` rather than a baked duplicate path.
 - `set_symmetry`: apply an agent-supplied mirror relationship between `source`
   and `target` using an axis `{theta, cx, cy}` rather than infer one.
 - `clone`: apply an agent-supplied source/target/transform relationship.
-- `set_geometry`: assign a target to `circle`, `ellipse`, `rect`, `polygon`, or
-  `path`.
+- `set_geometry`: assign a target to `circle`, `ellipse`, `rect`,
+  `rounded_rect`, `polygon`, `trapezoid`, `rounded_trapezoid`, `cap`, or `path`.
 - `set_fill`: assign `flat`, `linear_gradient`, `radial_gradient`, or `raster`.
 - `set_z_order`: establish final paint order for all emitted targets.
 
-`split` and `detect_symmetry` are structural operations and must be the final
-operation in a plan. Inspect their returned report, then address the derived
-hyphenated children in a new versioned plan.
+`split` is structural and must be the final operation in a plan.
+`detect_symmetry` is structural only when it needs to split a freeform
+self-symmetric path. A global symmetry detection must be final; a terminal
+block may contain several targeted `detect_symmetry` operations for distinct
+regions. Inspect the returned report, then address any derived hyphenated
+children in a new versioned plan. Explicitly selected intrinsically symmetric
+geometry, such as a cap or rounded trapezoid, is retained as one region and
+reported as `mode: "intrinsic"` rather than being split into a redundant pair.
+Clone `<use>` relationships remain symbolic through interactive and one-shot
+output unless explicit SVG flattening is requested. A self-symmetry mirror
+`<use>` is the exception: it is baked to a concrete path immediately before
+`simplify` or `seams`, so polish passes see both sides of a shared seam and
+cannot leave an anti-aliased hairline.
 
 Automatic one-shot refinement runs the existing optimizer pass sequence,
 including occlusion, compound splitting, symmetry, clones, simplification, and

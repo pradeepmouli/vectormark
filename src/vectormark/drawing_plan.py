@@ -20,7 +20,9 @@ _PLAN_KEYS = frozenset({"version", "drawing_id", "base_version", "label", "defau
 _TOLERANCE_KEYS = frozenset({"epsilon", "max_error"})
 _HEX_COLOR = re.compile(r"^#[0-9A-Fa-f]{6}$")
 _BASE_VERSION = re.compile(r"^v\d+(?:\.\d+)*$")
-_GEOMETRY_TYPES = frozenset({"circle", "ellipse", "rect", "polygon", "path"})
+_GEOMETRY_TYPES = frozenset(
+    {"circle", "ellipse", "rect", "rounded_rect", "polygon", "trapezoid", "rounded_trapezoid", "cap", "path"}
+)
 _FILL_TYPES = frozenset({"flat", "linear_gradient", "radial_gradient", "raster"})
 _FIT_TYPES = frozenset({"line", "quadratic", "cubic", "keep"})
 _DETECT_OPS = frozenset({"detect_primitives", "detect_symmetry", "detect_clones"})
@@ -91,11 +93,15 @@ def validate_plan(plan: DrawingPlan, trace: TraceResult, regions: Sequence[Vecto
     used_target_ids = set(target_ids)
     z_order_seen = False
     z_order: tuple[Mapping[object, object], str] | None = None
+    symmetry_targets: set[str] = set()
+    symmetry_block = False
 
     for index, raw_op in enumerate(plan.ops):
         pointer = f"/ops/{index}"
         op = _mapping(raw_op, pointer)
         name = _required_str(op, "op", pointer)
+        if symmetry_block and name != "detect_symmetry":
+            raise PlanValidationError(pointer, "detect_symmetry must be the final operation or part of a terminal targeted-symmetry block")
         if name == "merge":
             _reject_unknown_keys(op, {"op", "id", "regions"}, pointer)
             group_id = _required_str(op, "id", pointer)
@@ -122,8 +128,19 @@ def validate_plan(plan: DrawingPlan, trace: TraceResult, regions: Sequence[Vecto
                 raise PlanValidationError(pointer, "split must be the final operation; refine child regions in a new version")
         elif name in _DETECT_OPS:
             _validate_detect_op(op, pointer, known_targets)
-            if name == "detect_symmetry" and index != len(plan.ops) - 1:
-                raise PlanValidationError(pointer, "detect_symmetry must be the final operation; refine derived child regions in a new version")
+            if name == "detect_symmetry":
+                target = op.get("target")
+                if target is None:
+                    if index != len(plan.ops) - 1:
+                        raise PlanValidationError(pointer, "global detect_symmetry must be the final operation; refine derived child regions in a new version")
+                    if symmetry_block:
+                        raise PlanValidationError(pointer, "global detect_symmetry cannot follow targeted symmetry operations")
+                else:
+                    assert type(target) is str
+                    if target in symmetry_targets:
+                        raise PlanValidationError(f"{pointer}/target", "target already has a symmetry operation in this plan")
+                    symmetry_targets.add(target)
+                    symmetry_block = True
         elif name == "set_symmetry":
             _validate_set_symmetry_op(op, pointer, known_targets)
         elif name == "clone":

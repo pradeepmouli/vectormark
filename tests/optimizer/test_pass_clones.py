@@ -73,8 +73,8 @@ def test_clones_pass_copies_translated_square_geometry_with_same_flat_fill():
 
     assert [obj.id for obj in out] == [1, 2]
     assert out[0].current.kind == "path"
-    assert out[1].current.kind == "path"
-    assert out[1].current.params["d"] == "M 46 34 L 58 34 L 58 46 L 46 46 Z"
+    assert out[1].current.kind == "use"
+    assert out[1].current.params["href_obj_id"] == 1
     assert out[1].diagnostics["clones"]["matched_source"] == 1
 
 
@@ -88,7 +88,7 @@ def test_clones_pass_matches_rotated_congruent_square():
 
     assert [obj.id for obj in out] == [1, 2]
     clone_obj = out[1]
-    assert clone_obj.current.kind == "path"
+    assert clone_obj.current.kind == "use"
     assert clone_obj.diagnostics["clones"]["matched_source"] == 1
 
 
@@ -112,7 +112,7 @@ def test_clones_pass_reuses_geometry_for_recolored_clone_proposals():
     masks = {obj.id: _mask_for_polygon(obj.footprint) for obj in objects}
 
     out = optimize(objects, masks, [clones_pass])
-    assert [obj.current.kind for obj in out] == ["path", "path"]
+    assert [obj.current.kind for obj in out] == ["path", "use"]
     assert out[1].fill == FlatFill("#abcdef")
     assert out[1].diagnostics["clones"]["matched_source"] == 1
 
@@ -206,5 +206,5 @@ def test_optimizer_object_svg_resolves_clone_href_to_emitted_id():
     body = optimizer_objects_to_svg(out)
 
     assert body[0].startswith('<path id="s0"')
-    assert body[1].startswith('<path id="s1"')
-    assert 'href="#s0"' not in body[1]
+    assert body[1].startswith('<use id="s1"')
+    assert 'href="#s0"' in body[1]

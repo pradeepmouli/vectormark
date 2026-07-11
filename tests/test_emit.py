@@ -23,6 +23,14 @@ def test_rect_shape_emits_native_rect():
     assert out.startswith("<rect") and 'width="20"' in out and 'fill="#3DA89D"' in out
 
 
+def test_rounded_rect_preserves_corner_radii_in_svg_and_path_conversion():
+    shape = Shape("rect", {"x": 5, "y": 6, "w": 20, "h": 10, "rx": 3, "ry": 2})
+
+    assert 'rx="3"' in shape_to_svg(shape, "#3DA89D", "r1")
+    assert 'ry="2"' in shape_to_svg(shape, "#3DA89D", "r1")
+    assert "Q" in shape_to_path_d(shape)
+
+
 def test_circle_and_ellipse_and_polygon():
     assert "<circle" in shape_to_svg(Shape("circle", {"cx": 5, "cy": 5, "r": 4}), "#000", "c")
     assert "<ellipse" in shape_to_svg(Shape("ellipse", {"cx": 5, "cy": 5, "rx": 4, "ry": 3}), "#000", "e")

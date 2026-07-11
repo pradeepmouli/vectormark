@@ -14,19 +14,20 @@ import numpy as np
 
 from .candidate import Fill, FlatFill, LinearGradientFill, RadialGradientFill, RasterFill
 from .components import decompose_components
-from .contour import region_contours
-from .drawing_plan import DrawingPlan, validate_plan
+from .contour import outer_contour, region_contours, region_corner_radius
+from .drawing_plan import DrawingPlan, PlanValidationError, validate_plan
 from .drawing_trace import TraceResult
 from .emit import render_svg_doc, resolve_fill, resolve_use_shape, shape_to_svg
-from .fit import Shape, _fmt, fit_path
-from .optimizer.vector_region import VectorRegion
+from .fit import Shape, _fmt, fit_path, recognize_polygon
+from .optimizer.vector_region import VectorRegion, to_polygon
 from .optimizer.framework import optimize
 from .optimizer.passes import clones_pass, primitives_pass, seams_pass, simplify_pass, split_compound_pass, symmetry_pass
 from .optimizer.shape_transform import bake_shape_transform
 from .pipeline import Options, _segment_image
-from .skia_geometry import SkPath, affinity
+from .skia_geometry import SkPath, affinity, unary_union
 from .surface_merge import merge_surfaces
 from .types import Region
+from .refine import half_ellipse_cap_fit, rounded_trapezoid_fit
 
 
 DrawingRegions = tuple[VectorRegion, ...]
@@ -232,7 +233,7 @@ def refine(trace: TraceResult, base: Sequence[VectorRegion], plan: DrawingPlan) 
     validate_plan(plan, trace, regions)
     z_order: tuple[str, ...] | None = None
 
-    for raw in plan.ops:
+    for index, raw in enumerate(plan.ops):
         op = raw
         name = op["op"]
         epsilon, max_error = _tolerances(trace, plan, op)
@@ -249,12 +250,23 @@ def refine(trace: TraceResult, base: Sequence[VectorRegion], plan: DrawingPlan) 
         elif name == "set_geometry":
             target = _targets(regions)[op["target"]]
             geometry = op["geometry"]
-            shape = (
-                _path_shape(trace, target, geometry, epsilon=epsilon, max_error=max_error)
-                if geometry["type"] == "path"
-                else _primitive_shape(trace, target, geometry["type"])
+            try:
+                shape = (
+                    _path_shape(trace, target, geometry, epsilon=epsilon, max_error=max_error)
+                    if geometry["type"] == "path"
+                    else _primitive_shape(target, geometry["type"], epsilon=epsilon, max_error=max_error)
+                )
+            except ValueError as error:
+                raise PlanValidationError(f"/ops/{index}/geometry/type", str(error)) from error
+            regions = _replace_leaf(
+                regions,
+                target.id,
+                lambda region: region.with_current(
+                    shape,
+                    footprint=to_polygon(shape),
+                    diagnostics={"geometry": {"explicit": geometry["type"]}},
+                ),
             )
-            regions = _replace_leaf(regions, target.id, lambda region: region.with_current(shape))
             path_ops = geometry.get("ops", ()) if geometry["type"] == "path" else ()
             if any(path_op["op"] == "simplify" for path_op in path_ops):
                 regions = _run_detection(regions, trace, "simplify", target.id, epsilon=epsilon, max_error=max_error)
@@ -283,6 +295,8 @@ def _run_detection(
     max_error: float,
 ) -> DrawingRegions:
     """Run one existing optimizer pass over the cached region forest."""
+    if operation in {"simplify", "seams"}:
+        regions = _bake_self_symmetry_uses_for_polish(regions)
     cubic = trace.options.curve_type == "cubic"
     if operation == "detect_primitives":
         def pass_fn(objects, masks):
@@ -291,7 +305,8 @@ def _run_detection(
         def pass_fn(objects, masks):
             return symmetry_pass(objects, masks, epsilon=epsilon, max_error=max_error, cubic=cubic)
     elif operation == "detect_clones":
-        pass_fn = clones_pass
+        def pass_fn(objects, masks):
+            return clones_pass(objects, masks, symbolic=True)
     elif operation == "split":
         pass_fn = split_compound_pass
     elif operation == "simplify":
@@ -310,12 +325,59 @@ def _run_detection(
         original_pass = pass_fn
 
         def pass_fn(objects, masks):  # type: ignore[no-redef]
-            return [proposal for proposal in original_pass(objects, masks) if selected_region_id in proposal.obj_ids]
+            proposals = original_pass(objects, masks)
+            if operation != "detect_clones":
+                return [proposal for proposal in proposals if selected_region_id in proposal.obj_ids]
+            return [
+                proposal
+                for proposal in proposals
+                if selected_region_id in proposal.obj_ids
+                or any(
+                    replacement.diagnostics.get("clones", {}).get("matched_source") == selected_region_id
+                    for replacement in proposal.new_objects
+                )
+            ]
 
     before = {region.id: region for region in regions}
     masks = {region.id: np.asarray(region.raster, dtype=bool) for region in regions}
     optimized = optimize(list(regions), masks, [pass_fn])
     return tuple(_restore_root_metadata(region, before.get(region.id)) for region in optimized)
+
+
+def _bake_self_symmetry_uses_for_polish(regions: Sequence[VectorRegion]) -> DrawingRegions:
+    """Bake only self-symmetry mirrors before geometry polishing.
+
+    Clones stay as SVG ``<use>`` relations.  A self-symmetry mirror, however,
+    shares a seam with its source half; seam/simplify passes must see both
+    concrete paths to avoid preserving or exposing a renderer hairline.
+    """
+    def bake_root(root: VectorRegion) -> VectorRegion:
+        leaves = {leaf.id: leaf for leaf in root.leaves()}
+
+        def visit(region: VectorRegion) -> VectorRegion:
+            if region.is_branch:
+                children = tuple(visit(child) for child in region.children)
+                return region.with_children(children) if children != region.children else region
+            assert region.current is not None
+            symmetry = region.diagnostics.get("symmetry")
+            if (
+                region.current.kind != "use"
+                or not isinstance(symmetry, Mapping)
+                or symmetry.get("mode") != "self_mirror"
+            ):
+                return region
+            source_id = region.current.params.get("href_obj_id")
+            source = leaves.get(int(source_id)) if isinstance(source_id, int) else None
+            if source is None or source.current is None:
+                raise ValueError("self-symmetry mirror is missing its source geometry")
+            shape = bake_shape_transform(source.current, tuple(region.current.params["transform"]))
+            baked_diagnostics = dict(symmetry)
+            baked_diagnostics["baked_for_polish"] = True
+            return region.with_current(shape, footprint=region.footprint, diagnostics={"symmetry": baked_diagnostics})
+
+        return visit(root)
+
+    return tuple(bake_root(root) for root in regions)
 
 
 def _restore_root_metadata(region: VectorRegion, original: VectorRegion | None) -> VectorRegion:
@@ -456,7 +518,7 @@ def _replace_leaf(
 
 
 def _group_regions(regions: Sequence[VectorRegion], op: Mapping[str, object]) -> DrawingRegions:
-    """Create a semantic merged target while retaining its raster provenance."""
+    """Create a semantic target with a SkPath-unioned, seam-free outline."""
     targets = _targets(regions)
     members = tuple(targets[region_id] for region_id in op["regions"])
     member_ids = {member.id for member in members}
@@ -469,14 +531,21 @@ def _group_regions(regions: Sequence[VectorRegion], op: Mapping[str, object]) ->
     raster = np.zeros_like(first.raster, dtype=bool)
     for member in member_regions:
         raster |= member.raster
+    footprints = [member.footprint for member in member_regions]
+    if not all(isinstance(footprint, SkPath) for footprint in footprints):
+        raise ValueError("merge requires polygonal vector-region footprints")
+    footprint = unary_union([footprint for footprint in footprints if isinstance(footprint, SkPath)])
+    shape = Shape("path", {"d": footprint.to_svg_d()})
     merged = VectorRegion.from_shape(
         id=max(region.id for region in _all_regions(regions)) + 1,
-        shape=first.current,
+        shape=shape,
         fill=first.fill,
         z=min(member.z for member in member_regions),
         raster=raster,
+        footprint=footprint,
         drawing_id=op["id"],
         source_regions=tuple(source for member in members for source in member.source_regions),
+        diagnostics={"merge": {"unioned": True, "sources": tuple(member.id for member in members)}},
     )
     return tuple(region for region in regions if _root_label(region) not in member_ids) + (merged,)
 
@@ -505,18 +574,46 @@ def _with_z(region: VectorRegion, z: float) -> VectorRegion:
     return region.with_current(region.current, z=z, footprint=region.footprint)
 
 
-def _primitive_shape(trace: TraceResult, target: _Target, kind: str) -> Shape:
-    regions = [region for region in trace.regions if region.id in target.source_regions]
-    xs = [x for region in regions for x in np.nonzero(region.mask)[1]]
-    ys = [y for region in regions for y in np.nonzero(region.mask)[0]]
-    x, y, w, h = min(xs), min(ys), max(xs) - min(xs) + 1, max(ys) - min(ys) + 1
+def _primitive_shape(target: _Target, kind: str, *, epsilon: float, max_error: float) -> Shape:
+    """Fit one public primitive from the target's retained root mask."""
+    mask = target.region.raster
+    ys, xs = np.nonzero(mask)
+    if len(xs) == 0:
+        raise ValueError(f"cannot fit {kind!r} to an empty drawing region")
+    x, y, w, h = int(xs.min()), int(ys.min()), int(xs.max() - xs.min() + 1), int(ys.max() - ys.min() + 1)
     if kind == "rect":
         return Shape("rect", {"x": x, "y": y, "w": w, "h": h})
+    if kind == "rounded_rect":
+        radius = region_corner_radius(mask)
+        return Shape("rect", {"x": x, "y": y, "w": w, "h": h, "rx": radius, "ry": radius})
     if kind == "ellipse":
         return Shape("ellipse", {"cx": x + w / 2, "cy": y + h / 2, "rx": w / 2, "ry": h / 2})
     if kind == "circle":
         return Shape("circle", {"cx": x + w / 2, "cy": y + h / 2, "r": min(w, h) / 2})
-    return Shape("polygon", {"points": [(x, y), (x + w, y), (x + w, y + h), (x, y + h)]})
+    contour = outer_contour(mask)
+    if len(contour) < 3:
+        raise ValueError(f"cannot fit {kind!r} without an outer contour")
+    axis_x = float((contour[:, 0].min() + contour[:, 0].max()) / 2.0)
+    if kind in {"trapezoid", "rounded_trapezoid"}:
+        radius = 0.0 if kind == "trapezoid" else region_corner_radius(mask)
+        fitted = rounded_trapezoid_fit(contour, axis_x, radius=radius, max_error=max_error)
+        if fitted is not None:
+            return fitted
+        raise ValueError(f"target {target.id!r} is not a {kind}")
+    if kind == "cap":
+        fitted = half_ellipse_cap_fit(
+            contour,
+            axis_x,
+            corner_radius=region_corner_radius(mask),
+            max_error=max_error,
+        )
+        if fitted is not None:
+            return fitted
+        raise ValueError(f"target {target.id!r} is not a cap")
+    fitted = recognize_polygon(contour, epsilon=epsilon)
+    if fitted is not None:
+        return fitted
+    raise ValueError(f"target {target.id!r} is not a polygon within epsilon={epsilon}")
 
 
 def _command_start(trace: TraceResult, command_id: str) -> tuple[float, float]:

@@ -141,6 +141,47 @@ def test_plan_accepts_native_detection_and_explicit_relationship_operations():
     validate_plan(plan, _two_region_trace(), _scene("r1", "r2"))
 
 
+def test_plan_accepts_a_terminal_block_of_distinct_targeted_symmetry_operations():
+    from vectormark.drawing_plan import parse_plan, validate_plan
+
+    plan = parse_plan(
+        {
+            "version": "vectormark.plan.v1",
+            "drawing_id": "drw_x",
+            "base_version": "v0",
+            "ops": [
+                {"op": "set_fill", "target": "r1", "fill": {"type": "flat", "color": "#112233"}},
+                {"op": "detect_symmetry", "target": "r1"},
+                {"op": "detect_symmetry", "target": "r2"},
+            ],
+        }
+    )
+
+    validate_plan(plan, _two_region_trace(), _scene("r1", "r2"))
+
+
+def test_plan_rejects_repeated_or_non_terminal_targeted_symmetry():
+    from vectormark.drawing_plan import PlanValidationError, parse_plan, validate_plan
+
+    repeated = parse_plan(
+        {
+            "version": "vectormark.plan.v1", "drawing_id": "drw_x", "base_version": "v0",
+            "ops": [{"op": "detect_symmetry", "target": "r1"}, {"op": "detect_symmetry", "target": "r1"}],
+        }
+    )
+    with pytest.raises(PlanValidationError, match="already has a symmetry"):
+        validate_plan(repeated, _trace(), _scene("r1"))
+
+    global_after_target = parse_plan(
+        {
+            "version": "vectormark.plan.v1", "drawing_id": "drw_x", "base_version": "v0",
+            "ops": [{"op": "detect_symmetry", "target": "r1"}, {"op": "detect_symmetry"}],
+        }
+    )
+    with pytest.raises(PlanValidationError, match="cannot follow targeted"):
+        validate_plan(global_after_target, _two_region_trace(), _scene("r1", "r2"))
+
+
 def test_plan_accepts_global_fitting_defaults_and_detect_override():
     from vectormark.drawing_plan import parse_plan, validate_plan
 

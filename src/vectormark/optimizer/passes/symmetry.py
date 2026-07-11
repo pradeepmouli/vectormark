@@ -307,6 +307,35 @@ def _self_symmetry_diagnostics(axis: Axis2D, residual: float) -> dict[str, objec
     }
 
 
+def _intrinsic_symmetry_diagnostics(axis: Axis2D, residual: float) -> dict[str, object]:
+    """Report verified symmetry without replacing an explicit full geometry."""
+    return {
+        "symmetry": {
+            "accepted": True,
+            "mode": "intrinsic",
+            "axis": {
+                "theta": float(axis.theta),
+                "cx": float(axis.cx),
+                "cy": float(axis.cy),
+            },
+            "residual": float(residual),
+        }
+    }
+
+
+def _best_self_axis(flat: SkPath) -> tuple[Axis2D, float] | None:
+    """Find a valid reflection axis without changing the represented geometry."""
+    candidates = [
+        (_residual(_reflect_flat(flat, axis), flat), axis)
+        for axis in _self_axis_candidates(flat)
+    ]
+    candidates = [candidate for candidate in candidates if candidate[0] <= _SELF_RESIDUAL_TOL]
+    if not candidates:
+        return None
+    residual, axis = min(candidates, key=lambda item: (round(item[0], 12), _axis_key(item[1])))
+    return axis, residual
+
+
 def _fit_polygon_path(poly: SkPath, *, epsilon: float, max_error: float, cubic: bool) -> str | None:
     coords = np.asarray(poly.exterior.coords, dtype=float)
     if len(coords) < 4:
@@ -415,6 +444,7 @@ def _best_self_reconstruction(
     epsilon: float,
     max_error: float,
     cubic: bool,
+    preserve_explicit_geometry: bool = False,
 ) -> tuple[Axis2D, SkPath, SkPath, Shape, float] | None:
     corner_radius = region_corner_radius(mask)
     candidates: list[tuple[float, Axis2D, SkPath, SkPath, Shape]] = []
@@ -431,15 +461,17 @@ def _best_self_reconstruction(
             continue
         if reconstructed.is_empty or not isinstance(reconstructed, SkPath):
             continue
-        shape = _symmetric_refine_half_shape(
-            flat,
-            half,
-            axis,
-            epsilon=epsilon,
-            max_error=max_error,
-            corner_radius=corner_radius,
-            cubic=cubic,
-        )
+        shape = None
+        if not preserve_explicit_geometry:
+            shape = _symmetric_refine_half_shape(
+                flat,
+                half,
+                axis,
+                epsilon=epsilon,
+                max_error=max_error,
+                corner_radius=corner_radius,
+                cubic=cubic,
+            )
         if shape is None:
             shape = _fit_geometry_to_path_shape(half, epsilon=epsilon, max_error=max_error, cubic=cubic)
         if shape is None:
@@ -542,9 +574,30 @@ def symmetry_pass(
     for obj, flat in usable:
         if obj.id in paired_ids:
             continue
+        geometry = obj.diagnostics.get("geometry") if isinstance(obj.diagnostics, dict) else None
+        explicit_kind = geometry.get("explicit") if isinstance(geometry, dict) else None
+        if explicit_kind in {"circle", "ellipse", "rect", "rounded_rect", "cap", "trapezoid", "rounded_trapezoid"}:
+            intrinsic = _best_self_axis(flat)
+            if intrinsic is not None:
+                axis, residual = intrinsic
+                proposals.append(
+                    Proposal(
+                        (obj.id,),
+                        [obj.with_current(obj.current, diagnostics=_intrinsic_symmetry_diagnostics(axis, residual))],
+                    )
+                )
+            continue
         if obj.current.kind != "path":
             continue
-        best = _best_self_reconstruction(flat, masks[obj.id], epsilon=epsilon, max_error=max_error, cubic=cubic)
+        preserve_explicit_geometry = explicit_kind is not None
+        best = _best_self_reconstruction(
+            flat,
+            masks[obj.id],
+            epsilon=epsilon,
+            max_error=max_error,
+            cubic=cubic,
+            preserve_explicit_geometry=preserve_explicit_geometry,
+        )
         if best is None:
             continue
         axis, half, reflected_half, shape, residual = best
