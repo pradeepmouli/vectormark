@@ -227,6 +227,18 @@ def labeled_drawing_svg(trace: TraceResult, regions: Sequence[VectorRegion]) -> 
     return render_svg_doc(trace.width, trace.height, body)
 
 
+def stitch_regions(trace: TraceResult, regions: Sequence[VectorRegion]) -> DrawingRegions:
+    """Normalize shared root boundaries before retaining interactive ``v0``."""
+    return _run_detection(
+        regions,
+        trace,
+        "stitch",
+        None,
+        epsilon=trace.options.simplify_tolerance,
+        max_error=trace.options.curve_tolerance,
+    )
+
+
 def refine(trace: TraceResult, base: Sequence[VectorRegion], plan: DrawingPlan) -> DrawingRegions:
     """Execute *plan* as immutable transformations over native vector regions."""
     regions = tuple(base)
@@ -242,6 +254,8 @@ def refine(trace: TraceResult, base: Sequence[VectorRegion], plan: DrawingPlan) 
         elif name == "split":
             regions = _run_detection(regions, trace, "split", op["target"], epsilon=epsilon, max_error=max_error)
         elif name in {"detect_primitives", "detect_symmetry", "detect_clones"}:
+            regions = _run_detection(regions, trace, name, op.get("target"), epsilon=epsilon, max_error=max_error)
+        elif name in {"simplify", "stitch"}:
             regions = _run_detection(regions, trace, name, op.get("target"), epsilon=epsilon, max_error=max_error)
         elif name == "set_symmetry":
             regions = _set_symmetry(regions, op)
@@ -270,8 +284,8 @@ def refine(trace: TraceResult, base: Sequence[VectorRegion], plan: DrawingPlan) 
             path_ops = geometry.get("ops", ()) if geometry["type"] == "path" else ()
             if any(path_op["op"] == "simplify" for path_op in path_ops):
                 regions = _run_detection(regions, trace, "simplify", target.id, epsilon=epsilon, max_error=max_error)
-            if any(path_op["op"] == "seams" for path_op in path_ops):
-                regions = _run_detection(regions, trace, "seams", target.id, epsilon=epsilon, max_error=max_error)
+            if any(path_op["op"] == "stitch" for path_op in path_ops):
+                regions = _run_detection(regions, trace, "stitch", target.id, epsilon=epsilon, max_error=max_error)
         elif name == "set_fill":
             target_id = op["target"]
             fill = _fill(op["fill"])
@@ -295,7 +309,7 @@ def _run_detection(
     max_error: float,
 ) -> DrawingRegions:
     """Run one existing optimizer pass over the cached region forest."""
-    if operation in {"simplify", "seams"}:
+    if operation in {"simplify", "stitch"}:
         regions = _bake_self_symmetry_uses_for_polish(regions)
     cubic = trace.options.curve_type == "cubic"
     if operation == "detect_primitives":
@@ -312,7 +326,7 @@ def _run_detection(
     elif operation == "simplify":
         def pass_fn(objects, masks):
             return simplify_pass(objects, masks, epsilon=epsilon, max_error=max_error, cubic=cubic)
-    elif operation == "seams":
+    elif operation == "stitch":
         def pass_fn(objects, masks):
             return seams_pass(objects, masks, epsilon=epsilon, max_error=max_error, cubic=cubic)
     else:

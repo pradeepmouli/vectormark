@@ -114,7 +114,7 @@ def test_merge_unions_adjacent_same_fill_geometry_before_svg_emission():
     assert render_drawing(trace, merged).svg.count('id="g1"') == 1
 
 
-def test_path_local_simplify_and_seams_run_after_the_requested_path_is_fitted():
+def test_path_local_simplify_and_stitch_run_after_the_requested_path_is_fitted():
     trace = PythonTraceEngine().trace(_disk(), TraceOptions())
     commands = [command.id for command in trace.regions[0].trace_path.commands if command.command not in {"M", "Z"}]
     plan = parse_plan({"version": "vectormark.plan.v1", "drawing_id": "drw_x", "base_version": "v0", "ops": [
@@ -127,7 +127,7 @@ def test_path_local_simplify_and_seams_run_after_the_requested_path_is_fitted():
                     {"op": "group", "id": "s1", "commands": commands},
                     {"op": "fit", "target": "s1", "type": "quadratic"},
                     {"op": "simplify"},
-                    {"op": "seams"},
+                    {"op": "stitch"},
                     {"op": "close"},
                 ],
             },
@@ -307,7 +307,7 @@ def test_detect_symmetry_exposes_refinable_hyphenated_child_regions():
     polished = drawing_refine._run_detection(
         regions,
         trace,
-        "seams",
+        "stitch",
         "r1-1",
         epsilon=trace.options.simplify_tolerance,
         max_error=trace.options.curve_tolerance,

@@ -5,6 +5,7 @@ import base64
 import io
 from types import SimpleNamespace
 
+import vectormark.mcp_server as mcp_server_module
 from mcp import ClientSession
 from mcp.client.stdio import StdioServerParameters, stdio_client
 from mcp.server.fastmcp.exceptions import ToolError
@@ -60,6 +61,23 @@ def test_interactive_trace_refine_and_artifact_share_one_live_region_forest():
 
     artifact = get_drawing_artifact(drawing_id, "v0.0", "svg", ctx).structuredContent
     assert artifact is not None and '<circle id="r1"' in artifact["svg"]
+
+
+def test_interactive_trace_stitches_retained_roots_before_creating_v0(monkeypatch):
+    observed: list[int] = []
+    original_stitch = mcp_server_module.stitch_regions
+
+    def observe(trace, regions):
+        observed.append(len(regions))
+        return original_stitch(trace, regions)
+
+    monkeypatch.setattr(mcp_server_module, "stitch_regions", observe)
+    ctx = SimpleNamespace(session=object())
+
+    result = trace_drawing(ImageRef(data_uri=_png_data_uri()), TraceDrawingOptions(), ctx).structuredContent
+
+    assert result is not None
+    assert observed == [len(result["trace"]["regions"])]
 
 
 def test_mcp_detect_symmetry_exposes_an_axis_for_a_follow_up_set_symmetry_plan():

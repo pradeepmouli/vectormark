@@ -26,6 +26,7 @@ _GEOMETRY_TYPES = frozenset(
 _FILL_TYPES = frozenset({"flat", "linear_gradient", "radial_gradient", "raster"})
 _FIT_TYPES = frozenset({"line", "quadratic", "cubic", "keep"})
 _DETECT_OPS = frozenset({"detect_primitives", "detect_symmetry", "detect_clones"})
+_POLISH_OPS = frozenset({"simplify", "stitch"})
 _PNG_SIGNATURE = b"\x89PNG\r\n\x1a\n"
 
 
@@ -141,6 +142,8 @@ def validate_plan(plan: DrawingPlan, trace: TraceResult, regions: Sequence[Vecto
                         raise PlanValidationError(f"{pointer}/target", "target already has a symmetry operation in this plan")
                     symmetry_targets.add(target)
                     symmetry_block = True
+        elif name in _POLISH_OPS:
+            _validate_polish_op(op, pointer, known_targets)
         elif name == "set_symmetry":
             _validate_set_symmetry_op(op, pointer, known_targets)
         elif name == "clone":
@@ -195,6 +198,13 @@ def _validate_geometry_op(
 
 
 def _validate_detect_op(op: Mapping[object, object], pointer: str, targets: set[str]) -> None:
+    _reject_unknown_keys(op, {"op", "target"} | _TOLERANCE_KEYS, pointer)
+    _tolerances(op, pointer)
+    if "target" in op:
+        _validate_target(op, pointer, targets)
+
+
+def _validate_polish_op(op: Mapping[object, object], pointer: str, targets: set[str]) -> None:
     _reject_unknown_keys(op, {"op", "target"} | _TOLERANCE_KEYS, pointer)
     _tolerances(op, pointer)
     if "target" in op:
@@ -313,7 +323,7 @@ def _validate_path_ops(
                 raise PlanValidationError(op_pointer, "close requires a preceding fit")
             since_close = False
             latest_fitted = None
-        elif name in {"simplify", "seams"}:
+        elif name in {"simplify", "stitch"}:
             _reject_unknown_keys(op, {"op"}, op_pointer)
             if not fitted:
                 raise PlanValidationError(op_pointer, f"{name} requires a preceding fit")

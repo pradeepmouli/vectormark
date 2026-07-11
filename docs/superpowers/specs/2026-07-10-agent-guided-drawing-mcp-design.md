@@ -63,7 +63,12 @@ forest. Raw paths are produced by palette segmentation, contour extraction, and
 path fitting; roots use the one-shot pipeline's size filtering and soft-surface
 merge so an agent does not need to reason about every palette fragment. It does
 **not** run primitive recognition, symmetry detection, clone detection, or
-optimizer passes.
+other optimizer passes.
+
+Before interactive `v0` is retained, its compact root forest is automatically
+stitched so neighboring retained regions share reconciled boundaries. This does
+not alter the on-demand `raw_trace` artifact. Agents may still invoke `stitch`
+after later geometry, merge, or split edits create new neighboring edges.
 
 The public path is named `trace_path`, not `raw_path`. The stored contour samples
 are the raw pixel or coverage evidence; `trace_path` is a pre-simplified line and
@@ -215,6 +220,8 @@ version.
   `rounded_rect`, `polygon`, `trapezoid`, `rounded_trapezoid`, `cap`, or `path`.
 - `set_fill`: assign `flat`, `linear_gradient`, `radial_gradient`, or `raster`.
 - `set_z_order`: establish final paint order for all emitted targets.
+- `simplify`: reduce path complexity globally or for an optional `target`.
+- `stitch`: reconcile shared boundaries globally or for an optional `target`.
 
 `split` is structural and must be the final operation in a plan.
 `detect_symmetry` is structural only when it needs to split a freeform
@@ -227,12 +234,12 @@ reported as `mode: "intrinsic"` rather than being split into a redundant pair.
 Clone `<use>` relationships remain symbolic through interactive and one-shot
 output unless explicit SVG flattening is requested. A self-symmetry mirror
 `<use>` is the exception: it is baked to a concrete path immediately before
-`simplify` or `seams`, so polish passes see both sides of a shared seam and
+`simplify` or `stitch`, so polish passes see both sides of a shared seam and
 cannot leave an anti-aliased hairline.
 
 Automatic one-shot refinement runs the existing optimizer pass sequence,
 including occlusion, compound splitting, symmetry, clones, simplification, and
-seams. Interactive tracing remains raw; interactive plans opt into automatic
+stitching. Interactive tracing remains raw; interactive plans opt into automatic
 behavior through the ordered `detect_*` scene operations.
 
 ### MVP path operations
@@ -242,7 +249,9 @@ array:
 
 - `group`: trace-path commands -> named logical segment.
 - `fit`: logical segment -> `line`, `quadratic`, `cubic`, or `keep`.
-- `simplify` and `seams`: geometry-local cleanup operations.
+- `simplify` and `stitch`: geometry-local cleanup operations. `stitch` is the
+  public name for shared-boundary reconciliation; `smooth` is automatic
+  residual-gated tangent smoothing whenever a path is fitted.
 - `break`: request a G0 discontinuity after a named segment.
 - `close`: close the current subpath.
 

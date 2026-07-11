@@ -31,6 +31,7 @@ from .drawing_refine import (
     refine,
     render_drawing as render_drawing_regions,
     root_regions,
+    stitch_regions,
 )
 from .drawing_state import DrawingNotFound, DrawingStore
 from .drawing_trace import PythonTraceEngine, TraceOptions
@@ -358,7 +359,7 @@ def trace_drawing(image: ImageRef, options: TraceDrawingOptions | None = None, c
         trace, rgb = _trace_result(image, options)
     except ImageError as err:
         raise ToolError(f"[{err.error_code}] {err.message}") from err
-    regions = root_regions(trace, rgb, min_region_fraction=options.min_region_fraction)
+    regions = stitch_regions(trace, root_regions(trace, rgb, min_region_fraction=options.min_region_fraction))
     drawing = _DRAWINGS.create(ctx.session, trace, regions=regions)
     rendered = render_drawing_regions(trace, regions)
     preview = _render_preview_png(rendered.svg, trace.width, trace.height, [])

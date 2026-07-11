@@ -199,6 +199,24 @@ def test_plan_accepts_global_fitting_defaults_and_detect_override():
     validate_plan(plan, _trace(), _scene("r1"))
 
 
+def test_plan_accepts_global_and_targeted_polish_operations():
+    from vectormark.drawing_plan import parse_plan, validate_plan
+
+    plan = parse_plan(
+        {
+            "version": "vectormark.plan.v1",
+            "drawing_id": "drw_x",
+            "base_version": "v0",
+            "ops": [
+                {"op": "simplify", "epsilon": 0.5},
+                {"op": "stitch", "target": "r1", "max_error": 0.75},
+            ],
+        }
+    )
+
+    validate_plan(plan, _trace(), _scene("r1"))
+
+
 @pytest.mark.parametrize("defaults", [{"epsilon": -0.1}, {"max_error": float("inf")}, {"unknown": 1}])
 def test_plan_rejects_invalid_global_fitting_defaults(defaults):
     from vectormark.drawing_plan import PlanValidationError, parse_plan
