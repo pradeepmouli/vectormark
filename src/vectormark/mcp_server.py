@@ -9,7 +9,7 @@ import os
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
-from mcp.server.fastmcp import FastMCP
+from mcp.server.fastmcp import Context, FastMCP
 from mcp.server.fastmcp.exceptions import ToolError
 from mcp.types import CallToolResult, ImageContent, TextContent
 from PIL import Image
@@ -24,6 +24,10 @@ from .mcp_image import (
     svg_output_facts,
 )
 from .pipeline import Options, _flatten_on_white, idealize
+from .drawing_plan import PlanValidationError, parse_plan
+from .drawing_refine import refine, root_scene
+from .drawing_state import DrawingNotFound, DrawingStore
+from .drawing_trace import PythonTraceEngine, TraceOptions
 
 # Transport is chosen at startup. stdio = local, full-trust (your own machine, your
 # files). Any HTTP transport is potentially network-reachable, so the filesystem tools
@@ -33,6 +37,7 @@ _TRANSPORT = (os.environ.get("VECTORMARK_MCP_TRANSPORT") or "stdio").strip()
 _LOCAL_TRUST = _TRANSPORT == "stdio"
 
 WIDGET_URI = "ui://vectormark/logo-widget.html"
+_DRAWINGS = DrawingStore()
 _WIDGET_HTML_PATH = Path(__file__).parents[2] / "integrations" / "mcp-app" / "dist" / "mcp-app.html"
 _WIDGET_BUILD_REQUIRED_HTML = """
 <!doctype html>
@@ -301,6 +306,73 @@ class IdealizeOptions(BaseModel):
     epsilon: float = Field(1.5, description="Primitive/polygon recognition tolerance in pixels.")
     max_error: float = Field(1.0, description="Bézier fit tolerance in pixels.")
     preprocess: PreprocessOpts = Field(default_factory=PreprocessOpts, description="Server-side preprocessing options.")
+
+
+class TraceDrawingOptions(BaseModel):
+    refine: str = Field("interactive", description="interactive retains a live drawing; auto returns a one-shot idealization.")
+    max_colors: int = 16
+    min_region_size: int = 16
+    trace_level: str = "pixel"
+    simplify_tolerance: float = 1.5
+    curve_tolerance: float = 1.0
+    curve_type: str = "quadratic"
+    preprocess: PreprocessOpts = Field(default_factory=PreprocessOpts)
+
+
+def _trace_result(image: ImageRef, options: TraceDrawingOptions):
+    resolved = resolve_image(image.model_dump(exclude_none=True), local_trust=_LOCAL_TRUST)
+    pre = options.preprocess
+    rgb, _meta = preprocess_image(resolved.bytes, crop_to_content=pre.crop_to_content,
+        max_size_px=pre.max_size_px, preserve_transparency=pre.preserve_transparency, quantize=pre.quantize)
+    trace = PythonTraceEngine().trace(rgb, TraceOptions(max_colors=options.max_colors,
+        min_region_size=options.min_region_size, trace_level=options.trace_level,
+        simplify_tolerance=options.simplify_tolerance, curve_tolerance=options.curve_tolerance,
+        curve_type=options.curve_type))
+    return trace
+
+
+@mcp.tool(title="Trace drawing", description="Trace a drawing into labeled raw paths. Interactive traces retain a live drawing for refine_drawing.")
+def trace_drawing(image: ImageRef, options: TraceDrawingOptions | None = None, ctx: Context | None = None) -> CallToolResult:
+    options = options or TraceDrawingOptions()
+    if options.refine == "auto":
+        return idealize_logo(image, IdealizeOptions(colors=options.max_colors, epsilon=options.simplify_tolerance,
+            max_error=options.curve_tolerance, preprocess=options.preprocess))
+    if options.refine != "interactive" or ctx is None:
+        raise ToolError("[DRAWING_CONTEXT_REQUIRED] interactive tracing requires an MCP session context")
+    try:
+        trace = _trace_result(image, options)
+    except ImageError as err:
+        raise ToolError(f"[{err.error_code}] {err.message}") from err
+    drawing = _DRAWINGS.create(ctx.session, trace)
+    scene = root_scene(trace)
+    preview = _render_preview_png(scene.svg, trace.width, trace.height, [])
+    result = {"drawing_id": drawing.id, "version": "v0", "trace": trace.to_public_dict(),
+        "artifacts": {"svg": scene.svg, "labeled_svg": trace.region_map_svg}, "report": scene.report}
+    content: list[TextContent | ImageContent] = [TextContent(type="text", text=json.dumps(result))]
+    if preview is not None:
+        content.append(ImageContent(type="image", data=base64.b64encode(preview).decode(), mimeType="image/png"))
+    return CallToolResult(content=content, structuredContent=result, isError=False)
+
+
+@mcp.tool(title="Refine drawing", description="Apply a validated semantic plan to a live traced drawing and create a child version.")
+def refine_drawing(plan: dict[str, object], ctx: Context | None = None) -> CallToolResult:
+    if ctx is None:
+        raise ToolError("[DRAWING_CONTEXT_REQUIRED] refinement requires an MCP session context")
+    try:
+        parsed = parse_plan(plan)
+        drawing, version = _DRAWINGS.get(ctx.session, parsed.drawing_id, parsed.base_version)
+        base = version.scene if version.scene is not None else root_scene(drawing.trace)
+        scene = refine(drawing.trace, base, parsed)
+        child = _DRAWINGS.append(ctx.session, parsed.drawing_id, parsed.base_version, plan=plan, scene=scene, label=parsed.label)
+    except (PlanValidationError, DrawingNotFound) as err:
+        raise ToolError(f"[{getattr(err, 'error_code', 'PLAN_INVALID')}] {err}") from err
+    preview = _render_preview_png(scene.svg, drawing.trace.width, drawing.trace.height, [])
+    result = {"drawing_id": parsed.drawing_id, "version": child.id, "parent_version": parsed.base_version,
+        "artifacts": {"svg": scene.svg}, "report": scene.report}
+    content: list[TextContent | ImageContent] = [TextContent(type="text", text=json.dumps(result))]
+    if preview is not None:
+        content.append(ImageContent(type="image", data=base64.b64encode(preview).decode(), mimeType="image/png"))
+    return CallToolResult(content=content, structuredContent=result, isError=False)
 
 
 @mcp.tool(
