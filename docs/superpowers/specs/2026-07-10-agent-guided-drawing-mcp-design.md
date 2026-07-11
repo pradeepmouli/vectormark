@@ -166,18 +166,25 @@ targets, SVG, report, preview availability, and the optional plan `label`.
 Agents can branch from any retained version and present sibling alternatives to
 users without retracing the original raster.
 
-### MVP region operations
+### Scene operations
 
-- `group`: create a semantic group from regions without altering their
-  boundaries or paint order.
+- `merge`: create a semantic target from regions and retain their combined
+  source-region ancestry. Path-local `group` remains separate.
+- `split`: derive hyphenated child targets (`r1-1`, `r1-2`) when an explicit
+  split operation is requested.
+- `detect_primitives`, `detect_symmetry`, and `detect_clones`: run the named
+  existing automatic inference pass globally, or with an optional `target`.
+- `set_symmetry`: apply an agent-supplied axis/mode rather than infer one.
+- `clone`: apply an agent-supplied source/target/transform relationship.
 - `set_geometry`: assign a target to `circle`, `ellipse`, `rect`, `polygon`, or
   `path`.
 - `set_fill`: assign `flat`, `linear_gradient`, `radial_gradient`, or `raster`.
 - `set_z_order`: establish final paint order for all emitted targets.
 
-`group` is intentionally not boolean union. A future explicit boolean operation
-will create a new derived boundary and command-ID namespace; silently treating a
-group as a union would make the agent's raw command references invalid.
+Automatic one-shot refinement runs the existing optimizer pass sequence,
+including occlusion, compound splitting, symmetry, clones, simplification, and
+seams. Interactive tracing remains raw; interactive plans opt into automatic
+behavior through the ordered `detect_*` scene operations.
 
 ### MVP path operations
 
@@ -186,6 +193,7 @@ array:
 
 - `group`: trace-path commands -> named logical segment.
 - `fit`: logical segment -> `line`, `quadratic`, `cubic`, or `keep`.
+- `simplify` and `seams`: geometry-local cleanup operations.
 - `break`: request a G0 discontinuity after a named segment.
 - `close`: close the current subpath.
 
@@ -226,9 +234,7 @@ does not alter the MCP tools, drawing store, version tree, or plan schema.
 ## Non-goals
 
 - CLI commands or a portable trace file.
-- Automatic primitive/candidate suggestions.
-- Auto symmetry, clone inference, path congruency, constraints, ribbons, arcs,
-  split regions, or boolean unions.
+- Ribbons, arcs, path congruency, and a general constraint solver.
 - Persistence across an MCP server restart or session end.
 - Retaining state for automatic calls.
 

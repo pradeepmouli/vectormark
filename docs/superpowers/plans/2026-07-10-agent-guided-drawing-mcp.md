@@ -301,7 +301,16 @@ def validate_plan(plan: DrawingPlan, trace: TraceResult,
                   scene: object) -> None: ...
 ~~~
 
-Support only group, set_geometry, set_fill, and set_z_order at region level. Nested path operations are group, fit(line|quadratic|cubic|keep), break, and close. Reject unknown targets, duplicate IDs, non-finite numbers, invalid fill fields, omitted or repeated z-order targets, and missing path-operation dependencies. A path group may contain only contiguous non-M/non-Z commands from one trace subpath. Semantic group never invokes boolean union. PlanValidationError must carry an RFC 6901 JSON pointer rooted at /ops.
+Support scene-level merge, split, detect_primitives, detect_symmetry,
+detect_clones, set_symmetry, clone, set_geometry, set_fill, and set_z_order.
+`detect_*` is the existing automatic pass, globally or with an optional singular
+target; the paired explicit operation carries the agent-supplied relationship.
+Nested path operations are group, fit(line|quadratic|cubic|keep), simplify,
+seams, break, and close. Reject unknown targets, duplicate IDs, non-finite
+numbers, invalid fill fields, omitted or repeated z-order targets, and missing
+path-operation dependencies. A path group may contain only contiguous
+non-M/non-Z commands from one trace subpath. PlanValidationError must carry an
+RFC 6901 JSON pointer rooted at /ops.
 
 - [ ] **Step 4: Run the test to verify it passes**
 
