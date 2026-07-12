@@ -64,7 +64,7 @@ def _scene(*target_ids: str) -> tuple[VectorRegion, ...]:
     return tuple(
         VectorRegion.from_shape(
             id=index + 1,
-            shape=Shape("path", {"d": "M0 0Z"}),
+            shape=Shape("path", {"d": "M 0 0 Q 1 0 2 0 Q 3 0 4 0 Q 5 0 6 0 Z"}),
             fill=FlatFill("#112233"),
             z=index,
             raster=np.ones((1, 1), dtype=bool),
@@ -79,7 +79,7 @@ def _grouped_scene(*source_regions: str) -> tuple[VectorRegion, ...]:
     return (
         VectorRegion.from_shape(
             id=1,
-            shape=Shape("path", {"d": "M0 0Z"}),
+            shape=Shape("path", {"d": "M 0 0 Q 1 0 2 0 Q 3 0 4 0 Q 5 0 6 0 Z"}),
             fill=FlatFill("#112233"),
             z=0,
             raster=np.ones((1, 1), dtype=bool),
@@ -263,8 +263,45 @@ def test_path_geometry_rejects_commands_owned_by_another_region():
         validate_plan(plan, _two_region_trace(), _scene("r1", "r2"))
 
 
-def test_path_geometry_group_inherits_its_regions_command_provenance():
+def test_path_geometry_uses_retained_target_commands_not_raw_trace_provenance():
     from vectormark.drawing_plan import parse_plan, validate_plan
+
+    retained = VectorRegion.from_shape(
+        id=1,
+        shape=Shape("path", {"d": "M0 0 L8 0 L8 8 L0 8 Z M2 2 L6 2 L6 6 L2 6 Z", "fill_rule": "evenodd"}),
+        fill=FlatFill("#112233"),
+        z=0,
+        raster=np.ones((8, 8), dtype=bool),
+        drawing_id="r1",
+        source_regions=("r1", "r2"),
+    )
+    plan = parse_plan(
+        {
+            "version": "vectormark.plan.v1",
+            "drawing_id": "drw_x",
+            "base_version": "v0",
+            "ops": [
+                {
+                    "op": "set_geometry",
+                    "target": "r1",
+                    "geometry": {
+                        "type": "path",
+                        "ops": [
+                            {"op": "group", "id": "inner", "commands": ["r1.p1.c1", "r1.p1.c2", "r1.p1.c3"]},
+                            {"op": "fit", "target": "inner", "type": "keep"},
+                            {"op": "close"},
+                        ],
+                    },
+                }
+            ],
+        }
+    )
+
+    validate_plan(plan, _trace(), (retained,))
+
+
+def test_path_geometry_requires_a_newly_merged_target_to_be_refined_in_its_child_version():
+    from vectormark.drawing_plan import PlanValidationError, parse_plan, validate_plan
 
     plan = parse_plan(
         {
@@ -293,10 +330,11 @@ def test_path_geometry_group_inherits_its_regions_command_provenance():
         }
     )
 
-    validate_plan(plan, _two_region_trace(), _scene("r1", "r2"))
+    with pytest.raises(PlanValidationError, match="retained path"):
+        validate_plan(plan, _two_region_trace(), _scene("r1", "r2"))
 
 
-def test_path_geometry_base_group_inherits_its_source_regions_command_provenance():
+def test_path_geometry_base_group_uses_its_own_retained_command_ids():
     from vectormark.drawing_plan import parse_plan, validate_plan
 
     plan = parse_plan(
@@ -311,11 +349,8 @@ def test_path_geometry_base_group_inherits_its_source_regions_command_provenance
                     "geometry": {
                         "type": "path",
                         "ops": [
-                            {"op": "group", "id": "s1", "commands": ["r1.p0.c1"]},
+                            {"op": "group", "id": "s1", "commands": ["g1.p0.c1"]},
                             {"op": "fit", "target": "s1", "type": "line"},
-                            {"op": "close"},
-                            {"op": "group", "id": "s2", "commands": ["r2.p0.c1"]},
-                            {"op": "fit", "target": "s2", "type": "line"},
                             {"op": "close"},
                         ],
                     },

@@ -8,12 +8,13 @@ import json
 import os
 from dataclasses import asdict, dataclass
 from pathlib import Path
+from typing import Annotated, Any, Literal
 
 from mcp.server.fastmcp import Context, FastMCP
 from mcp.server.fastmcp.exceptions import ToolError
 from mcp.types import CallToolResult, ImageContent, TextContent
 from PIL import Image
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 from .mcp_image import (
     DEFAULT_COLORS,
@@ -271,10 +272,301 @@ def idealize_logo_image(
 mcp = FastMCP(
     "vectormark",
     instructions=(
-        "Idealize rendered raster logos into clean, editable SVG. "
-        "Best inputs are flat-color marks, app icons, emblems, and simple logos."
+        "Convert rendered raster artwork into clean, editable SVG. Use trace_drawing with "
+        "refine='auto' for one-shot idealization. For interactive work, use refine='interactive', "
+        "inspect the returned preview, labeled_svg, and raw_trace artifacts, then make semantic "
+        "judgments about every retained region (primitive, path geometry, symmetry, clones, fill, "
+        "z-order, simplify, and stitch). Submit refine_drawing plans with the drawing_id and an "
+        "existing base_version; every plan creates a branch version. Preserve a path when no supported "
+        "operation improves it. Path-local operations use command IDs exposed on each retained target geometry."
     ),
 )
+
+
+class _PlanSchema(BaseModel):
+    """Static refinement-plan contract exposed to MCP clients.
+
+    Live drawing validation remains in ``drawing_plan``: target IDs, trace command
+    ownership, command contiguity, and version rules need the traced drawing.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+
+class PlanDefaults(_PlanSchema):
+    epsilon: float | None = Field(None, description="Primitive/polygon fitting tolerance in pixels.")
+    max_error: float | None = Field(None, description="Maximum path-fit residual in pixels.")
+
+
+class AxisSpec(_PlanSchema):
+    theta: float = Field(description="Symmetry-axis angle in radians.")
+    cx: float = Field(description="X coordinate of a point on the symmetry axis.")
+    cy: float = Field(description="Y coordinate of a point on the symmetry axis.")
+
+
+class FlatFillSpec(_PlanSchema):
+    type: Literal["flat"]
+    color: str = Field(description="CSS #RRGGBB fill color.")
+
+
+class LinearGradientFillSpec(_PlanSchema):
+    type: Literal["linear_gradient"]
+    geometry: dict[str, float] = Field(description="Gradient endpoints: x1, y1, x2, y2.")
+    stops: list[tuple[float, str]] = Field(description="Ordered [offset, #RRGGBB] gradient stops.")
+
+
+class RadialGradientFillSpec(_PlanSchema):
+    type: Literal["radial_gradient"]
+    geometry: dict[str, float] = Field(description="Radial gradient geometry: cx, cy, r.")
+    stops: list[tuple[float, str]] = Field(description="Ordered [offset, #RRGGBB] gradient stops.")
+
+
+class RasterFillSpec(_PlanSchema):
+    type: Literal["raster"]
+    geometry: dict[str, float] = Field(description="Raster placement: x, y, w, h.")
+    png_b64: str = Field(description="Base64-encoded PNG data.")
+
+
+FillSpec = Annotated[
+    FlatFillSpec | LinearGradientFillSpec | RadialGradientFillSpec | RasterFillSpec,
+    Field(discriminator="type"),
+]
+
+
+class PrimitiveGeometrySpec(_PlanSchema):
+    type: Literal["circle", "ellipse", "rect", "rounded_rect", "polygon", "trapezoid", "rounded_trapezoid", "cap"]
+
+
+class PathGroupOp(_PlanSchema):
+    op: Literal["group"]
+    id: str = Field(description="Logical segment ID used by subsequent path operations.")
+    commands: list[str] = Field(
+        min_length=1,
+        description="Contiguous command IDs from the target's retained base-version path; excludes M and Z.",
+    )
+
+
+class PathFitOp(_PlanSchema):
+    op: Literal["fit"]
+    target: str = Field(description="A preceding path group ID.")
+    type: Literal["line", "quadratic", "cubic", "keep"] = Field(
+        description="Geometry for the grouped commands. Use line for deliberate straight edges; keep preserves raw commands."
+    )
+
+
+class PathBreakOp(_PlanSchema):
+    op: Literal["break"]
+    target: str = Field(description="The current fitted segment to end with a sharp discontinuity.")
+
+
+class PathCloseOp(_PlanSchema):
+    op: Literal["close"]
+
+
+class PathSimplifyOp(_PlanSchema):
+    op: Literal["simplify"]
+
+
+class PathStitchOp(_PlanSchema):
+    op: Literal["stitch"]
+
+
+PathOp = Annotated[
+    PathGroupOp | PathFitOp | PathBreakOp | PathCloseOp | PathSimplifyOp | PathStitchOp,
+    Field(discriminator="op"),
+]
+
+
+class PathGeometrySpec(_PlanSchema):
+    type: Literal["path"]
+    ops: list[PathOp] = Field(
+        min_length=1,
+        description="Path-local program. Group raw commands, fit each group, then optionally break, close, simplify, or stitch.",
+    )
+
+
+GeometrySpec = Annotated[PrimitiveGeometrySpec | PathGeometrySpec, Field(discriminator="type")]
+
+
+class _ToleranceOp(_PlanSchema):
+    epsilon: float | None = Field(None, description="Per-operation fitting tolerance in pixels.")
+    max_error: float | None = Field(None, description="Per-operation maximum fit residual in pixels.")
+
+
+class MergeOp(_PlanSchema):
+    op: Literal["merge"]
+    id: str = Field(description="New semantic group ID.")
+    regions: list[str] = Field(min_length=1, description="Current retained region IDs to union into the new group.")
+
+
+class SplitOp(_PlanSchema):
+    op: Literal["split"]
+    target: str = Field(description="Current target to split; must be the final operation in a plan.")
+
+
+class DetectPrimitivesOp(_ToleranceOp):
+    op: Literal["detect_primitives"]
+    target: str | None = Field(None, description="Optional target; omit to inspect all current targets.")
+
+
+class DetectSymmetryOp(_ToleranceOp):
+    op: Literal["detect_symmetry"]
+    target: str | None = Field(None, description="Optional target; symmetry operations must be terminal.")
+
+
+class DetectClonesOp(_ToleranceOp):
+    op: Literal["detect_clones"]
+    target: str | None = Field(None, description="Optional target; omit to inspect all current targets.")
+
+
+class SimplifyOp(_ToleranceOp):
+    op: Literal["simplify"]
+    target: str | None = Field(None, description="Optional current target; omit to simplify all current targets.")
+
+
+class StitchOp(_ToleranceOp):
+    op: Literal["stitch"]
+    target: str | None = Field(None, description="Optional current target; omit to reconcile all shared boundaries.")
+
+
+class SetGeometryOp(_ToleranceOp):
+    op: Literal["set_geometry"]
+    target: str = Field(description="Current retained region or merged group ID.")
+    geometry: GeometrySpec
+
+
+class SetFillOp(_PlanSchema):
+    op: Literal["set_fill"]
+    target: str = Field(description="Current retained region or merged group ID.")
+    fill: FillSpec
+
+
+class SetZOrderOp(_PlanSchema):
+    op: Literal["set_z_order"]
+    targets: list[str] = Field(min_length=1, description="All current targets in back-to-front paint order.")
+
+
+class CloneOp(_PlanSchema):
+    op: Literal["clone"]
+    source: str = Field(description="Existing source target ID.")
+    target: str = Field(description="Existing target ID replaced by a transformed clone.")
+    transform: tuple[float, float, float, float, float, float] = Field(
+        description="SVG affine transform [a, b, c, d, e, f] from source to target."
+    )
+
+
+class SetSymmetryOp(_PlanSchema):
+    op: Literal["set_symmetry"]
+    source: str = Field(description="Existing source target ID.")
+    target: str = Field(description="Existing target ID replaced by source mirrored around axis.")
+    axis: AxisSpec
+
+
+PlanOp = Annotated[
+    MergeOp | SplitOp | DetectPrimitivesOp | DetectSymmetryOp | DetectClonesOp | SimplifyOp | StitchOp
+    | SetGeometryOp | SetFillOp | SetZOrderOp | CloneOp | SetSymmetryOp,
+    Field(discriminator="op"),
+]
+
+
+class RefinementPlanInput(_PlanSchema):
+    """The statically typed public contract for ``refine_drawing``."""
+
+    version: Literal["vectormark.plan.v1"]
+    drawing_id: str = Field(min_length=1, description="Live drawing ID returned by trace_drawing.")
+    base_version: str = Field(pattern=r"^v\d+(?:\.\d+)*$", description="Existing version to branch from, such as v0 or v0.1.")
+    label: str | None = Field(None, max_length=200, description="Optional human-readable branch label.")
+    defaults: PlanDefaults = Field(default_factory=PlanDefaults, description="Default fitting tolerances for operations.")
+    ops: list[PlanOp] = Field(
+        description="Ordered semantic transformations. IDs refer to the selected base version; use raw_trace command IDs only in path geometry.",
+        json_schema_extra={
+            "examples": [[
+                {"op": "set_geometry", "target": "r1", "geometry": {"type": "circle"}},
+                {"op": "detect_symmetry", "target": "r1"},
+            ]]
+        },
+    )
+
+
+class _DrawingOutputSchema(BaseModel):
+    """Stable structured result fields returned by drawing-first tools."""
+
+    model_config = ConfigDict(extra="forbid")
+
+
+class DrawingArtifactsOutput(_DrawingOutputSchema):
+    svg: str
+    preview: str
+    labeled_svg: str
+    raw_trace: str
+
+
+class DrawingTargetOutput(_DrawingOutputSchema):
+    id: str
+    source_regions: list[str]
+    geometry: str
+    fill: str
+    z: float
+    diagnostics: dict[str, Any]
+
+
+class DrawingReportOutput(_DrawingOutputSchema):
+    targets: list[DrawingTargetOutput]
+
+
+class TraceRegionOutput(_DrawingOutputSchema):
+    id: str
+    source_regions: list[str]
+    geometry: dict[str, Any]
+    fill: dict[str, Any]
+
+
+class TraceSummaryOutput(_DrawingOutputSchema):
+    width: int
+    height: int
+    options: dict[str, Any]
+    regions: list[TraceRegionOutput]
+
+
+class TraceDrawingOutput(_DrawingOutputSchema):
+    """One output envelope for auto one-shot and interactive trace modes."""
+
+    drawing_id: str | None = None
+    version: str | None = None
+    trace: TraceSummaryOutput | None = None
+    artifacts: DrawingArtifactsOutput | None = None
+    report: DrawingReportOutput | None = None
+    svg: str | None = None
+    width: int | None = None
+    height: int | None = None
+    svg_bytes: int | None = None
+    preview_available: bool | None = None
+    diagnostics: dict[str, Any] | None = None
+
+
+class RefinedDrawingOutput(_DrawingOutputSchema):
+    drawing_id: str
+    version: str
+    parent_version: str
+    artifacts: DrawingArtifactsOutput
+    report: DrawingReportOutput
+
+
+class DrawingArtifactOutput(_DrawingOutputSchema):
+    """Artifact envelope; fields vary predictably by the typed MIME value."""
+
+    mime_type: Literal["image/svg+xml", "application/json", "image/png"]
+    svg: str | None = None
+    trace: dict[str, Any] | None = None
+
+
+class RenderedSvgOutput(_DrawingOutputSchema):
+    image_path: str
+    output_path: str | None
+    width: int
+    height: int
+    svg_bytes: int
+    svg: str
 
 
 class ImageRef(BaseModel):
@@ -318,14 +610,18 @@ class IdealizeOptions(BaseModel):
 
 
 class TraceDrawingOptions(BaseModel):
-    refine: str = Field("interactive", description="interactive retains a live drawing; auto returns a one-shot idealization.")
-    max_colors: int = 16
-    min_region_size: int = 16
+    refine: Literal["auto", "interactive"] = Field(
+        "interactive", description="interactive retains a live drawing for semantic plans; auto returns a one-shot idealization."
+    )
+    max_colors: int = Field(16, ge=2, description="Maximum quantized palette colors used by the raw trace.")
+    min_region_size: int = Field(16, ge=1, description="Absolute pixel-area floor for raw trace regions.")
     min_region_fraction: float = Field(0.02, ge=0, lt=1, description="Relative area floor for interactive root regions; raw trace remains available on demand.")
-    trace_level: str = "pixel"
-    simplify_tolerance: float = 1.5
-    curve_tolerance: float = 1.0
-    curve_type: str = "quadratic"
+    trace_level: Literal["pixel", "subpixel"] = Field(
+        "pixel", description="Boundary trace precision. subpixel uses anti-alias coverage when available."
+    )
+    simplify_tolerance: float = Field(1.5, ge=0, description="Raw contour simplification tolerance in pixels.")
+    curve_tolerance: float = Field(1.0, ge=0, description="Raw quadratic/cubic path-fit tolerance in pixels.")
+    curve_type: Literal["quadratic", "cubic"] = Field("quadratic", description="Raw trace curve representation.")
     preprocess: PreprocessOpts = Field(default_factory=PreprocessOpts)
 
 
@@ -348,7 +644,9 @@ def _trace_result(image: ImageRef, options: TraceDrawingOptions):
     description="Trace a drawing into labeled raw paths. Interactive traces retain a live drawing for refine_drawing.",
     meta={"openai/fileParams": ["image"]},
 )
-def trace_drawing(image: ImageRef, options: TraceDrawingOptions | None = None, ctx: Context | None = None) -> CallToolResult:
+def trace_drawing(
+    image: ImageRef, options: TraceDrawingOptions | None = None, ctx: Context | None = None
+) -> Annotated[CallToolResult, TraceDrawingOutput]:
     options = options or TraceDrawingOptions()
     if options.refine == "auto":
         return idealize_logo(image, IdealizeOptions(colors=options.max_colors, epsilon=options.simplify_tolerance,
@@ -372,18 +670,30 @@ def trace_drawing(image: ImageRef, options: TraceDrawingOptions | None = None, c
     return CallToolResult(content=content, structuredContent=result, isError=False)
 
 
-@mcp.tool(title="Refine drawing", description="Apply a validated semantic plan to a live traced drawing and create a child version.")
-def refine_drawing(plan: dict[str, object], ctx: Context | None = None) -> CallToolResult:
+@mcp.tool(
+    title="Refine drawing",
+    description=(
+        "Apply an ordered, strongly typed semantic plan to a live traced drawing and create a child version. "
+        "Inspect trace_drawing artifacts first: labeled_svg identifies retained targets and each target geometry supplies command IDs for "
+        "path geometry. Choose only improvements that preserve the design intent; omitting an operation preserves the target."
+    ),
+)
+def refine_drawing(
+    plan: RefinementPlanInput, ctx: Context | None = None
+) -> Annotated[CallToolResult, RefinedDrawingOutput]:
     if ctx is None:
         raise ToolError("[DRAWING_CONTEXT_REQUIRED] refinement requires an MCP session context")
     try:
-        parsed = parse_plan(plan)
+        plan_payload = plan.model_dump(exclude_none=True) if isinstance(plan, RefinementPlanInput) else plan
+        parsed = parse_plan(plan_payload)
         drawing, version = _DRAWINGS.get(ctx.session, parsed.drawing_id, parsed.base_version)
         assert version.regions is not None
         base = version.regions
         regions = refine(drawing.trace, base, parsed)
-        child = _DRAWINGS.append(ctx.session, parsed.drawing_id, parsed.base_version, plan=plan, regions=regions, label=parsed.label)
-    except (PlanValidationError, DrawingNotFound) as err:
+        child = _DRAWINGS.append(
+            ctx.session, parsed.drawing_id, parsed.base_version, plan=plan_payload, regions=regions, label=parsed.label
+        )
+    except (PlanValidationError, DrawingNotFound, ValueError, KeyError) as err:
         raise ToolError(f"[{getattr(err, 'error_code', 'PLAN_INVALID')}] {err}") from err
     rendered = render_drawing_regions(drawing.trace, regions)
     preview = _render_preview_png(rendered.svg, drawing.trace.width, drawing.trace.height, [])
@@ -397,7 +707,10 @@ def refine_drawing(plan: dict[str, object], ctx: Context | None = None) -> CallT
 
 
 @mcp.tool(title="Get drawing artifact", description="Fetch an SVG, clean PNG preview, or labeled trace SVG for a live drawing version.")
-def get_drawing_artifact(drawing_id: str, version: str = "v0", artifact: str = "svg", ctx: Context | None = None) -> CallToolResult:
+def get_drawing_artifact(
+    drawing_id: str, version: str = "v0", artifact: Literal["svg", "preview_png", "labeled_svg", "raw_trace"] = "svg",
+    ctx: Context | None = None,
+) -> Annotated[CallToolResult, DrawingArtifactOutput]:
     if ctx is None:
         raise ToolError("[DRAWING_CONTEXT_REQUIRED] artifact retrieval requires an MCP session context")
     try:
@@ -483,7 +796,7 @@ def idealize_logo_data(
     },
 )
 def render_drawing(result: dict | None = None, image_path: str = "", svg: str = "",
-                          width: int = 0, height: int = 0) -> dict[str, object]:
+                          width: int = 0, height: int = 0) -> RenderedSvgOutput:
     """Render an existing idealized SVG result in the vectormark app. Accepts the full
     `idealize_logo` result (preferred) or the legacy flat fields."""
     if result:
@@ -491,10 +804,10 @@ def render_drawing(result: dict | None = None, image_path: str = "", svg: str = 
         width = result.get("width", width)
         height = result.get("height", height)
         image_path = (result.get("diagnostics", {}).get("input", {}).get("source_kind")) or image_path
-    return IdealizeLogoResult(
+    return RenderedSvgOutput.model_validate(IdealizeLogoResult(
         image_path=image_path, output_path=None, width=width, height=height,
         svg_bytes=len(svg.encode()), svg=svg,   # svg_bytes re-derived, never trusted from caller
-    ).to_dict()
+    ).to_dict()).model_dump()
 
 
 @mcp.resource(

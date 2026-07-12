@@ -5,6 +5,7 @@ import base64
 import io
 from types import SimpleNamespace
 
+import pytest
 import vectormark.mcp_server as mcp_server_module
 from mcp import ClientSession
 from mcp.client.stdio import StdioServerParameters, stdio_client
@@ -145,12 +146,33 @@ def test_trace_drawing_surfaces_image_error_codes():
         assert "UNSUPPORTED_IMAGE_TYPE" in str(exc)
 
 
+def test_refine_drawing_converts_an_executor_error_into_a_plan_error(monkeypatch):
+    ctx = SimpleNamespace(session=object())
+    traced = trace_drawing(ImageRef(data_uri=_png_data_uri()), TraceDrawingOptions(), ctx).structuredContent
+    assert traced is not None
+
+    def fail(*_args, **_kwargs):
+        raise ValueError("executor rejected this valid-looking plan")
+
+    monkeypatch.setattr(mcp_server_module, "refine", fail)
+    with pytest.raises(ToolError, match="PLAN_INVALID.*executor rejected"):
+        refine_drawing(
+            {
+                "version": "vectormark.plan.v1",
+                "drawing_id": traced["drawing_id"],
+                "base_version": "v0",
+                "ops": [{"op": "set_geometry", "target": "r1", "geometry": {"type": "circle"}}],
+            },
+            ctx,
+        )
+
+
 def test_stdio_server_exposes_only_the_drawing_first_surface():
     async def list_tools_and_run_drawing_workflow():
         params = StdioServerParameters(command="uv", args=["run", "vectormark-mcp"])
         async with stdio_client(params) as (read, write):
             async with ClientSession(read, write) as session:
-                await session.initialize()
+                initialized = await session.initialize()
                 tools = {tool.name: tool for tool in (await session.list_tools()).tools}
                 resources = await session.list_resources()
                 widget = await session.read_resource(WIDGET_URI)
@@ -178,12 +200,21 @@ def test_stdio_server_exposes_only_the_drawing_first_surface():
                     "get_drawing_artifact",
                     {"drawing_id": drawing_id, "version": refined.structuredContent["version"], "artifact": "svg"},
                 )
-                return tools, [str(resource.uri) for resource in resources.resources], widget.contents[0].text, auto, refined, artifact
+                return initialized, tools, [str(resource.uri) for resource in resources.resources], widget.contents[0].text, auto, refined, artifact
 
-    tools, resources, widget, auto, refined, artifact = asyncio.run(list_tools_and_run_drawing_workflow())
+    initialized, tools, resources, widget, auto, refined, artifact = asyncio.run(list_tools_and_run_drawing_workflow())
 
     assert set(tools) == {"trace_drawing", "refine_drawing", "get_drawing_artifact", "render_drawing"}
+    assert "interactive" in (initialized.instructions or "")
     assert tools["trace_drawing"].meta["openai/fileParams"] == ["image"]
+    refine_schema = tools["refine_drawing"].inputSchema
+    plan_schema = refine_schema["$defs"]["RefinementPlanInput"]
+    assert "oneOf" in plan_schema["properties"]["ops"]["items"]
+    assert "set_geometry" in str(refine_schema)
+    assert "group" in str(refine_schema)
+    assert "quadratic" in str(refine_schema)
+    for tool_name in ("trace_drawing", "refine_drawing", "get_drawing_artifact", "render_drawing"):
+        assert tools[tool_name].outputSchema is not None
     assert WIDGET_URI in resources
     assert "Logo idealizer" in widget
     assert auto.structuredContent is not None

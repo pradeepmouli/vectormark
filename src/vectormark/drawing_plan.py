@@ -11,7 +11,7 @@ from dataclasses import dataclass
 from types import MappingProxyType
 from typing import Literal
 
-from .drawing_trace import TraceCommand, TraceResult
+from .drawing_trace import TraceCommand, TraceResult, svg_path_commands
 from .optimizer.vector_region import VectorRegion
 
 
@@ -88,7 +88,7 @@ def validate_plan(plan: DrawingPlan, trace: TraceResult, regions: Sequence[Vecto
     """Validate plan references and semantics against one trace and region roots."""
     source_regions = _region_target_source_regions(regions)
     target_ids = tuple(source_regions)
-    commands = _trace_commands(trace)
+    commands = _target_commands(regions)
     known_targets = set(target_ids)
     used_commands: set[str] = set()
     used_target_ids = set(target_ids)
@@ -149,7 +149,7 @@ def validate_plan(plan: DrawingPlan, trace: TraceResult, regions: Sequence[Vecto
         elif name == "clone":
             _validate_clone_op(op, pointer, known_targets)
         elif name == "set_geometry":
-            _validate_geometry_op(op, pointer, known_targets, source_regions, commands, used_commands)
+            _validate_geometry_op(op, pointer, known_targets, commands, used_commands)
         elif name == "set_fill":
             _validate_fill_op(op, pointer, known_targets)
         elif name == "set_z_order":
@@ -168,7 +168,6 @@ def _validate_geometry_op(
     op: Mapping[object, object],
     pointer: str,
     targets: set[str],
-    source_regions: Mapping[str, frozenset[str]],
     commands: Mapping[str, tuple[str, int, int, TraceCommand]],
     used_commands: set[str],
 ) -> None:
@@ -192,7 +191,7 @@ def _validate_geometry_op(
         path_ops,
         f"{pointer}/geometry/ops",
         commands,
-        source_regions[target],
+        target,
         used_commands,
     )
 
@@ -254,7 +253,7 @@ def _validate_path_ops(
     path_ops: Sequence[object],
     pointer: str,
     commands: Mapping[str, tuple[str, int, int, TraceCommand]],
-    allowed_source_regions: frozenset[str],
+    target_id: str,
     used_commands: set[str],
 ) -> None:
     groups: set[str] = set()
@@ -277,10 +276,10 @@ def _validate_path_ops(
                 try:
                     record = commands[command_id]
                 except KeyError:
-                    raise PlanValidationError(f"{op_pointer}/commands/{command_index}", "unknown trace command") from None
-                if record[0] not in allowed_source_regions:
+                    raise PlanValidationError(f"{op_pointer}/commands/{command_index}", "unknown retained-path command") from None
+                if record[0] != target_id:
                     raise PlanValidationError(
-                        f"{op_pointer}/commands/{command_index}", "trace command is not owned by the target"
+                        f"{op_pointer}/commands/{command_index}", "command is not owned by the target's retained path"
                     )
                 if command_id in used_commands:
                     raise PlanValidationError(
@@ -418,19 +417,32 @@ def _region_target_source_regions(regions: Sequence[VectorRegion]) -> dict[str, 
     return source_regions
 
 
-def _trace_commands(trace: TraceResult) -> dict[str, tuple[str, int, int, TraceCommand]]:
+def _target_commands(regions: Sequence[VectorRegion]) -> dict[str, tuple[str, int, int, TraceCommand]]:
     commands: dict[str, tuple[str, int, int, TraceCommand]] = {}
-    for region in trace.regions:
-        subpath = -1
-        index = 0
-        for command in region.trace_path.commands:
-            if command.command == "M":
-                subpath += 1
-                index = 0
-            if command.id in commands:
-                raise PlanValidationError("/ops", "trace contains duplicate command ids")
-            commands[command.id] = (region.id, subpath, index, command)
-            index += 1
+
+    def visit(region: VectorRegion, target_id: str) -> None:
+        if region.is_leaf:
+            assert region.current is not None
+            if region.current.kind != "path":
+                return
+            subpath = -1
+            index = 0
+            for command in svg_path_commands(str(region.current.params["d"]), target_id):
+                if command.command == "M":
+                    subpath += 1
+                    index = 0
+                if command.id in commands:
+                    raise PlanValidationError("/ops", "retained drawing contains duplicate path command ids")
+                commands[command.id] = (target_id, subpath, index, command)
+                index += 1
+            return
+        for child in region.children:
+            visit(child, f"{target_id}-{child.id}")
+
+    for region in regions:
+        if type(region.drawing_id) is not str:
+            raise PlanValidationError("/ops", "base drawing regions require stable drawing ids")
+        visit(region, region.drawing_id)
     return commands
 
 

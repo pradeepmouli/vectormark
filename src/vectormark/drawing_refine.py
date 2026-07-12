@@ -16,9 +16,9 @@ from .candidate import Fill, FlatFill, LinearGradientFill, RadialGradientFill, R
 from .components import decompose_components
 from .contour import outer_contour, region_contours, region_corner_radius
 from .drawing_plan import DrawingPlan, PlanValidationError, validate_plan
-from .drawing_trace import TraceResult
+from .drawing_trace import TraceResult, svg_path_commands
 from .emit import render_svg_doc, resolve_fill, resolve_use_shape, shape_to_svg
-from .fit import Shape, _fmt, fit_path, recognize_polygon
+from .fit import Shape, _curved_run_d, _fmt, fit_path, recognize_polygon
 from .optimizer.vector_region import VectorRegion, to_polygon
 from .optimizer.framework import optimize
 from .optimizer.passes import clones_pass, primitives_pass, seams_pass, simplify_pass, split_compound_pass, symmetry_pass
@@ -196,6 +196,10 @@ def drawing_summary(trace: TraceResult, regions: Sequence[VectorRegion]) -> dict
             geometry["d"] = shape.params["d"]
             if shape.params.get("fill_rule"):
                 geometry["fill_rule"] = shape.params["fill_rule"]
+            geometry["commands"] = [
+                {"id": command.id, "command": command.command, "values": list(command.values)}
+                for command in svg_path_commands(str(shape.params["d"]), target.id)
+            ]
         summaries.append(
             {
                 "id": target.id,
@@ -534,12 +538,9 @@ def _replace_leaf(
 def _group_regions(regions: Sequence[VectorRegion], op: Mapping[str, object]) -> DrawingRegions:
     """Create a semantic target with a SkPath-unioned, seam-free outline."""
     targets = _targets(regions)
-    members = tuple(targets[region_id] for region_id in op["regions"])
-    member_ids = {member.id for member in members}
-    roots = {_root_label(region): region for region in regions}
-    if any(member_id not in roots for member_id in member_ids):
-        raise ValueError("group currently requires root drawing regions")
-    member_regions = tuple(roots[member.id] for member in members)
+    member_ids = tuple(op["regions"])
+    members = tuple(targets[region_id] for region_id in member_ids)
+    member_regions = tuple(member.region for member in members)
     first = member_regions[0]
     assert first.current is not None and first.fill is not None
     raster = np.zeros_like(first.raster, dtype=bool)
@@ -558,10 +559,28 @@ def _group_regions(regions: Sequence[VectorRegion], op: Mapping[str, object]) ->
         raster=raster,
         footprint=footprint,
         drawing_id=op["id"],
-        source_regions=tuple(source for member in members for source in member.source_regions),
-        diagnostics={"merge": {"unioned": True, "sources": tuple(member.id for member in members)}},
+        source_regions=tuple(sorted({source for member in members for source in member.source_regions})),
+        diagnostics={"merge": {"unioned": True, "sources": member_ids}},
     )
-    return tuple(region for region in regions if _root_label(region) not in member_ids) + (merged,)
+    return _remove_leaves(regions, frozenset(member_ids)) + (merged,)
+
+
+def _remove_leaves(regions: Sequence[VectorRegion], removed_ids: frozenset[str]) -> DrawingRegions:
+    """Remove selected labeled leaves, pruning only now-empty branch nodes."""
+
+    def visit(region: VectorRegion, label: str) -> VectorRegion | None:
+        if region.is_leaf:
+            return None if label in removed_ids else region
+        children = tuple(
+            child
+            for child in (visit(child, f"{label}-{child.id}") for child in region.children)
+            if child is not None
+        )
+        if not children:
+            return None
+        return region if children == region.children else region.with_children(children)
+
+    return tuple(region for root in regions if (region := visit(root, _root_label(root))) is not None)
 
 
 def _all_regions(regions: Sequence[VectorRegion]) -> tuple[VectorRegion, ...]:
@@ -630,13 +649,11 @@ def _primitive_shape(target: _Target, kind: str, *, epsilon: float, max_error: f
     raise ValueError(f"target {target.id!r} is not a polygon within epsilon={epsilon}")
 
 
-def _command_start(trace: TraceResult, command_id: str) -> tuple[float, float]:
-    for region in trace.regions:
-        commands = region.trace_path.commands
-        for index, command in enumerate(commands):
-            if command.id == command_id:
-                previous = commands[index - 1]
-                return (float(previous.values[-2]), float(previous.values[-1]))
+def _command_start(commands: Sequence[object], command_id: str) -> tuple[float, float]:
+    for index, command in enumerate(commands):
+        if command.id == command_id:
+            previous = commands[index - 1]
+            return (float(previous.values[-2]), float(previous.values[-1]))
     raise KeyError(command_id)
 
 
@@ -648,31 +665,42 @@ def _path_shape(
     epsilon: float,
     max_error: float,
 ) -> Shape:
-    command_map = {command.id: command for region in trace.regions for command in region.trace_path.commands}
+    assert target.region.current is not None and target.region.current.kind == "path"
+    source_commands = svg_path_commands(str(target.region.current.params["d"]), target.id)
+    command_map = {command.id: command for command in source_commands}
     groups: dict[str, list[object]] = {}
     pieces: list[str] = []
-    close = False
+    current: np.ndarray | None = None
     for op in geometry["ops"]:
         if op["op"] == "group":
             groups[op["id"]] = [command_map[command_id] for command_id in op["commands"]]
         elif op["op"] == "fit":
             commands = groups[op["target"]]
-            start = _command_start(trace, commands[0].id)
+            start = _command_start(source_commands, commands[0].id)
             points = np.array([start] + [(command.values[-2], command.values[-1]) for command in commands], dtype=float)
+            if current is None:
+                pieces.append(f"M{_fmt(start[0])} {_fmt(start[1])}")
+            elif not np.allclose(current, points[0]):
+                raise ValueError("path group must continue the current subpath or follow a close operation")
             kind = op["type"]
             if kind == "line":
-                pieces.append(f"M{_fmt(start[0])} {_fmt(start[1])} L{_fmt(points[-1, 0])} {_fmt(points[-1, 1])}")
+                pieces.append(f"L{_fmt(points[-1, 0])} {_fmt(points[-1, 1])}")
             elif kind == "keep":
                 body = " ".join(command.command + " ".join(_fmt(value) for value in command.values) for command in commands)
-                pieces.append(f"M{_fmt(start[0])} {_fmt(start[1])} {body}")
+                pieces.append(body)
             else:
-                pieces.append(str(fit_path(points, epsilon=epsilon, max_error=max_error, cubic=kind == "cubic").params["d"]))
+                pieces.append(_curved_run_d(points, max_error, cubic=kind == "cubic", line_epsilon=epsilon).strip())
+            current = points[-1]
         elif op["op"] == "close":
-            close = True
+            if current is None:
+                raise ValueError("close requires an open fitted subpath")
+            pieces.append("Z")
+            current = None
     d = " ".join(pieces)
-    if close and not d.endswith("Z"):
-        d += " Z"
-    return Shape("path", {"d": d})
+    params: dict[str, object] = {"d": d}
+    if target.region.current is not None and (fill_rule := target.region.current.params.get("fill_rule")) is not None:
+        params["fill_rule"] = fill_rule
+    return Shape("path", params)
 
 
 def _tolerances(trace: TraceResult, plan: DrawingPlan, op: Mapping[str, object]) -> tuple[float, float]:

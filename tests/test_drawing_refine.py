@@ -8,7 +8,7 @@ from vectormark.drawing_plan import parse_plan
 from vectormark import drawing_refine
 from vectormark.drawing_refine import drawing_summary, refine, render_drawing, root_regions
 from vectormark.drawing_state import DrawingStore
-from vectormark.drawing_trace import PythonTraceEngine, TraceOptions
+from vectormark.drawing_trace import PythonTraceEngine, TraceCommand, TraceOptions, TracePath, TraceRegion, TraceResult
 from vectormark.candidate import FlatFill
 from vectormark.fit import Shape
 from vectormark.optimizer.vector_region import VectorRegion
@@ -114,6 +114,29 @@ def test_merge_unions_adjacent_same_fill_geometry_before_svg_emission():
     assert render_drawing(trace, merged).svg.count('id="g1"') == 1
 
 
+def test_merge_accepts_a_child_region_target_and_removes_it_from_its_parent_tree():
+    trace = PythonTraceEngine().trace(_two_regions(), TraceOptions())
+    raster = np.ones((20, 20), dtype=bool)
+    child = VectorRegion.from_shape(
+        id=1, shape=Shape("path", {"d": "M0 0 L10 0 L10 10 L0 10 Z"}), fill=FlatFill("#0064F0"),
+        z=0, raster=raster, drawing_id="r1", source_regions=("r1",),
+    )
+    branch = VectorRegion.branch(id=10, children=[child], drawing_id="r1", source_regions=("r1",))
+    other = VectorRegion.from_shape(
+        id=2, shape=Shape("path", {"d": "M10 0 L20 0 L20 10 L10 10 Z"}), fill=FlatFill("#0064F0"),
+        z=1, raster=raster, drawing_id="r2", source_regions=("r2",),
+    )
+    plan = parse_plan({"version": "vectormark.plan.v1", "drawing_id": "drw_x", "base_version": "v0", "ops": [
+        {"op": "merge", "id": "g1", "regions": ["r1-1", "r2"]},
+    ]})
+
+    merged = refine(trace, (branch, other), plan)
+
+    assert [region.drawing_id for region in merged] == ["g1"]
+    assert merged[0].source_regions == ("r1", "r2")
+    assert merged[0].footprint.area == 200.0
+
+
 def test_path_local_simplify_and_stitch_run_after_the_requested_path_is_fitted():
     trace = PythonTraceEngine().trace(_disk(), TraceOptions())
     commands = [command.id for command in trace.regions[0].trace_path.commands if command.command not in {"M", "Z"}]
@@ -139,17 +162,61 @@ def test_path_local_simplify_and_stitch_run_after_the_requested_path_is_fitted()
     assert refined[0].current is not None and refined[0].current.kind == "path"
 
 
+def test_path_geometry_preserves_compound_subpaths_and_evenodd_fill_rule():
+    path = TracePath(
+        d="M0 0 L10 0 L10 10 L0 10 Z M2 2 L8 2 L8 8 L2 8 Z",
+        fill_rule="evenodd",
+        commands=(
+            TraceCommand("r1.p0.c0", "M", (0.0, 0.0)),
+            TraceCommand("r1.p0.c1", "L", (10.0, 0.0)),
+            TraceCommand("r1.p0.c2", "L", (10.0, 10.0)),
+            TraceCommand("r1.p0.c3", "L", (0.0, 10.0)),
+            TraceCommand("r1.p0.c4", "Z", ()),
+            TraceCommand("r1.p1.c0", "M", (2.0, 2.0)),
+            TraceCommand("r1.p1.c1", "L", (8.0, 2.0)),
+            TraceCommand("r1.p1.c2", "L", (8.0, 8.0)),
+            TraceCommand("r1.p1.c3", "L", (2.0, 8.0)),
+            TraceCommand("r1.p1.c4", "Z", ()),
+        ),
+    )
+    trace = TraceResult(
+        10, 10, TraceOptions(),
+        (TraceRegion("r1", 1, "#0064F0", np.ones((10, 10), dtype=bool), (), path, "pixel"),),
+        "<svg/>",
+    )
+    root = VectorRegion.from_shape(
+        id=1, shape=Shape("path", {"d": path.d, "fill_rule": "evenodd"}), fill=FlatFill("#0064F0"),
+        z=0, raster=np.ones((10, 10), dtype=bool), drawing_id="r1", source_regions=("r1",),
+    )
+    plan = parse_plan({"version": "vectormark.plan.v1", "drawing_id": "drw_x", "base_version": "v0", "ops": [
+        {"op": "set_geometry", "target": "r1", "geometry": {"type": "path", "ops": [
+            {"op": "group", "id": "outer", "commands": ["r1.p0.c1", "r1.p0.c2", "r1.p0.c3"]},
+            {"op": "fit", "target": "outer", "type": "keep"},
+            {"op": "close"},
+            {"op": "group", "id": "inner", "commands": ["r1.p1.c1", "r1.p1.c2", "r1.p1.c3"]},
+            {"op": "fit", "target": "inner", "type": "keep"},
+            {"op": "close"},
+        ]}},
+    ]})
+
+    refined = refine(trace, (root,), plan)
+
+    assert refined[0].current is not None
+    assert refined[0].current.params["fill_rule"] == "evenodd"
+    assert refined[0].current.params["d"] == "M0 0 L10 0 L10 10 L0 10 Z M2 2 L8 2 L8 8 L2 8 Z"
+
+
 def test_plan_tolerances_apply_defaults_then_an_operation_override(monkeypatch):
     trace = PythonTraceEngine().trace(_disk(), TraceOptions())
     commands = [command.id for command in trace.regions[0].trace_path.commands if command.command not in {"M", "Z"}]
     observed: list[tuple[float, float]] = []
-    original_fit_path = drawing_refine.fit_path
+    original_curved_run = drawing_refine._curved_run_d
 
-    def observe_fit_path(points, *, epsilon, max_error, cubic):
-        observed.append((epsilon, max_error))
-        return original_fit_path(points, epsilon=epsilon, max_error=max_error, cubic=cubic)
+    def observe_curved_run(points, max_error, *, cubic, line_epsilon):
+        observed.append((line_epsilon, max_error))
+        return original_curved_run(points, max_error, cubic=cubic, line_epsilon=line_epsilon)
 
-    monkeypatch.setattr(drawing_refine, "fit_path", observe_fit_path)
+    monkeypatch.setattr(drawing_refine, "_curved_run_d", observe_curved_run)
     plan = parse_plan({"version": "vectormark.plan.v1", "drawing_id": "drw_x", "base_version": "v0",
         "defaults": {"epsilon": 0.25, "max_error": 0.75}, "ops": [
             {"op": "set_geometry", "target": "r1", "epsilon": 0.5, "geometry": {"type": "path", "ops": [
