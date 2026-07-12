@@ -33,7 +33,7 @@ def _png_data_uri() -> str:
     return "data:image/png;base64," + base64.b64encode(data.getvalue()).decode()
 
 
-def test_interactive_trace_refine_and_artifact_share_one_live_region_forest():
+def test_unrefined_trace_refine_and_artifact_share_one_live_region_forest():
     """The public MCP helpers preserve v0 roots and refine child versions."""
     ctx = SimpleNamespace(session=object())
     traced = trace_drawing(ImageRef(data_uri=_png_data_uri()), TraceDrawingOptions(), ctx)
@@ -65,7 +65,15 @@ def test_interactive_trace_refine_and_artifact_share_one_live_region_forest():
     assert artifact is not None and '<circle id="r1"' in artifact["svg"]
 
 
-def test_interactive_trace_stitches_retained_roots_before_creating_v0(monkeypatch):
+def test_trace_options_name_the_absence_of_automatic_refinement_none():
+    from pydantic import ValidationError
+
+    assert TraceDrawingOptions(refine="none").refine == "none"
+    with pytest.raises(ValidationError):
+        TraceDrawingOptions(refine="interactive")
+
+
+def test_unrefined_trace_stitches_retained_roots_before_creating_v0(monkeypatch):
     observed: list[int] = []
     original_stitch = mcp_server_module.stitch_regions
 
@@ -183,7 +191,7 @@ def test_stdio_server_exposes_only_the_drawing_first_surface():
                 )
                 traced = await session.call_tool(
                     "trace_drawing",
-                    {"image": {"data_uri": _png_data_uri()}, "options": {"refine": "interactive", "max_colors": 4}},
+                    {"image": {"data_uri": _png_data_uri()}, "options": {"refine": "none", "max_colors": 4}},
                 )
                 drawing_id = traced.structuredContent["drawing_id"]
                 refined = await session.call_tool(
@@ -206,7 +214,7 @@ def test_stdio_server_exposes_only_the_drawing_first_surface():
     initialized, tools, resources, widget, auto, refined, artifact = asyncio.run(list_tools_and_run_drawing_workflow())
 
     assert set(tools) == {"trace_drawing", "refine_drawing", "get_drawing_artifact", "render_drawing"}
-    assert "interactive" in (initialized.instructions or "")
+    assert "refine='none'" in (initialized.instructions or "")
     assert tools["trace_drawing"].meta["openai/fileParams"] == ["image"]
     refine_schema = tools["refine_drawing"].inputSchema
     plan_schema = refine_schema["$defs"]["RefinementPlanInput"]

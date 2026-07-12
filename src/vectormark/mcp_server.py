@@ -273,7 +273,7 @@ mcp = FastMCP(
     "vectormark",
     instructions=(
         "Convert rendered raster artwork into clean, editable SVG. Use trace_drawing with "
-        "refine='auto' for one-shot idealization. For interactive work, use refine='interactive', "
+        "refine='auto' for one-shot idealization. Use refine='none' to retain unrefined trace roots, "
         "inspect the returned preview, labeled_svg, and raw_trace artifacts, then make semantic "
         "judgments about every retained region (primitive, path geometry, symmetry, clones, fill, "
         "z-order, simplify, and stitch). Submit refine_drawing plans with the drawing_id and an "
@@ -561,7 +561,7 @@ class TraceSummaryOutput(_DrawingOutputSchema):
 
 
 class TraceDrawingOutput(_DrawingOutputSchema):
-    """One output envelope for auto one-shot and interactive trace modes."""
+    """One output envelope for auto-refined and unrefined trace modes."""
 
     drawing_id: str | None = None
     version: str | None = None
@@ -642,12 +642,12 @@ class IdealizeOptions(BaseModel):
 
 
 class TraceDrawingOptions(BaseModel):
-    refine: Literal["auto", "interactive"] = Field(
-        "interactive", description="interactive retains a live drawing for semantic plans; auto returns a one-shot idealization."
+    refine: Literal["auto", "none"] = Field(
+        "none", description="Automatic refinement at trace time: none retains trace roots; auto returns a one-shot idealization."
     )
     max_colors: int = Field(16, ge=2, description="Maximum quantized palette colors used by the raw trace.")
     min_region_size: int = Field(16, ge=1, description="Absolute pixel-area floor for raw trace regions.")
-    min_region_fraction: float = Field(0.02, ge=0, lt=1, description="Relative area floor for interactive root regions; raw trace remains available on demand.")
+    min_region_fraction: float = Field(0.02, ge=0, lt=1, description="Relative area floor for retained trace roots; raw trace remains available on demand.")
     trace_level: Literal["pixel", "subpixel"] = Field(
         "pixel", description="Boundary trace precision. subpixel uses anti-alias coverage when available."
     )
@@ -683,8 +683,8 @@ def trace_drawing(
     if options.refine == "auto":
         return idealize_logo(image, IdealizeOptions(colors=options.max_colors, epsilon=options.simplify_tolerance,
             max_error=options.curve_tolerance, optimizer=True, preprocess=options.preprocess))
-    if options.refine != "interactive" or ctx is None:
-        raise ToolError("[DRAWING_CONTEXT_REQUIRED] interactive tracing requires an MCP session context")
+    if options.refine != "none" or ctx is None:
+        raise ToolError("[DRAWING_CONTEXT_REQUIRED] refine='none' tracing requires an MCP session context")
     try:
         trace, rgb = _trace_result(image, options)
     except ImageError as err:
