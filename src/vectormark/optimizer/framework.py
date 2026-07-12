@@ -6,9 +6,15 @@ from typing import Protocol
 import numpy as np
 
 from .gate import BUDGET, rasterize
+from ..skia_geometry import unary_union
 from .vector_region import VectorRegion
 
 Proposal = namedtuple("Proposal", "obj_ids new_objects")
+
+# The primitive fitter already admits a candidate with up to 4% geometric
+# residual.  The framework guard must not reject a proposal that its producing
+# pass has already accepted, while still stopping destructive scene rewrites.
+_TRACE_FIDELITY_BUDGET = BUDGET * 2
 
 
 class Pass(Protocol):
@@ -53,6 +59,29 @@ def _union_masks(mask_by_id: dict[int, np.ndarray], obj_ids) -> np.ndarray:
     for obj_id in ordered_ids:
         union |= np.asarray(mask_by_id[obj_id], dtype=bool)
     return union
+
+
+def _replacement_preserves_scene(
+    replacements: list[VectorRegion],
+    source_objects: list[VectorRegion],
+    *,
+    budget: float,
+) -> bool:
+    """Require a replacement to preserve the vector scene it consumes.
+
+    The first optimizer pass receives raw traced paths.  Later passes receive
+    their vector successors, including intentional splits and occluders.  This
+    keeps every proposal geometrically faithful without ever comparing it to
+    the input raster or trying to reconstruct a root trace through new nodes.
+    """
+    source_geometry = unary_union([obj.footprint for obj in source_objects])
+    predicted_geometry = unary_union([replacement.footprint for replacement in replacements])
+    try:
+        denominator = max(float(source_geometry.area), 1.0)
+        residual = float(source_geometry.symmetric_difference(predicted_geometry).area / denominator)
+        return residual <= budget
+    except RuntimeError:
+        return False
 
 
 def _pass_name(pass_fn: Pass) -> str:
@@ -129,7 +158,7 @@ def optimize(
     masks: dict[int, np.ndarray],
     passes: Iterable[Pass],
     *,
-    budget: float = BUDGET,
+    budget: float = _TRACE_FIDELITY_BUDGET,
 ) -> list[VectorRegion]:
     current_objects = sorted(objects, key=_object_key)
     current_masks = {obj_id: np.asarray(mask, dtype=bool).copy() for obj_id, mask in masks.items()}
@@ -180,6 +209,13 @@ def optimize(
                 continue
 
             union_mask = _union_masks(pass_masks, proposal_ids)
+            source_objects = [pass_original_by_id[obj_id] for obj_id in proposal_ids]
+            if not _replacement_preserves_scene(
+                proposal.new_objects,
+                source_objects,
+                budget=budget,
+            ):
+                continue
             split_replacement = len(proposal_ids) == 1 and len(proposal.new_objects) > 1
 
             preserved_masks = {
