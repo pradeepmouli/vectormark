@@ -337,21 +337,46 @@ class PrimitiveGeometrySpec(_PlanSchema):
     type: Literal["circle", "ellipse", "rect", "rounded_rect", "polygon", "trapezoid", "rounded_trapezoid", "cap"]
 
 
-class PathGroupOp(_PlanSchema):
-    op: Literal["group"]
-    id: str = Field(description="Logical segment ID used by subsequent path operations.")
-    commands: list[str] = Field(
-        min_length=1,
-        description="Contiguous command IDs from the target's retained base-version path; excludes M and Z.",
-    )
-
-
 class PathFitOp(_PlanSchema):
     op: Literal["fit"]
-    target: str = Field(description="A preceding path group ID.")
+    target: str = Field(description="A retained, version-scoped segment ID, for example r1.p1.c14-1.")
     type: Literal["line", "quadratic", "cubic", "keep"] = Field(
-        description="Geometry for the grouped commands. Use line for deliberate straight edges; keep preserves raw commands."
+        description="Geometry for this segment. Use line for deliberate straight edges; keep preserves its retained command."
     )
+
+
+class PathMatchLengthOp(_PlanSchema):
+    op: Literal["match_length"]
+    target: str = Field(description="Retained, version-scoped segment to resize.")
+    reference: str = Field(description="Retained, version-scoped segment whose length is matched.")
+
+
+class PathMatchOp(_PlanSchema):
+    op: Literal["match"]
+    target: str = Field(description="Retained, version-scoped segment to reconstruct.")
+    reference: str = Field(description="Retained, version-scoped segment to copy.")
+    transform: tuple[float, float, float, float, float, float] = Field(
+        description="SVG affine transform [a, b, c, d, e, f] from the reference segment to the target segment."
+    )
+
+
+class PathSetParallelOp(_PlanSchema):
+    op: Literal["set_parallel"]
+    target: str = Field(description="Retained, version-scoped segment to fit as a parallel line.")
+    reference: str = Field(description="Retained segment supplying the supporting-line direction, never its length.")
+    distance: float | None = Field(None, description="Optional signed perpendicular offset. Omit to fit the offset from the target's existing geometry.")
+
+
+class PathAlignOp(_PlanSchema):
+    op: Literal["align"]
+    target: str = Field(description="Retained, version-scoped segment whose endpoint is aligned.")
+    reference: str = Field(description="Retained, version-scoped segment supplying the endpoint coordinate.")
+    axes: list[Literal["x", "y"]] = Field(min_length=1, description="Endpoint axes to align: x, y, or both.")
+
+
+class PathRemoveOp(_PlanSchema):
+    op: Literal["remove"]
+    target: str = Field(description="Retained, version-scoped segment to remove while preserving following geometry.")
 
 
 class PathBreakOp(_PlanSchema):
@@ -372,7 +397,7 @@ class PathStitchOp(_PlanSchema):
 
 
 PathOp = Annotated[
-    PathGroupOp | PathFitOp | PathBreakOp | PathCloseOp | PathSimplifyOp | PathStitchOp,
+    PathFitOp | PathMatchLengthOp | PathMatchOp | PathSetParallelOp | PathAlignOp | PathRemoveOp | PathBreakOp | PathCloseOp | PathSimplifyOp | PathStitchOp,
     Field(discriminator="op"),
 ]
 
@@ -381,7 +406,7 @@ class PathGeometrySpec(_PlanSchema):
     type: Literal["path"]
     ops: list[PathOp] = Field(
         min_length=1,
-        description="Path-local program. Group raw commands, fit each group, then optionally break, close, simplify, or stitch.",
+        description="Path-local program. Fit retained segments, then optionally break, close, simplify, or stitch.",
     )
 
 
@@ -455,6 +480,13 @@ class CloneOp(_PlanSchema):
     )
 
 
+class AlignOp(_PlanSchema):
+    op: Literal["align"]
+    target: str = Field(description="Current retained region to translate.")
+    reference: str = Field(description="Current retained region whose bounds center is used as the reference.")
+    axes: list[Literal["x", "y"]] = Field(min_length=1, description="Axes to align: x, y, or both.")
+
+
 class SetSymmetryOp(_PlanSchema):
     op: Literal["set_symmetry"]
     source: str = Field(description="Existing source target ID.")
@@ -464,7 +496,7 @@ class SetSymmetryOp(_PlanSchema):
 
 PlanOp = Annotated[
     MergeOp | SplitOp | DetectPrimitivesOp | DetectSymmetryOp | DetectClonesOp | SimplifyOp | StitchOp
-    | SetGeometryOp | SetFillOp | SetZOrderOp | CloneOp | SetSymmetryOp,
+    | SetGeometryOp | SetFillOp | SetZOrderOp | CloneOp | AlignOp | SetSymmetryOp,
     Field(discriminator="op"),
 ]
 
@@ -478,7 +510,7 @@ class RefinementPlanInput(_PlanSchema):
     label: str | None = Field(None, max_length=200, description="Optional human-readable branch label.")
     defaults: PlanDefaults = Field(default_factory=PlanDefaults, description="Default fitting tolerances for operations.")
     ops: list[PlanOp] = Field(
-        description="Ordered semantic transformations. IDs refer to the selected base version; use raw_trace command IDs only in path geometry.",
+        description="Ordered semantic transformations. IDs refer to the selected base version; path geometry uses retained segment IDs such as r1.p1.c14-1.",
         json_schema_extra={
             "examples": [[
                 {"op": "set_geometry", "target": "r1", "geometry": {"type": "circle"}},

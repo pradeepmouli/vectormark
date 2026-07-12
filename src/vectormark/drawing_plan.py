@@ -90,7 +90,6 @@ def validate_plan(plan: DrawingPlan, trace: TraceResult, regions: Sequence[Vecto
     target_ids = tuple(source_regions)
     commands = _target_commands(regions)
     known_targets = set(target_ids)
-    used_commands: set[str] = set()
     used_target_ids = set(target_ids)
     z_order_seen = False
     z_order: tuple[Mapping[object, object], str] | None = None
@@ -148,8 +147,10 @@ def validate_plan(plan: DrawingPlan, trace: TraceResult, regions: Sequence[Vecto
             _validate_set_symmetry_op(op, pointer, known_targets)
         elif name == "clone":
             _validate_clone_op(op, pointer, known_targets)
+        elif name == "align":
+            _validate_align_op(op, pointer, known_targets)
         elif name == "set_geometry":
-            _validate_geometry_op(op, pointer, known_targets, commands, used_commands)
+            _validate_geometry_op(op, pointer, known_targets, commands)
         elif name == "set_fill":
             _validate_fill_op(op, pointer, known_targets)
         elif name == "set_z_order":
@@ -171,7 +172,6 @@ def _validate_geometry_op(
     pointer: str,
     targets: set[str],
     commands: Mapping[str, tuple[str, int, int, TraceCommand]],
-    used_commands: set[str],
 ) -> None:
     _reject_unknown_keys(op, {"op", "target", "geometry"} | _TOLERANCE_KEYS, pointer)
     _tolerances(op, pointer)
@@ -194,7 +194,6 @@ def _validate_geometry_op(
         f"{pointer}/geometry/ops",
         commands,
         target,
-        used_commands,
     )
 
 
@@ -235,12 +234,38 @@ def _validate_clone_op(op: Mapping[object, object], pointer: str, targets: set[s
         raise PlanValidationError(f"{pointer}/target", "unknown target")
     if source == target:
         raise PlanValidationError(f"{pointer}/target", "must differ from source")
-    transform = op.get("transform")
+    _validate_transform(op.get("transform"), f"{pointer}/transform")
+
+
+def _validate_transform(transform: object, pointer: str) -> None:
     if not isinstance(transform, Sequence) or isinstance(transform, (str, bytes)) or len(transform) != 6:
-        raise PlanValidationError(f"{pointer}/transform", "must be a six-number affine matrix")
+        raise PlanValidationError(pointer, "must be a six-number affine matrix")
     for index, value in enumerate(transform):
         if not _finite_number(value):
-            raise PlanValidationError(f"{pointer}/transform/{index}", "must be a finite number")
+            raise PlanValidationError(f"{pointer}/{index}", "must be a finite number")
+
+
+def _validate_align_op(op: Mapping[object, object], pointer: str, targets: set[str]) -> None:
+    _reject_unknown_keys(op, {"op", "target", "reference", "axes"}, pointer)
+    target = _required_str(op, "target", pointer)
+    reference = _required_str(op, "reference", pointer)
+    if target not in targets:
+        raise PlanValidationError(f"{pointer}/target", "unknown target")
+    if reference not in targets:
+        raise PlanValidationError(f"{pointer}/reference", "unknown target")
+    if target == reference:
+        raise PlanValidationError(f"{pointer}/reference", "must differ from target")
+    _validate_axes(op.get("axes"), f"{pointer}/axes")
+
+
+def _validate_axes(value: object, pointer: str) -> tuple[str, ...]:
+    axes = _strings(value, pointer, nonempty=True)
+    if len(set(axes)) != len(axes):
+        raise PlanValidationError(f"{pointer}/{_first_repeat(axes)}", "axis is repeated")
+    for index, axis in enumerate(axes):
+        if axis not in {"x", "y"}:
+            raise PlanValidationError(f"{pointer}/{index}", "must be 'x' or 'y'")
+    return axes
 
 
 def _validate_axis(value: object, pointer: str) -> None:
@@ -256,83 +281,78 @@ def _validate_path_ops(
     pointer: str,
     commands: Mapping[str, tuple[str, int, int, TraceCommand]],
     target_id: str,
-    used_commands: set[str],
 ) -> None:
-    groups: set[str] = set()
     fitted: set[str] = set()
-    since_close = False
-    latest_fitted: str | None = None
+    segment_ids = {
+        f"{command_id}-1"
+        for command_id, record in commands.items()
+        if record[0] == target_id and record[3].command not in {"M", "Z"}
+    }
+    all_segment_ids = {
+        f"{command_id}-1"
+        for command_id, record in commands.items()
+        if record[3].command not in {"M", "Z"}
+    }
     broken: set[str] = set()
+    removed: set[str] = set()
     for index, raw_op in enumerate(path_ops):
         op_pointer = f"{pointer}/{index}"
         op = _mapping(raw_op, op_pointer)
         name = _required_str(op, "op", op_pointer)
-        if name == "group":
-            _reject_unknown_keys(op, {"op", "id", "commands"}, op_pointer)
-            group_id = _required_str(op, "id", op_pointer)
-            if group_id in groups:
-                raise PlanValidationError(f"{op_pointer}/id", "duplicate path group id")
-            selected = _strings(op.get("commands"), f"{op_pointer}/commands", nonempty=True)
-            records: list[tuple[str, int, int, TraceCommand]] = []
-            for command_index, command_id in enumerate(selected):
-                try:
-                    record = commands[command_id]
-                except KeyError:
-                    raise PlanValidationError(f"{op_pointer}/commands/{command_index}", "unknown retained-path command") from None
-                if record[0] != target_id:
-                    raise PlanValidationError(
-                        f"{op_pointer}/commands/{command_index}", "command is not owned by the target's retained path"
-                    )
-                if command_id in used_commands:
-                    raise PlanValidationError(
-                        f"{op_pointer}/commands/{command_index}", "trace command is already used by another path group"
-                    )
-                if record[3].command in {"M", "Z"}:
-                    raise PlanValidationError(f"{op_pointer}/commands/{command_index}", "M and Z commands cannot be grouped")
-                records.append(record)
-            for command_index in range(1, len(records)):
-                previous, current = records[command_index - 1], records[command_index]
-                if current[:3] != (previous[0], previous[1], previous[2] + 1):
-                    raise PlanValidationError(
-                        f"{op_pointer}/commands/{command_index}",
-                        "commands must be a contiguous run from one trace subpath",
-                    )
-            used_commands.update(selected)
-            groups.add(group_id)
-        elif name == "fit":
+        if name == "fit":
             _reject_unknown_keys(op, {"op", "target", "type"}, op_pointer)
             target = _required_str(op, "target", op_pointer)
-            if target not in groups:
-                raise PlanValidationError(f"{op_pointer}/target", "unknown or not-yet-defined path group")
+            if target not in segment_ids:
+                raise PlanValidationError(f"{op_pointer}/target", "unknown retained segment")
             if target in fitted:
-                raise PlanValidationError(f"{op_pointer}/target", "path group is already fitted")
+                raise PlanValidationError(f"{op_pointer}/target", "segment is already fitted")
             fit_type = _required_str(op, "type", op_pointer)
             if fit_type not in _FIT_TYPES:
                 raise PlanValidationError(f"{op_pointer}/type", "unsupported fit type")
             fitted.add(target)
-            since_close = True
-            latest_fitted = target
+        elif name == "remove":
+            _reject_unknown_keys(op, {"op", "target"}, op_pointer)
+            target = _required_str(op, "target", op_pointer)
+            if target not in segment_ids:
+                raise PlanValidationError(f"{op_pointer}/target", "unknown retained segment")
+            if target in removed:
+                raise PlanValidationError(f"{op_pointer}/target", "segment is already removed")
+            removed.add(target)
+        elif name in {"match", "set_parallel", "match_length", "align"}:
+            allowed = {"op", "target", "reference"}
+            if name == "align":
+                allowed.add("axes")
+            if name == "set_parallel":
+                allowed.add("distance")
+            if name == "match":
+                allowed.add("transform")
+            _reject_unknown_keys(op, allowed, op_pointer)
+            target = _required_str(op, "target", op_pointer)
+            reference = _required_str(op, "reference", op_pointer)
+            if target not in segment_ids:
+                raise PlanValidationError(f"{op_pointer}/target", "unknown retained segment")
+            if reference not in all_segment_ids:
+                raise PlanValidationError(f"{op_pointer}/reference", "unknown retained segment")
+            if name == "align":
+                _validate_axes(op.get("axes"), f"{op_pointer}/axes")
+            if name == "set_parallel" and "distance" in op and not _finite_number(op["distance"]):
+                raise PlanValidationError(f"{op_pointer}/distance", "must be a finite number")
+            if name == "match":
+                _validate_transform(op.get("transform"), f"{op_pointer}/transform")
         elif name == "break":
             _reject_unknown_keys(op, {"op", "target"}, op_pointer)
             target = _required_str(op, "target", op_pointer)
-            if target != latest_fitted or target in broken:
-                raise PlanValidationError(f"{op_pointer}/target", "break requires the current unbroken fitted path group")
+            if target not in fitted or target in broken:
+                raise PlanValidationError(f"{op_pointer}/target", "break requires an unbroken fitted segment")
             broken.add(target)
         elif name == "close":
             _reject_unknown_keys(op, {"op"}, op_pointer)
-            if not since_close:
-                raise PlanValidationError(op_pointer, "close requires a preceding fit")
-            since_close = False
-            latest_fitted = None
         elif name in {"simplify", "stitch"}:
             _reject_unknown_keys(op, {"op"}, op_pointer)
             if not fitted:
                 raise PlanValidationError(op_pointer, f"{name} requires a preceding fit")
         else:
             raise PlanValidationError(f"{op_pointer}/op", "unsupported path operation")
-    if groups - fitted:
-        missing = next(index for index, raw_op in enumerate(path_ops) if _path_group_id(raw_op) in groups - fitted)
-        raise PlanValidationError(f"{pointer}/{missing}/id", "path group requires a fit operation")
 
 
 def _validate_fill_op(op: Mapping[object, object], pointer: str, targets: set[str]) -> None:
@@ -517,13 +537,6 @@ def _first_repeat(items: Sequence[str]) -> int:
             return index
         seen.add(item)
     raise AssertionError("expected a repeated item")
-
-
-def _path_group_id(value: object) -> str | None:
-    if not isinstance(value, Mapping) or value.get("op") != "group":
-        return None
-    group_id = value.get("id")
-    return group_id if type(group_id) is str else None
 
 
 def _freeze(value: object) -> object:

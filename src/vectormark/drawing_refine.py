@@ -17,7 +17,7 @@ from .components import decompose_components
 from .contour import outer_contour, region_contours, region_corner_radius
 from .drawing_plan import DrawingPlan, PlanValidationError, validate_plan
 from .drawing_trace import TraceResult, svg_path_commands
-from .emit import render_svg_doc, resolve_fill, resolve_use_shape, shape_to_svg
+from .emit import apply_affine_point, render_svg_doc, resolve_fill, resolve_use_shape, shape_to_svg
 from .fit import Shape, _curved_run_d, _fmt, fit_path, recognize_polygon
 from .optimizer.vector_region import VectorRegion, to_polygon
 from .optimizer.framework import optimize
@@ -196,9 +196,15 @@ def drawing_summary(trace: TraceResult, regions: Sequence[VectorRegion]) -> dict
             geometry["d"] = shape.params["d"]
             if shape.params.get("fill_rule"):
                 geometry["fill_rule"] = shape.params["fill_rule"]
-            geometry["commands"] = [
+            commands = [
                 {"id": command.id, "command": command.command, "values": list(command.values)}
                 for command in svg_path_commands(str(shape.params["d"]), target.id)
+            ]
+            geometry["commands"] = commands
+            geometry["segments"] = [
+                {"id": f"{command['id']}-1", "source_commands": [command["id"]]}
+                for command in commands
+                if command["command"] not in {"M", "Z"}
             ]
         summaries.append(
             {
@@ -265,12 +271,22 @@ def refine(trace: TraceResult, base: Sequence[VectorRegion], plan: DrawingPlan) 
             regions = _set_symmetry(regions, op)
         elif name == "clone":
             regions = _clone(regions, op)
+        elif name == "align":
+            regions = _align(regions, op)
         elif name == "set_geometry":
-            target = _targets(regions)[op["target"]]
+            targets = _targets(regions)
+            target = targets[op["target"]]
             geometry = op["geometry"]
             try:
                 shape = (
-                    _path_shape(trace, target, geometry, epsilon=epsilon, max_error=max_error)
+                    _path_shape(
+                        trace,
+                        target,
+                        geometry,
+                        references=_segment_references(targets),
+                        epsilon=epsilon,
+                        max_error=max_error,
+                    )
                     if geometry["type"] == "path"
                     else _primitive_shape(target, geometry["type"], epsilon=epsilon, max_error=max_error)
                 )
@@ -286,7 +302,9 @@ def refine(trace: TraceResult, base: Sequence[VectorRegion], plan: DrawingPlan) 
                 ),
             )
             path_ops = geometry.get("ops", ()) if geometry["type"] == "path" else ()
-            if any(path_op["op"] == "simplify" for path_op in path_ops):
+            removed_segment = any(path_op["op"] == "remove" for path_op in path_ops)
+            explicit_break = any(path_op["op"] == "break" for path_op in path_ops)
+            if any(path_op["op"] == "simplify" for path_op in path_ops) or (removed_segment and not explicit_break):
                 regions = _run_detection(regions, trace, "simplify", target.id, epsilon=epsilon, max_error=max_error)
             if any(path_op["op"] == "stitch" for path_op in path_ops):
                 regions = _run_detection(regions, trace, "stitch", target.id, epsilon=epsilon, max_error=max_error)
@@ -607,6 +625,33 @@ def _with_z(region: VectorRegion, z: float) -> VectorRegion:
     return region.with_current(region.current, z=z, footprint=region.footprint)
 
 
+def _align(regions: Sequence[VectorRegion], op: Mapping[str, object]) -> DrawingRegions:
+    """Translate one retained region until its bounds center aligns with another."""
+    targets = _targets(regions)
+    target = targets[op["target"]]
+    reference = targets[op["reference"]]
+    if not isinstance(target.region.footprint, SkPath) or not isinstance(reference.region.footprint, SkPath):
+        raise ValueError("align requires polygonal vector-region footprints")
+    target_bounds = target.region.footprint.bounds
+    reference_bounds = reference.region.footprint.bounds
+    target_center = ((target_bounds[0] + target_bounds[2]) / 2, (target_bounds[1] + target_bounds[3]) / 2)
+    reference_center = ((reference_bounds[0] + reference_bounds[2]) / 2, (reference_bounds[1] + reference_bounds[3]) / 2)
+    axes = set(op["axes"])
+    dx = reference_center[0] - target_center[0] if "x" in axes else 0.0
+    dy = reference_center[1] - target_center[1] if "y" in axes else 0.0
+    assert target.region.current is not None
+    shape = bake_shape_transform(target.region.current, (1, 0, 0, 1, dx, dy))
+    return _replace_leaf(
+        regions,
+        target.id,
+        lambda region: region.with_current(
+            shape,
+            footprint=to_polygon(shape),
+            diagnostics={"align": {"reference": reference.id, "axes": tuple(sorted(axes))}},
+        ),
+    )
+
+
 def _primitive_shape(target: _Target, kind: str, *, epsilon: float, max_error: float) -> Shape:
     """Fit one public primitive from the target's retained root mask."""
     mask = target.region.raster
@@ -649,58 +694,174 @@ def _primitive_shape(target: _Target, kind: str, *, epsilon: float, max_error: f
     raise ValueError(f"target {target.id!r} is not a polygon within epsilon={epsilon}")
 
 
-def _command_start(commands: Sequence[object], command_id: str) -> tuple[float, float]:
-    for index, command in enumerate(commands):
-        if command.id == command_id:
-            previous = commands[index - 1]
-            return (float(previous.values[-2]), float(previous.values[-1]))
-    raise KeyError(command_id)
-
-
 def _path_shape(
     trace: TraceResult,
     target: _Target,
     geometry: Mapping[str, object],
     *,
+    references: Mapping[str, tuple[object, np.ndarray]],
     epsilon: float,
     max_error: float,
 ) -> Shape:
     assert target.region.current is not None and target.region.current.kind == "path"
     source_commands = svg_path_commands(str(target.region.current.params["d"]), target.id)
-    command_map = {command.id: command for command in source_commands}
-    groups: dict[str, list[object]] = {}
+    return _path_shape_from_segment_fits(
+        target,
+        source_commands,
+        geometry,
+        references=references,
+        epsilon=epsilon,
+        max_error=max_error,
+    )
+
+
+def _path_shape_from_segment_fits(
+    target: _Target,
+    commands: Sequence[object],
+    geometry: Mapping[str, object],
+    *,
+    references: Mapping[str, tuple[object, np.ndarray]],
+    epsilon: float,
+    max_error: float,
+) -> Shape:
+    """Apply direct ``command-id-1`` fits without dropping untouched path geometry."""
+    fits = {
+        op["target"]: op["type"]
+        for op in geometry["ops"]
+        if op["op"] == "fit"
+    }
+    length_matches = {
+        op["target"]: op["reference"]
+        for op in geometry["ops"]
+        if op["op"] == "match_length"
+    }
+    matches = {
+        op["target"]: (op["reference"], tuple(op["transform"]))
+        for op in geometry["ops"]
+        if op["op"] == "match"
+    }
+    parallels = {
+        op["target"]: (op["reference"], op.get("distance"))
+        for op in geometry["ops"]
+        if op["op"] == "set_parallel"
+    }
+    alignments = {
+        op["target"]: (op["reference"], set(op["axes"]))
+        for op in geometry["ops"]
+        if op["op"] == "align"
+    }
+    removals = {op["target"] for op in geometry["ops"] if op["op"] == "remove"}
+    values_by_command = {command.id: tuple(command.values) for command in commands}
+    parallel_lines: set[str] = set()
+    for index, command in enumerate(commands):
+        segment_id = f"{command.id}-1"
+        if segment_id not in parallels:
+            continue
+        reference_id, requested_distance = parallels[segment_id]
+        reference_command, reference_start = references[reference_id]
+        reference_vector = np.asarray(reference_command.values[-2:], dtype=float) - reference_start
+        reference_length = float(np.linalg.norm(reference_vector))
+        if reference_length == 0.0:
+            raise ValueError(f"cannot make a segment parallel to zero-length {reference_command.id!r}")
+        unit = reference_vector / reference_length
+        normal = np.array([-unit[1], unit[0]])
+        previous = commands[index - 1]
+        start = np.asarray(values_by_command[previous.id][-2:], dtype=float)
+        values = values_by_command[command.id]
+        samples = np.array([start, *[values[offset:offset + 2] for offset in range(0, len(values), 2)]], dtype=float)
+        segment_length = float(np.linalg.norm(np.diff(samples, axis=0), axis=1).sum())
+        if segment_length == 0.0:
+            raise ValueError(f"cannot fit zero-length segment {command.id!r} as parallel")
+        along = (samples - reference_start) @ unit
+        distance = float(requested_distance) if requested_distance is not None else float(((samples - reference_start) @ normal).mean())
+        fitted_start = reference_start + unit * (float(along.mean()) - segment_length / 2) + normal * distance
+        fitted_end = reference_start + unit * (float(along.mean()) + segment_length / 2) + normal * distance
+        previous_values = list(values_by_command[previous.id])
+        previous_values[-2:] = [float(fitted_start[0]), float(fitted_start[1])]
+        values_by_command[previous.id] = tuple(previous_values)
+        values_by_command[command.id] = (float(fitted_end[0]), float(fitted_end[1]))
+        parallel_lines.add(command.id)
     pieces: list[str] = []
-    current: np.ndarray | None = None
-    for op in geometry["ops"]:
-        if op["op"] == "group":
-            groups[op["id"]] = [command_map[command_id] for command_id in op["commands"]]
-        elif op["op"] == "fit":
-            commands = groups[op["target"]]
-            start = _command_start(source_commands, commands[0].id)
-            points = np.array([start] + [(command.values[-2], command.values[-1]) for command in commands], dtype=float)
-            if current is None:
-                pieces.append(f"M{_fmt(start[0])} {_fmt(start[1])}")
-            elif not np.allclose(current, points[0]):
-                raise ValueError("path group must continue the current subpath or follow a close operation")
-            kind = op["type"]
-            if kind == "line":
-                pieces.append(f"L{_fmt(points[-1, 0])} {_fmt(points[-1, 1])}")
-            elif kind == "keep":
-                body = " ".join(command.command + " ".join(_fmt(value) for value in command.values) for command in commands)
-                pieces.append(body)
-            else:
-                pieces.append(_curved_run_d(points, max_error, cubic=kind == "cubic", line_epsilon=epsilon).strip())
-            current = points[-1]
-        elif op["op"] == "close":
-            if current is None:
-                raise ValueError("close requires an open fitted subpath")
+    current: tuple[float, float] | None = None
+    subpath_start: tuple[float, float] | None = None
+    for index, command in enumerate(commands):
+        if command.command == "M":
+            values = values_by_command[command.id]
+            pieces.append(f"M{_fmt(values[0])} {_fmt(values[1])}")
+            current = (float(values[0]), float(values[1]))
+            subpath_start = current
+            continue
+        if command.command == "Z":
             pieces.append("Z")
-            current = None
-    d = " ".join(pieces)
-    params: dict[str, object] = {"d": d}
-    if target.region.current is not None and (fill_rule := target.region.current.params.get("fill_rule")) is not None:
+            current = subpath_start
+            continue
+        if f"{command.id}-1" in removals:
+            continue
+        if current is None:
+            raise ValueError("path segment appears before its move command")
+        start = current
+        kind = fits.get(f"{command.id}-1", "keep")
+        output_command = "L" if command.id in parallel_lines else command.command
+        values = values_by_command[command.id]
+        if (match := matches.get(f"{command.id}-1")) is not None:
+            reference_id, matrix = match
+            reference_command, _ = references[reference_id]
+            values = tuple(
+                coordinate
+                for point in zip(reference_command.values[::2], reference_command.values[1::2], strict=True)
+                for coordinate in apply_affine_point(matrix, float(point[0]), float(point[1]))
+            )
+            output_command = reference_command.command
+        if (reference_id := length_matches.get(f"{command.id}-1")) is not None:
+            _, reference_start = references[reference_id]
+            reference_command = references[reference_id][0]
+            reference_vector = np.asarray(reference_command.values[-2:], dtype=float) - reference_start
+            target_vector = np.asarray(values[-2:], dtype=float) - np.asarray(start, dtype=float)
+            target_length = float(np.linalg.norm(target_vector))
+            if target_length == 0.0:
+                raise ValueError(f"cannot match length of zero-length segment {command.id!r}")
+            scale = float(np.linalg.norm(reference_vector)) / target_length
+            values = tuple(
+                float(start[coordinate % 2]) + (value - start[coordinate % 2]) * scale
+                for coordinate, value in enumerate(values)
+            )
+        if (alignment := alignments.get(f"{command.id}-1")) is not None:
+            reference_id, axes = alignment
+            reference_command, _ = references[reference_id]
+            aligned = list(values)
+            if "x" in axes:
+                aligned[-2] = float(reference_command.values[-2])
+            if "y" in axes:
+                aligned[-1] = float(reference_command.values[-1])
+            values = tuple(aligned)
+        if kind == "line":
+            pieces.append(f"L{_fmt(values[-2])} {_fmt(values[-1])}")
+        elif kind == "keep":
+            pieces.append(output_command + " ".join(_fmt(value) for value in values))
+        else:
+            points = np.array([start, values[-2:]], dtype=float)
+            pieces.append(_curved_run_d(points, max_error, cubic=kind == "cubic", line_epsilon=epsilon).strip())
+        current = (float(values[-2]), float(values[-1]))
+    params: dict[str, object] = {"d": " ".join(pieces)}
+    assert target.region.current is not None
+    if (fill_rule := target.region.current.params.get("fill_rule")) is not None:
         params["fill_rule"] = fill_rule
     return Shape("path", params)
+
+
+def _segment_references(targets: Mapping[str, _Target]) -> dict[str, tuple[object, np.ndarray]]:
+    """Index retained command segments for cross-region path constraints."""
+    references: dict[str, tuple[object, np.ndarray]] = {}
+    for target in targets.values():
+        assert target.region.current is not None
+        if target.region.current.kind != "path":
+            continue
+        commands = svg_path_commands(str(target.region.current.params["d"]), target.id)
+        for index, command in enumerate(commands):
+            if command.command in {"M", "Z"}:
+                continue
+            references[f"{command.id}-1"] = (command, np.asarray(commands[index - 1].values[-2:], dtype=float))
+    return references
 
 
 def _tolerances(trace: TraceResult, plan: DrawingPlan, op: Mapping[str, object]) -> tuple[float, float]:

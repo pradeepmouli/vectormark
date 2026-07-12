@@ -2,13 +2,14 @@ import math
 from pathlib import Path
 
 import numpy as np
+import pytest
 from PIL import Image
 
 from vectormark.drawing_plan import parse_plan
 from vectormark import drawing_refine
 from vectormark.drawing_refine import drawing_summary, refine, render_drawing, root_regions
 from vectormark.drawing_state import DrawingStore
-from vectormark.drawing_trace import PythonTraceEngine, TraceCommand, TraceOptions, TracePath, TraceRegion, TraceResult
+from vectormark.drawing_trace import PythonTraceEngine, TraceCommand, TraceOptions, TracePath, TraceRegion, TraceResult, svg_path_commands
 from vectormark.candidate import FlatFill
 from vectormark.fit import Shape
 from vectormark.optimizer.vector_region import VectorRegion
@@ -63,6 +64,18 @@ def test_root_regions_surface_merge_soft_gradient_bands_and_keep_raw_provenance(
     assert any(len(region.source_regions) > 1 for region in regions)
     assert len(summary["regions"]) == len(regions)
     assert all("geometry" in region and "source_regions" in region for region in summary["regions"])
+
+
+def test_drawing_summary_emits_canonical_segment_children_for_each_path_command():
+    trace = PythonTraceEngine().trace(_disk(), TraceOptions())
+    summary = drawing_summary(trace, root_regions(trace))
+    geometry = summary["regions"][0]["geometry"]
+
+    commands = [command for command in geometry["commands"] if command["command"] not in {"M", "Z"}]
+    assert geometry["segments"] == [
+        {"id": f"{command['id']}-1", "source_commands": [command["id"]]}
+        for command in commands
+    ]
 
 
 def test_refine_uses_declared_z_order():
@@ -139,7 +152,7 @@ def test_merge_accepts_a_child_region_target_and_removes_it_from_its_parent_tree
 
 def test_path_local_simplify_and_stitch_run_after_the_requested_path_is_fitted():
     trace = PythonTraceEngine().trace(_disk(), TraceOptions())
-    commands = [command.id for command in trace.regions[0].trace_path.commands if command.command not in {"M", "Z"}]
+    command = next(command for command in trace.regions[0].trace_path.commands if command.command not in {"M", "Z"})
     plan = parse_plan({"version": "vectormark.plan.v1", "drawing_id": "drw_x", "base_version": "v0", "ops": [
         {
             "op": "set_geometry",
@@ -147,8 +160,7 @@ def test_path_local_simplify_and_stitch_run_after_the_requested_path_is_fitted()
             "geometry": {
                 "type": "path",
                 "ops": [
-                    {"op": "group", "id": "s1", "commands": commands},
-                    {"op": "fit", "target": "s1", "type": "quadratic"},
+                    {"op": "fit", "target": f"{command.id}-1", "type": "quadratic"},
                     {"op": "simplify"},
                     {"op": "stitch"},
                     {"op": "close"},
@@ -190,11 +202,13 @@ def test_path_geometry_preserves_compound_subpaths_and_evenodd_fill_rule():
     )
     plan = parse_plan({"version": "vectormark.plan.v1", "drawing_id": "drw_x", "base_version": "v0", "ops": [
         {"op": "set_geometry", "target": "r1", "geometry": {"type": "path", "ops": [
-            {"op": "group", "id": "outer", "commands": ["r1.p0.c1", "r1.p0.c2", "r1.p0.c3"]},
-            {"op": "fit", "target": "outer", "type": "keep"},
+            {"op": "fit", "target": "r1.p0.c1-1", "type": "keep"},
+            {"op": "fit", "target": "r1.p0.c2-1", "type": "keep"},
+            {"op": "fit", "target": "r1.p0.c3-1", "type": "keep"},
             {"op": "close"},
-            {"op": "group", "id": "inner", "commands": ["r1.p1.c1", "r1.p1.c2", "r1.p1.c3"]},
-            {"op": "fit", "target": "inner", "type": "keep"},
+            {"op": "fit", "target": "r1.p1.c1-1", "type": "keep"},
+            {"op": "fit", "target": "r1.p1.c2-1", "type": "keep"},
+            {"op": "fit", "target": "r1.p1.c3-1", "type": "keep"},
             {"op": "close"},
         ]}},
     ]})
@@ -206,9 +220,176 @@ def test_path_geometry_preserves_compound_subpaths_and_evenodd_fill_rule():
     assert refined[0].current.params["d"] == "M0 0 L10 0 L10 10 L0 10 Z M2 2 L8 2 L8 8 L2 8 Z"
 
 
+def test_path_fit_addresses_a_segment_child_and_preserves_unedited_retained_geometry():
+    trace = PythonTraceEngine().trace(_disk(), TraceOptions())
+    root = root_regions(trace)[0]
+    assert root.current is not None
+    original = root.current.params["d"]
+    line_command = next(command for command in svg_path_commands(original, "r1") if command.command == "Q")
+    plan = parse_plan({"version": "vectormark.plan.v1", "drawing_id": "drw_x", "base_version": "v0", "ops": [
+        {"op": "set_geometry", "target": "r1", "geometry": {"type": "path", "ops": [
+            {"op": "fit", "target": f"{line_command.id}-1", "type": "line"},
+        ]}},
+    ]})
+
+    refined = refine(trace, (root,), plan)
+
+    assert refined[0].current is not None
+    assert refined[0].current.params["d"].count("M") == original.count("M")
+    assert refined[0].current.params["d"].count("Z") == original.count("Z")
+    assert "L" in refined[0].current.params["d"]
+
+
+def test_path_match_length_uses_another_retained_segment_as_its_reference():
+    path = TracePath(
+        d="M0 0 L10 0 L10 4 Z",
+        fill_rule="nonzero",
+        commands=(
+            TraceCommand("r1.p0.c0", "M", (0.0, 0.0)),
+            TraceCommand("r1.p0.c1", "L", (10.0, 0.0)),
+            TraceCommand("r1.p0.c2", "L", (10.0, 4.0)),
+            TraceCommand("r1.p0.c3", "Z", ()),
+        ),
+    )
+    trace = TraceResult(
+        12, 12, TraceOptions(),
+        (TraceRegion("r1", 1, "#0064F0", np.ones((12, 12), dtype=bool), (), path, "pixel"),),
+        "<svg/>",
+    )
+    root = VectorRegion.from_shape(
+        id=1, shape=Shape("path", {"d": path.d}), fill=FlatFill("#0064F0"), z=0,
+        raster=np.ones((12, 12), dtype=bool), drawing_id="r1", source_regions=("r1",),
+    )
+    plan = parse_plan({"version": "vectormark.plan.v1", "drawing_id": "drw_x", "base_version": "v0", "ops": [
+        {"op": "set_geometry", "target": "r1", "geometry": {"type": "path", "ops": [
+            {"op": "match_length", "target": "r1.p0.c2-1", "reference": "r1.p0.c1-1"},
+        ]}},
+    ]})
+
+    refined = refine(trace, (root,), plan)
+
+    assert refined[0].current is not None
+    assert refined[0].current.params["d"] == "M0 0 L10 0 L10 10 Z"
+
+
+@pytest.mark.parametrize(
+    ("path_op", "expected_d"),
+    [
+        ({"op": "match", "target": "r1.p0.c2-1", "reference": "r1.p0.c1-1", "transform": [1, 0, 0, 1, 6, 0]}, "M0 0 L6 0 L12 0 Z"),
+        ({"op": "set_parallel", "target": "r1.p0.c2-1", "reference": "r1.p0.c1-1"}, "M0 0 L4.5 1.5 L7.5 1.5 Z"),
+        ({"op": "align", "target": "r1.p0.c2-1", "reference": "r1.p0.c1-1", "axes": ["y"]}, "M0 0 L6 0 L6 0 Z"),
+    ],
+)
+def test_path_constraints_reconstruct_a_segment_from_a_retained_reference(path_op, expected_d):
+    path = TracePath(
+        d="M0 0 L6 0 L6 3 Z",
+        fill_rule="nonzero",
+        commands=(
+            TraceCommand("r1.p0.c0", "M", (0.0, 0.0)),
+            TraceCommand("r1.p0.c1", "L", (6.0, 0.0)),
+            TraceCommand("r1.p0.c2", "L", (6.0, 3.0)),
+            TraceCommand("r1.p0.c3", "Z", ()),
+        ),
+    )
+    trace = TraceResult(
+        12, 12, TraceOptions(),
+        (TraceRegion("r1", 1, "#0064F0", np.ones((12, 12), dtype=bool), (), path, "pixel"),),
+        "<svg/>",
+    )
+    root = VectorRegion.from_shape(
+        id=1, shape=Shape("path", {"d": path.d}), fill=FlatFill("#0064F0"), z=0,
+        raster=np.ones((12, 12), dtype=bool), drawing_id="r1", source_regions=("r1",),
+    )
+    plan = parse_plan({"version": "vectormark.plan.v1", "drawing_id": "drw_x", "base_version": "v0", "ops": [
+        {"op": "set_geometry", "target": "r1", "geometry": {"type": "path", "ops": [path_op]}},
+    ]})
+
+    refined = refine(trace, (root,), plan)
+
+    assert refined[0].current is not None
+    assert refined[0].current.params["d"] == expected_d
+
+
+def test_path_remove_joins_the_surviving_segments():
+    path = TracePath(
+        d="M0 0 L6 0 L6 3 L0 3 Z",
+        fill_rule="nonzero",
+        commands=(
+            TraceCommand("r1.p0.c0", "M", (0.0, 0.0)),
+            TraceCommand("r1.p0.c1", "L", (6.0, 0.0)),
+            TraceCommand("r1.p0.c2", "L", (6.0, 3.0)),
+            TraceCommand("r1.p0.c3", "L", (0.0, 3.0)),
+            TraceCommand("r1.p0.c4", "Z", ()),
+        ),
+    )
+    trace = TraceResult(
+        12, 12, TraceOptions(),
+        (TraceRegion("r1", 1, "#0064F0", np.ones((12, 12), dtype=bool), (), path, "pixel"),),
+        "<svg/>",
+    )
+    root = VectorRegion.from_shape(
+        id=1, shape=Shape("path", {"d": path.d}), fill=FlatFill("#0064F0"), z=0,
+        raster=np.ones((12, 12), dtype=bool), drawing_id="r1", source_regions=("r1",),
+    )
+    plan = parse_plan({"version": "vectormark.plan.v1", "drawing_id": "drw_x", "base_version": "v0", "ops": [
+        {"op": "set_geometry", "target": "r1", "geometry": {"type": "path", "ops": [
+            {"op": "remove", "target": "r1.p0.c2-1"},
+        ]}},
+    ]})
+
+    refined = refine(trace, (root,), plan)
+
+    assert refined[0].current is not None
+    assert refined[0].current.params["d"] == "M0 0 L6 0 L0 3 Z"
+
+
+def test_path_remove_schedules_post_fit_simplification_unless_marked_as_a_break(monkeypatch):
+    trace = PythonTraceEngine().trace(_disk(), TraceOptions())
+    root = root_regions(trace)[0]
+    assert root.current is not None
+    removable = next(command for command in svg_path_commands(root.current.params["d"], "r1") if command.command not in {"M", "Z"})
+    calls: list[str] = []
+
+    def record_smoothing(regions, trace, operation, target_id, *, epsilon, max_error):
+        calls.append(operation)
+        return tuple(regions)
+
+    monkeypatch.setattr(drawing_refine, "_run_detection", record_smoothing)
+    plan = parse_plan({"version": "vectormark.plan.v1", "drawing_id": "drw_x", "base_version": "v0", "ops": [
+        {"op": "set_geometry", "target": "r1", "geometry": {"type": "path", "ops": [
+            {"op": "remove", "target": f"{removable.id}-1"},
+        ]}},
+    ]})
+
+    refine(trace, (root,), plan)
+
+    assert calls == ["simplify"]
+
+
+def test_align_centers_one_retained_region_on_another_along_selected_axes():
+    trace = PythonTraceEngine().trace(_two_regions(), TraceOptions())
+    left = VectorRegion.from_shape(
+        id=1, shape=Shape("rect", {"x": 0, "y": 0, "w": 10, "h": 10}), fill=FlatFill("#0064F0"), z=0,
+        raster=np.ones((10, 10), dtype=bool), drawing_id="r1", source_regions=("r1",),
+    )
+    right = VectorRegion.from_shape(
+        id=2, shape=Shape("rect", {"x": 20, "y": 30, "w": 4, "h": 6}), fill=FlatFill("#F06400"), z=1,
+        raster=np.ones((10, 10), dtype=bool), drawing_id="r2", source_regions=("r2",),
+    )
+    plan = parse_plan({"version": "vectormark.plan.v1", "drawing_id": "drw_x", "base_version": "v0", "ops": [
+        {"op": "align", "target": "r2", "reference": "r1", "axes": ["x", "y"]},
+    ]})
+
+    refined = refine(trace, (left, right), plan)
+
+    aligned = next(region for region in refined if region.drawing_id == "r2")
+    assert aligned.current is not None
+    assert aligned.current.params["d"] == "M 3 2 L 7 2 L 7 8 L 3 8 Z"
+
+
 def test_plan_tolerances_apply_defaults_then_an_operation_override(monkeypatch):
     trace = PythonTraceEngine().trace(_disk(), TraceOptions())
-    commands = [command.id for command in trace.regions[0].trace_path.commands if command.command not in {"M", "Z"}]
+    command = next(command for command in trace.regions[0].trace_path.commands if command.command not in {"M", "Z"})
     observed: list[tuple[float, float]] = []
     original_curved_run = drawing_refine._curved_run_d
 
@@ -220,8 +401,7 @@ def test_plan_tolerances_apply_defaults_then_an_operation_override(monkeypatch):
     plan = parse_plan({"version": "vectormark.plan.v1", "drawing_id": "drw_x", "base_version": "v0",
         "defaults": {"epsilon": 0.25, "max_error": 0.75}, "ops": [
             {"op": "set_geometry", "target": "r1", "epsilon": 0.5, "geometry": {"type": "path", "ops": [
-                {"op": "group", "id": "s1", "commands": commands},
-                {"op": "fit", "target": "s1", "type": "quadratic"},
+                {"op": "fit", "target": f"{command.id}-1", "type": "quadratic"},
                 {"op": "close"},
             ]}},
         ]})

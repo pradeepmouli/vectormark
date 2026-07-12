@@ -212,7 +212,8 @@ def test_stdio_server_exposes_only_the_drawing_first_surface():
     plan_schema = refine_schema["$defs"]["RefinementPlanInput"]
     assert "oneOf" in plan_schema["properties"]["ops"]["items"]
     assert "set_geometry" in str(refine_schema)
-    assert "group" in str(refine_schema)
+    assert "r1.p1.c14-1" in str(refine_schema)
+    assert "match_length" in str(refine_schema)
     assert "quadratic" in str(refine_schema)
     for tool_name in ("trace_drawing", "refine_drawing", "get_drawing_artifact", "render_drawing"):
         assert tools[tool_name].outputSchema is not None
