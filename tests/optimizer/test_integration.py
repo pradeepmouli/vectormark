@@ -201,10 +201,10 @@ def test_optimizer_simplifies_compound_children_after_split():
     assert sum(leaf.current.params["d"].count("L") for leaf in cutout_leaves) < hole.count("L")
 
 
-def test_optimizer_recolored_clone_keeps_target_fill_without_use_override():
+def test_optimizer_recolored_clone_retains_a_use_with_its_own_fill():
     svg = idealize(_two_colored_square_image(), options=Options(optimizer=True))
 
-    assert "<use" not in svg
+    assert '<use id="s1" href="#s0"' in svg
     assert 'fill="#112233"' in svg
     assert 'fill="#ABCDEF"' in svg
 
@@ -299,9 +299,7 @@ def test_optimizer_pipeline_reconstructs_mastercard_as_scene_branch():
     assert diagnostics["optimizer_fallback"] is None
     assert diagnostics["optimizer_regions"][0]["kind"] == "branch"
     assert diagnostics["optimizer_regions"][0]["children"] == 3
-    assert [obj["shape"] for obj in diagnostics["optimizer_objects"]] == ["circle", "use", "path", "path"]
-    assert diagnostics["optimizer_objects"][2]["diagnostics"]["symmetry"]["mode"] == "self"
-    assert diagnostics["optimizer_objects"][3]["diagnostics"]["symmetry"]["mode"] == "self_mirror"
+    assert [obj["shape"] for obj in diagnostics["optimizer_objects"]] == ["circle", "use", "path"]
 
 
 def test_optimizer_inlines_same_gradient_fill_mirror_to_preserve_paint_space():

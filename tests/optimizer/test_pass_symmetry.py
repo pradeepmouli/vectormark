@@ -106,7 +106,7 @@ def test_symmetry_pass_forwards_cubic_path_option_to_self_fit():
     assert "C" in str(out[0].children[0].current.params["d"])
 
 
-def test_symmetry_pass_uses_fit_path_when_trapezoid_fitter_is_unavailable(monkeypatch):
+def test_symmetry_pass_rejects_inaccurate_fallback_when_trapezoid_fitter_is_unavailable(monkeypatch):
     import vectormark.optimizer.passes.symmetry as symmetry_module
 
     monkeypatch.setattr(symmetry_module, "rounded_trapezoid_half_fit", lambda *args, **kwargs: None)
@@ -136,12 +136,8 @@ def test_symmetry_pass_uses_fit_path_when_trapezoid_fitter_is_unavailable(monkey
         [lambda objects, masks: symmetry_pass(objects, masks, epsilon=1.0, max_error=1.0, cubic=True)],
     )
 
-    assert out[0].is_branch
-    source = out[0].children[0]
-    minx, miny, maxx, maxy = source.footprint.bounds
-    assert maxx - minx > 70.0
-    assert maxy - miny > 40.0
-    assert source.current.params["d"].count("L") <= 3
+    assert out[0].is_leaf
+    assert out[0].current == shape
 
 
 def test_symmetry_pass_smooths_daikonic_like_cap_instead_of_preserving_facets():
@@ -269,6 +265,9 @@ def test_symmetry_pass_reconstructs_gradient_self_symmetry_as_internal_branch():
     assert len(out) == 1
     assert out[0].is_branch
     assert [child.current.kind for child in out[0].children] == ["path", "use"]
+    source = out[0].children[0]
+    assert source.current is not None
+    assert source.footprint.symmetric_difference(to_polygon(source.current)).area < 1e-6
     assert out[0].diagnostics["symmetry"]["mode"] == "self"
     assert out[0].diagnostics["symmetry"]["accepted"] is True
 

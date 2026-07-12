@@ -13,7 +13,7 @@ from ...refine import fit_path_half_fit, half_ellipse_cap_half_fit, rounded_trap
 from ..framework import Proposal
 from ..gate import rasterize
 from ..shape_transform import bake_shape_transform
-from ..vector_region import VectorRegion
+from ..vector_region import VectorRegion, _parse_subpaths, to_polygon
 
 Axis2D = namedtuple("Axis2D", "theta cx cy")
 
@@ -89,6 +89,65 @@ def _apply_svg_matrix(
 
 def _reflect_flat(flat: SkPath, axis: Axis2D) -> SkPath:
     return _apply_svg_matrix(flat, _svg_reflection_matrix(axis))
+
+
+def _project_to_axis(point: tuple[float, float], axis: Axis2D) -> tuple[float, float]:
+    """Orthogonally project a point onto a symmetry axis."""
+    ux, uy = math.cos(float(axis.theta)), math.sin(float(axis.theta))
+    dx, dy = point[0] - float(axis.cx), point[1] - float(axis.cy)
+    distance = dx * ux + dy * uy
+    return (float(axis.cx) + distance * ux, float(axis.cy) + distance * uy)
+
+
+def _endpoint_indices(command: str) -> tuple[int, int] | None:
+    return {
+        "M": (0, 1),
+        "L": (0, 1),
+        "Q": (2, 3),
+        "C": (4, 5),
+        "A": (5, 6),
+    }.get(command)
+
+
+def _pin_half_shape_to_axis(shape: Shape, axis: Axis2D, *, tolerance: float = 2.0) -> Shape | None:
+    """Make a fitted half close exactly along its symmetry axis.
+
+    The fitters intentionally focus on the exterior boundary.  Their closure
+    points can still be sub-pixel-adjacent to the cut, which becomes a visible
+    gap after mirroring.  Project only the start and final endpoint; SVG's Z
+    then supplies a perfectly straight, coincident axis edge for Skia to union.
+    """
+    if shape.kind != "path":
+        return None
+    subpaths = _parse_subpaths(str(shape.params.get("d", "")))
+    if len(subpaths) != 1 or len(subpaths[0]) < 3 or subpaths[0][0][0] != "M":
+        return None
+
+    commands = [(command, list(values)) for command, values in subpaths[0]]
+    final_index = next((index for index in range(len(commands) - 1, -1, -1) if _endpoint_indices(commands[index][0]) is not None), None)
+    if final_index is None or final_index == 0:
+        return None
+
+    def pin(index: int) -> bool:
+        command, values = commands[index]
+        endpoint = _endpoint_indices(command)
+        assert endpoint is not None
+        current = (float(values[endpoint[0]]), float(values[endpoint[1]]))
+        projected = _project_to_axis(current, axis)
+        if math.dist(current, projected) > tolerance:
+            return False
+        values[endpoint[0]], values[endpoint[1]] = projected
+        return True
+
+    if not pin(0) or not pin(final_index):
+        return None
+
+    def command_d(command: str, values: list[float]) -> str:
+        return command if not values else f"{command}{' '.join(_fmt(value) for value in values)}"
+
+    params = dict(shape.params)
+    params["d"] = " ".join(command_d(command, values) for command, values in commands)
+    return Shape("path", params)
 
 
 def _orientation_axes(flat: SkPath) -> list[float]:
@@ -243,10 +302,17 @@ def _self_symmetry_branch(
     mask_shape: tuple[int, int],
 ) -> VectorRegion:
     matrix = _svg_reflection_matrix(axis)
+    half_shape = _pin_half_shape_to_axis(half_shape, axis) or half_shape
+    fitted_half = to_polygon(half_shape)
+    if fitted_half.is_empty:
+        fitted_half = half
+    fitted_reflected_half = _apply_svg_matrix(fitted_half, matrix)
+    if fitted_reflected_half.is_empty:
+        fitted_reflected_half = reflected_half
     source = obj.with_current(
         half_shape,
-        footprint=half,
-        raster=rasterize(half, mask_shape),
+        footprint=fitted_half,
+        raster=rasterize(fitted_half, mask_shape),
         diagnostics=_self_symmetry_diagnostics(axis, residual),
     )
     mirror = VectorRegion(
@@ -260,8 +326,8 @@ def _self_symmetry_branch(
         ),
         obj.fill,
         obj.z + _SELF_MIRROR_Z_OFFSET,
-        footprint=reflected_half,
-        raster=rasterize(reflected_half, mask_shape),
+        footprint=fitted_reflected_half,
+        raster=rasterize(fitted_reflected_half, mask_shape),
         source_label=obj.source_label,
         color_hex=obj.color_hex,
         diagnostics={
@@ -278,7 +344,7 @@ def _self_symmetry_branch(
             }
         },
     )
-    reconstructed = unary_union([half, reflected_half])
+    reconstructed = unary_union([fitted_half, fitted_reflected_half])
     return VectorRegion.branch(
         id=obj.id,
         children=[source, mirror],
@@ -476,7 +542,17 @@ def _best_self_reconstruction(
             shape = _fit_geometry_to_path_shape(half, epsilon=epsilon, max_error=max_error, cubic=cubic)
         if shape is None:
             continue
-        candidates.append((_residual(reconstructed, flat), axis, half, reflected_half, shape))
+        shape = _pin_half_shape_to_axis(shape, axis)
+        if shape is None:
+            continue
+        fitted_half = to_polygon(shape)
+        if fitted_half.is_empty:
+            continue
+        fitted_reconstructed = unary_union([fitted_half, _reflect_flat(fitted_half, axis)])
+        fitted_residual = _residual(fitted_reconstructed, flat)
+        if fitted_residual > _SELF_RESIDUAL_TOL:
+            continue
+        candidates.append((fitted_residual, axis, half, reflected_half, shape))
 
     if not candidates:
         return None
