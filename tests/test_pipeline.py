@@ -7,6 +7,23 @@ from vectormark.pipeline import Options, _render_optimizer_body, _segment_image,
 from tests._render import render_svg, ssim
 
 
+def test_segment_image_honors_absolute_min_region_size():
+    image = np.full((12, 12, 3), 255, dtype=np.uint8)
+    image[3:5, 3:5] = (20, 80, 220)  # four-pixel component
+
+    _width, _height, retained = _segment_image(
+        image,
+        Options(max_colors=2, min_region_size=4, min_region_fraction=0),
+    )
+    _width, _height, filtered = _segment_image(
+        image,
+        Options(max_colors=2, min_region_size=5, min_region_fraction=0),
+    )
+
+    assert len(retained) == 1
+    assert filtered == []
+
+
 def _path_points(d):
     import re
 

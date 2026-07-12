@@ -132,6 +132,54 @@ def test_trace_auto_returns_a_one_shot_svg_without_live_state():
     assert "drawing_id" not in result
 
 
+def test_trace_auto_threads_trace_controls_into_idealize_options(monkeypatch):
+    captured = {}
+
+    def capture(_image, options):
+        captured["options"] = options
+        return SimpleNamespace(structuredContent={"svg": "<svg />"})
+
+    monkeypatch.setattr(mcp_server_module, "idealize_logo", capture)
+    trace_drawing(
+        ImageRef(data_uri=_png_data_uri()),
+        TraceDrawingOptions(
+            refine="auto",
+            max_colors=9,
+            min_region_size=37,
+            min_region_fraction=0.125,
+            simplify_tolerance=2.25,
+            curve_tolerance=0.75,
+        ),
+        SimpleNamespace(session=object()),
+    )
+
+    options = captured["options"]
+    assert options.colors == 9
+    assert options.min_region_size == 37
+    assert options.min_region_fraction == 0.125
+    assert options.epsilon == 2.25
+    assert options.max_error == 0.75
+
+
+def test_idealize_logo_threads_region_thresholds_into_pipeline_options(monkeypatch):
+    captured = {}
+
+    def capture(_rgb, *, options):
+        captured["options"] = options
+        return '<svg xmlns="http://www.w3.org/2000/svg"/>'
+
+    monkeypatch.setattr(mcp_server_module, "idealize", capture)
+    mcp_server_module.idealize_logo_image(
+        {"data_uri": _png_data_uri()},
+        {"min_region_size": 37, "min_region_fraction": 0.125},
+        local_trust=True,
+    )
+
+    options = captured["options"]
+    assert options.min_region_size == 37
+    assert options.min_region_fraction == 0.125
+
+
 def test_render_drawing_accepts_widget_result_shape():
     result = {"svg": "<svg>x</svg>", "width": 10, "height": 12}
 

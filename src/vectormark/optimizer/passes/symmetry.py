@@ -22,6 +22,7 @@ _AREA_RATIO_TOL = 0.03
 _PERIMETER_RATIO_TOL = 0.03
 _PAIR_RESIDUAL_TOL = 0.02
 _SELF_RESIDUAL_TOL = 0.02
+_FITTED_RECONSTRUCTION_RESIDUAL_TOL = 0.04
 _SELF_AXIS_OVERLAP = 0.75
 _SELF_MIRROR_Z_OFFSET = 0.1
 _MIN_SKIA_CONTOUR_AREA = 1.0
@@ -550,7 +551,7 @@ def _best_self_reconstruction(
             continue
         fitted_reconstructed = unary_union([fitted_half, _reflect_flat(fitted_half, axis)])
         fitted_residual = _residual(fitted_reconstructed, flat)
-        if fitted_residual > _SELF_RESIDUAL_TOL:
+        if fitted_residual > _FITTED_RECONSTRUCTION_RESIDUAL_TOL:
             continue
         candidates.append((fitted_residual, axis, half, reflected_half, shape))
 

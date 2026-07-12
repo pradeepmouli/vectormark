@@ -49,6 +49,7 @@ class Options:
                                   # of the binary mask; off by default — coverage isn't
                                   # left-right symmetric, so it drifts flat symmetric regions.
     max_colors: int = 16
+    min_region_size: int = 16       # absolute pixel-area floor before relative filtering
     min_region_fraction: float = 0.02  # drop regions smaller than this × largest region
     flatten: bool = False
     no_symmetry: bool = False
@@ -128,7 +129,7 @@ def _segment_image(arr: np.ndarray, opt: Options) -> tuple[int, int, list[Region
     h, w, _ = arr.shape
     palette = extract_palette(arr, max_colors=opt.max_colors)
     q = quantize(arr, palette)
-    regions = segment(q, min_area=16)
+    regions = segment(q, min_area=opt.min_region_size)
     if regions:
         cut = opt.min_region_fraction * max(r.area for r in regions)
         regions = [r for r in regions if r.area >= cut]

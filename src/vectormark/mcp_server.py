@@ -214,6 +214,8 @@ def idealize_logo_image(
         epsilon=options.get("epsilon", 1.5),
         max_error=options.get("max_error", 1.0),
         max_colors=options.get("colors", DEFAULT_COLORS),
+        min_region_size=options.get("min_region_size", 16),
+        min_region_fraction=options.get("min_region_fraction", 0.02),
         flatten=options.get("flatten", False),
         no_symmetry=options.get("no_symmetry", False),
         optimizer=options.get("optimizer", False),
@@ -638,6 +640,8 @@ class IdealizeOptions(BaseModel):
     optimizer: bool = Field(False, description="Run the existing geometry optimizer passes.")
     epsilon: float = Field(1.5, description="Primitive/polygon recognition tolerance in pixels.")
     max_error: float = Field(1.0, description="Bézier fit tolerance in pixels.")
+    min_region_size: int = Field(16, ge=1, description="Absolute pixel-area floor before optimizer tracing.")
+    min_region_fraction: float = Field(0.02, ge=0, lt=1, description="Relative retained-region floor before optimizer tracing.")
     preprocess: PreprocessOpts = Field(default_factory=PreprocessOpts, description="Server-side preprocessing options.")
 
 
@@ -682,7 +686,8 @@ def trace_drawing(
     options = options or TraceDrawingOptions()
     if options.refine == "auto":
         return idealize_logo(image, IdealizeOptions(colors=options.max_colors, epsilon=options.simplify_tolerance,
-            max_error=options.curve_tolerance, optimizer=True, preprocess=options.preprocess))
+            max_error=options.curve_tolerance, min_region_size=options.min_region_size,
+            min_region_fraction=options.min_region_fraction, optimizer=True, preprocess=options.preprocess))
     if options.refine != "none" or ctx is None:
         raise ToolError("[DRAWING_CONTEXT_REQUIRED] refine='none' tracing requires an MCP session context")
     try:
