@@ -24,8 +24,13 @@ def shape_to_svg(shape: Shape, fill: str, elem_id: str) -> str:
         return (f'<ellipse {common} cx="{_fmt(p["cx"])}" cy="{_fmt(p["cy"])}" '
                 f'rx="{_fmt(p["rx"])}" ry="{_fmt(p["ry"])}"/>')
     if shape.kind == "rect":
+        corners = ""
+        if "rx" in p:
+            corners += f' rx="{_fmt(p["rx"])}"'
+        if "ry" in p:
+            corners += f' ry="{_fmt(p["ry"])}"'
         return (f'<rect {common} x="{_fmt(p["x"])}" y="{_fmt(p["y"])}" '
-                f'width="{_fmt(p["w"])}" height="{_fmt(p["h"])}"/>')
+                f'width="{_fmt(p["w"])}" height="{_fmt(p["h"])}"{corners}/>')
     if shape.kind == "polygon":
         pts = " ".join(f"{_fmt(x)},{_fmt(y)}" for x, y in p["points"])
         return f'<polygon {common} points="{pts}"/>'
@@ -104,6 +109,23 @@ def _annulus_path_d(cx: float, cy: float, r_outer: float, r_inner: float) -> str
     return _ellipse_path_d(cx, cy, r_outer, r_outer) + " " + _ellipse_path_d(cx, cy, r_inner, r_inner)
 
 
+def _rounded_rect_path_d(x: float, y: float, w: float, h: float, rx: float, ry: float) -> str:
+    """Emit a rounded rectangle with quadratic corner arcs for geometric use."""
+    rx = max(0.0, min(float(rx), float(w) / 2.0))
+    ry = max(0.0, min(float(ry), float(h) / 2.0))
+    if rx == 0.0 or ry == 0.0:
+        f = _fmt
+        return f"M{f(x)} {f(y)} L{f(x + w)} {f(y)} L{f(x + w)} {f(y + h)} L{f(x)} {f(y + h)} Z"
+    f = _fmt
+    return (
+        f"M{f(x + rx)} {f(y)} L{f(x + w - rx)} {f(y)} "
+        f"Q{f(x + w)} {f(y)} {f(x + w)} {f(y + ry)} "
+        f"L{f(x + w)} {f(y + h - ry)} Q{f(x + w)} {f(y + h)} {f(x + w - rx)} {f(y + h)} "
+        f"L{f(x + rx)} {f(y + h)} Q{f(x)} {f(y + h)} {f(x)} {f(y + h - ry)} "
+        f"L{f(x)} {f(y + ry)} Q{f(x)} {f(y)} {f(x + rx)} {f(y)} Z"
+    )
+
+
 def shape_to_path_d(shape: Shape) -> str:
     """Convert any fitted shape to a path `d` string using only M/L/C/Z, so a
     flattened SVG has no basic-shape elements and mirrors are a plain x-reflection."""
@@ -120,6 +142,8 @@ def shape_to_path_d(shape: Shape) -> str:
         return _ellipse_path_d(p["cx"], p["cy"], p["rx"], p["ry"])
     if shape.kind == "rect":
         x, y, w, hh = p["x"], p["y"], p["w"], p["h"]
+        if "rx" in p or "ry" in p:
+            return _rounded_rect_path_d(x, y, w, hh, p.get("rx", 0.0), p.get("ry", p.get("rx", 0.0)))
         f = _fmt
         return f"M{f(x)} {f(y)} L{f(x + w)} {f(y)} L{f(x + w)} {f(y + hh)} L{f(x)} {f(y + hh)} Z"
     if shape.kind == "polygon":

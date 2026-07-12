@@ -59,9 +59,9 @@ class TraceResult:
     regions: tuple[TraceRegion, ...]
     region_map_svg: str
 
-    def to_public_dict(self) -> dict[str, object]:
+    def to_public_dict(self, *, include_region_map: bool = False) -> dict[str, object]:
         """Return the stable, JSON-ready portion of the trace artifact."""
-        return {
+        result: dict[str, object] = {
             "width": self.width,
             "height": self.height,
             "options": asdict(self.options),
@@ -86,8 +86,10 @@ class TraceResult:
                 }
                 for region in self.regions
             ],
-            "region_map_svg": self.region_map_svg,
         }
+        if include_region_map:
+            result["region_map_svg"] = self.region_map_svg
+        return result
 
 
 class TraceEngine(Protocol):
@@ -98,14 +100,20 @@ _PATH_TOKEN = re.compile(r"[MLQCZ]|-?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?")
 _COORDINATE_COUNTS = {"M": 2, "L": 2, "Q": 4, "C": 6, "Z": 0}
 
 
-def _path_commands(d: str, region_id: str, subpath_index: int) -> tuple[TraceCommand, ...]:
+def svg_path_commands(d: str, region_id: str, subpath_index: int = 0) -> tuple[TraceCommand, ...]:
+    """Parse SVG path data into stable, target-scoped command IDs."""
     tokens = _PATH_TOKEN.findall(d)
     commands: list[TraceCommand] = []
     index = 0
+    command_index = 0
+    current_subpath = subpath_index
     while index < len(tokens):
         command = tokens[index]
         if command not in _COORDINATE_COUNTS:
             raise ValueError(f"unsupported path data in trace: {d!r}")
+        if command == "M" and commands:
+            current_subpath += 1
+            command_index = 0
         index += 1
         count = _COORDINATE_COUNTS[command]
         values = tuple(float(token) for token in tokens[index:index + count])
@@ -114,11 +122,12 @@ def _path_commands(d: str, region_id: str, subpath_index: int) -> tuple[TraceCom
         index += count
         commands.append(
             TraceCommand(
-                id=f"{region_id}.p{subpath_index}.c{len(commands)}",
+                id=f"{region_id}.p{current_subpath}.c{command_index}",
                 command=command,  # type: ignore[arg-type]
                 values=values,
             )
         )
+        command_index += 1
     return tuple(commands)
 
 
@@ -189,7 +198,7 @@ class PythonTraceEngine:
             commands = tuple(
                 command
                 for subpath_index, d in enumerate(path_ds)
-                for command in _path_commands(d, region_id, subpath_index)
+                for command in svg_path_commands(d, region_id, subpath_index)
             )
             mask = region.mask.copy()
             mask.setflags(write=False)

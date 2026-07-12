@@ -12,7 +12,10 @@ from typing import Callable
 
 import numpy as np
 
+from .candidate import FlatFill, LinearGradientFill, RadialGradientFill, RasterFill
 from .drawing_trace import TraceRegion, TraceResult
+from .fit import Shape
+from .optimizer.vector_region import VectorRegion
 
 
 class DrawingNotFound(Exception):
@@ -28,7 +31,7 @@ class DrawingVersion:
     id: str
     parent_id: str | None
     plan: Mapping[str, object] | None
-    scene: object | None
+    regions: tuple[VectorRegion, ...] | None
     label: str | None
 
 
@@ -57,6 +60,11 @@ _IMMUTABLE_SCALAR_TYPES = (type(None), bool, int, float, complex, str, bytes)
 
 def _freeze(value: object, ancestors: set[int] | None = None) -> object:
     """Detach supported containers and reject values without a safe frozen form."""
+    snapshot = getattr(value, "__drawing_state_snapshot__", None)
+    if callable(snapshot):
+        return snapshot()
+    if isinstance(value, np.generic):
+        return value.item()
     if type(value) in _IMMUTABLE_SCALAR_TYPES:
         return value
 
@@ -84,6 +92,62 @@ def _freeze_plan(plan: Mapping[str, object]) -> Mapping[str, object]:
     frozen = _freeze(plan)
     assert isinstance(frozen, Mapping)
     return frozen
+
+
+def _copy_shape(shape: Shape | None) -> Shape | None:
+    return None if shape is None else Shape(shape.kind, _freeze(shape.params))
+
+
+def _copy_fill(fill: object) -> object:
+    if isinstance(fill, FlatFill):
+        return FlatFill(fill.hex)
+    if isinstance(fill, LinearGradientFill):
+        return LinearGradientFill(dict(fill.geometry), list(fill.stops))
+    if isinstance(fill, RadialGradientFill):
+        return RadialGradientFill(dict(fill.geometry), list(fill.stops))
+    if isinstance(fill, RasterFill):
+        return RasterFill(dict(fill.geometry), fill.png_b64)
+    return None
+
+
+def _snapshot_region(region: VectorRegion) -> VectorRegion:
+    """Detach the mutable buffers nested in one immutable-shaped region tree."""
+    raster = np.array(region.raster, copy=True)
+    coverage = None if region.coverage is None else np.array(region.coverage, copy=True)
+    diagnostics = _freeze(region.diagnostics)
+    if region.is_leaf:
+        assert region.current is not None
+        return VectorRegion(
+            id=region.id,
+            current=_copy_shape(region.current),
+            original=_copy_shape(region.original),
+            fill=_copy_fill(region.fill),
+            z=region.z,
+            footprint=region.footprint,
+            raster=raster,
+            source_label=region.source_label,
+            color_hex=region.color_hex,
+            drawing_id=region.drawing_id,
+            source_regions=region.source_regions,
+            coverage=coverage,
+            diagnostics=diagnostics,
+        )
+    return VectorRegion.branch(
+        id=region.id,
+        children=tuple(_snapshot_region(child) for child in region.children),
+        z=region.z,
+        raster=raster,
+        fill=_copy_fill(region.fill),
+        source_label=region.source_label,
+        color_hex=region.color_hex,
+        drawing_id=region.drawing_id,
+        source_regions=region.source_regions,
+        diagnostics=diagnostics,
+    )
+
+
+def _snapshot_regions(regions: tuple[VectorRegion, ...]) -> tuple[VectorRegion, ...]:
+    return tuple(_snapshot_region(region) for region in regions)
 
 
 def _snapshot_trace(trace: TraceResult) -> TraceResult:
@@ -126,7 +190,7 @@ def _public_version(version: DrawingVersion) -> DrawingVersion:
         id=version.id,
         parent_id=version.parent_id,
         plan=_freeze_plan(version.plan) if version.plan is not None else None,
-        scene=_freeze(version.scene) if version.scene is not None else None,
+        regions=_snapshot_regions(version.regions) if version.regions is not None else None,
         label=version.label,
     )
 
@@ -157,10 +221,18 @@ class DrawingStore:
         self._drawings: dict[object, dict[str, _StoredDrawing]] = {}
         self._lock = RLock()
 
-    def create(self, session: object, trace: TraceResult) -> DrawingState:
+    def create(
+        self,
+        session: object,
+        trace: TraceResult,
+        *,
+        regions: tuple[VectorRegion, ...],
+    ) -> DrawingState:
         with self._lock:
             now = self._now()
             self._evict_expired(now)
+            if not isinstance(regions, tuple) or not all(isinstance(region, VectorRegion) for region in regions):
+                raise TypeError("regions must be a tuple of VectorRegion roots")
             drawing = _StoredDrawing(
                 id=f"drw_{secrets.token_urlsafe(18)}",
                 trace=_snapshot_trace(trace),
@@ -169,7 +241,7 @@ class DrawingStore:
                         id="v0",
                         parent_id=None,
                         plan=None,
-                        scene=None,
+                        regions=_snapshot_regions(regions),
                         label=None,
                     )
                 },
@@ -204,7 +276,7 @@ class DrawingStore:
         base_version: str,
         *,
         plan: Mapping[str, object],
-        scene: object,
+        regions: tuple[VectorRegion, ...],
         label: str | None = None,
     ) -> DrawingVersion:
         with self._lock:
@@ -216,7 +288,9 @@ class DrawingStore:
 
             _validate_label(label)
             frozen_plan = _freeze_plan(plan)
-            frozen_scene = _freeze(scene)
+            if not isinstance(regions, tuple) or not all(isinstance(region, VectorRegion) for region in regions):
+                raise TypeError("regions must be a tuple of VectorRegion roots")
+            frozen_regions = _snapshot_regions(regions)
             child_number = drawing.child_counts[base_version]
             version_id = f"{base_version}.{child_number}"
             drawing.child_counts[base_version] = child_number + 1
@@ -224,7 +298,7 @@ class DrawingStore:
                 id=version_id,
                 parent_id=base_version,
                 plan=frozen_plan,
-                scene=frozen_scene,
+                regions=frozen_regions,
                 label=label,
             )
             drawing.versions[version_id] = version

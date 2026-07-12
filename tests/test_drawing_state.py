@@ -6,8 +6,11 @@ from dataclasses import FrozenInstanceError, dataclass
 import pytest
 import numpy as np
 
+from vectormark.candidate import FlatFill
 from vectormark.drawing_state import DrawingNotFound, DrawingStore
 from vectormark.drawing_trace import TraceOptions, TracePath, TraceRegion, TraceResult
+from vectormark.fit import Shape
+from vectormark.optimizer.vector_region import VectorRegion
 
 
 @dataclass
@@ -36,8 +39,18 @@ def _trace() -> TraceResult:
     )
 
 
-def _scene() -> object:
-    return {"layers": ()}
+def _regions() -> tuple[VectorRegion, ...]:
+    return (
+        VectorRegion.from_shape(
+            id=1,
+            shape=Shape("path", {"d": "M0 0Z"}),
+            fill=FlatFill("#112233"),
+            z=0,
+            raster=np.ones((1, 1), dtype=bool),
+            drawing_id="r1",
+            source_regions=("r1",),
+        ),
+    )
 
 
 def _mutable_trace() -> TraceResult:
@@ -64,7 +77,7 @@ def _mutable_trace() -> TraceResult:
 
 def test_store_creates_immutable_root_version(fake_clock: FakeClock) -> None:
     store = DrawingStore(now=fake_clock)
-    drawing = store.create(object(), _trace())
+    drawing = store.create(object(), _trace(), regions=_regions())
 
     assert drawing.id.startswith("drw_")
     assert drawing.versions == {
@@ -73,7 +86,7 @@ def test_store_creates_immutable_root_version(fake_clock: FakeClock) -> None:
     assert drawing.versions["v0"].id == "v0"
     assert drawing.versions["v0"].parent_id is None
     assert drawing.versions["v0"].plan is None
-    assert drawing.versions["v0"].scene is None
+    assert drawing.versions["v0"].regions is not None
     assert drawing.versions["v0"].label is None
     with pytest.raises(TypeError):
         drawing.versions["injected"] = drawing.versions["v0"]
@@ -81,71 +94,61 @@ def test_store_creates_immutable_root_version(fake_clock: FakeClock) -> None:
         drawing.versions = {}
 
 
-def test_store_detaches_and_freezes_appended_plan_and_scene(
+def test_store_detaches_plan_and_vector_regions(
     fake_clock: FakeClock,
 ) -> None:
     store = DrawingStore(now=fake_clock)
     session = object()
-    drawing = store.create(session, _trace())
+    drawing = store.create(session, _trace(), regions=_regions())
     plan = {"palette": ["blue"], "limits": {"strokes": 2}}
-    scene = {"layers": ["source"]}
+    regions = _regions()
 
-    version = store.append(session, drawing.id, "v0", plan=plan, scene=scene)
+    version = store.append(session, drawing.id, "v0", plan=plan, regions=regions)
     plan["palette"].append("red")
     plan["limits"]["strokes"] = 3
-    scene["layers"].append("caller mutation")
+    regions[0].raster[0, 0] = False
 
     assert version.plan == {"palette": ("blue",), "limits": {"strokes": 2}}
-    assert version.scene == {"layers": ("source",)}
+    assert version.regions is not None
+    assert version.regions[0].raster[0, 0]
     with pytest.raises(TypeError):
         version.plan["injected"] = True  # type: ignore[index]
     with pytest.raises(AttributeError):
         version.plan["palette"].append("green")  # type: ignore[union-attr]
-    with pytest.raises(TypeError):
-        version.scene["injected"] = True  # type: ignore[index]
+    assert version.regions[0].drawing_id == "r1"
 
     _, stored = store.get(session, drawing.id, version.id)
     assert stored.plan == {"palette": ("blue",), "limits": {"strokes": 2}}
-    assert stored.scene == {"layers": ("source",)}
+    assert stored.regions is not None
+    assert stored.regions[0].raster[0, 0]
 
 
-def test_store_rejects_values_that_cannot_be_safely_frozen(
+def test_store_rejects_non_vector_region_state(
     fake_clock: FakeClock,
 ) -> None:
-    class SelfCopyingMutable:
-        def __init__(self) -> None:
-            self.values = ["source"]
-
-        def __deepcopy__(self, memo: object) -> SelfCopyingMutable:
-            return self
-
     store = DrawingStore(now=fake_clock)
     session = object()
-    drawing = store.create(session, _trace())
-    hostile = SelfCopyingMutable()
-
-    with pytest.raises(TypeError, match="unsupported value type"):
+    drawing = store.create(session, _trace(), regions=_regions())
+    with pytest.raises(TypeError, match="regions"):
         store.append(
             session,
             drawing.id,
             "v0",
             plan={"palette": ["blue"]},
-            scene={"layers": hostile},
+            regions=object(),  # type: ignore[arg-type]
         )
-
-    hostile.values.append("caller mutation")
     _, root = store.get(session, drawing.id, "v0")
-    assert root.scene is None
+    assert root.regions is not None
 
 
 def test_store_branches_from_any_retained_version(fake_clock: FakeClock) -> None:
     store = DrawingStore(now=fake_clock)
     session = object()
-    drawing = store.create(session, _trace())
+    drawing = store.create(session, _trace(), regions=_regions())
 
-    first = store.append(session, drawing.id, "v0", plan={}, scene=_scene())
-    second = store.append(session, drawing.id, "v0", plan={}, scene=_scene())
-    child = store.append(session, drawing.id, "v0.1", plan={}, scene=_scene())
+    first = store.append(session, drawing.id, "v0", plan={}, regions=_regions())
+    second = store.append(session, drawing.id, "v0", plan={}, regions=_regions())
+    child = store.append(session, drawing.id, "v0.1", plan={}, regions=_regions())
 
     assert (first.id, second.id, child.id) == ("v0.0", "v0.1", "v0.1.0")
     assert child.parent_id == "v0.1"
@@ -154,12 +157,12 @@ def test_store_branches_from_any_retained_version(fake_clock: FakeClock) -> None
 def test_store_allocates_sibling_versions_atomically(fake_clock: FakeClock) -> None:
     store = DrawingStore(now=fake_clock)
     session = object()
-    drawing = store.create(session, _trace())
+    drawing = store.create(session, _trace(), regions=_regions())
 
     with ThreadPoolExecutor(max_workers=8) as executor:
         versions = list(
             executor.map(
-                lambda _: store.append(session, drawing.id, "v0", plan={}, scene=_scene()).id,
+                lambda _: store.append(session, drawing.id, "v0", plan={}, regions=_regions()).id,
                 range(32),
             )
         )
@@ -172,7 +175,7 @@ def test_store_allocates_sibling_versions_atomically(fake_clock: FakeClock) -> N
 def test_store_rejects_cross_session_and_expired_drawings(fake_clock: FakeClock) -> None:
     store = DrawingStore(now=fake_clock, idle_ttl_seconds=1800)
     owner, other = object(), object()
-    drawing = store.create(owner, _trace())
+    drawing = store.create(owner, _trace(), regions=_regions())
 
     with pytest.raises(DrawingNotFound) as cross_session_error:
         store.get(other, drawing.id, "v0")
@@ -189,21 +192,21 @@ def test_store_not_found_errors_do_not_expose_internal_key_errors(
 ) -> None:
     store = DrawingStore(now=fake_clock)
     session = object()
-    drawing = store.create(session, _trace())
+    drawing = store.create(session, _trace(), regions=_regions())
 
     with pytest.raises(DrawingNotFound) as missing_version_error:
         store.get(session, drawing.id, "v404")
     assert missing_version_error.value.__cause__ is None
 
     with pytest.raises(DrawingNotFound) as missing_parent_error:
-        store.append(session, drawing.id, "v404", plan={}, scene=_scene())
+        store.append(session, drawing.id, "v404", plan={}, regions=_regions())
     assert missing_parent_error.value.__cause__ is None
 
 
 def test_store_get_and_append_refresh_the_sliding_expiry(fake_clock: FakeClock) -> None:
     store = DrawingStore(now=fake_clock, idle_ttl_seconds=1800)
     session = object()
-    drawing = store.create(session, _trace())
+    drawing = store.create(session, _trace(), regions=_regions())
 
     fake_clock.advance(1799)
     state, root = store.get(session, drawing.id, "v0")
@@ -211,7 +214,7 @@ def test_store_get_and_append_refresh_the_sliding_expiry(fake_clock: FakeClock) 
     assert root.id == "v0"
 
     fake_clock.advance(1799)
-    child = store.append(session, drawing.id, "v0", plan={}, scene=_scene(), label="first edit")
+    child = store.append(session, drawing.id, "v0", plan={}, regions=_regions(), label="first edit")
     assert child.label == "first edit"
 
     fake_clock.advance(1799)
@@ -228,13 +231,13 @@ def test_store_rejects_non_exact_string_labels_without_consuming_child_number(
 
     store = DrawingStore(now=fake_clock)
     session = object()
-    drawing = store.create(session, _trace())
+    drawing = store.create(session, _trace(), regions=_regions())
 
     for label in (StringSubclass("subclass"), object()):
         with pytest.raises(TypeError, match="label"):
-            store.append(session, drawing.id, "v0", plan={}, scene=object(), label=label)  # type: ignore[arg-type]
+            store.append(session, drawing.id, "v0", plan={}, regions=_regions(), label=label)
 
-    version = store.append(session, drawing.id, "v0", plan={}, scene=_scene(), label="valid")
+    version = store.append(session, drawing.id, "v0", plan={}, regions=_regions(), label="valid")
     assert version.id == "v0.0"
 
 
@@ -248,7 +251,7 @@ def test_store_detaches_trace_arrays_from_inputs_and_public_snapshots(
     source_region.mask.setflags(write=False)
     source_region.contours[0].setflags(write=False)
 
-    created = store.create(session, trace)
+    created = store.create(session, trace, regions=_regions())
     source_region.mask.setflags(write=True)
     source_region.contours[0].setflags(write=True)
     source_region.mask[0, 0] = False

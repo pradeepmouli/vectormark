@@ -1022,6 +1022,9 @@ def _render_optimizer_body(
             source = scope_objects[int(obj.current.params["href_obj_id"])]
             assert source.fill is not None
             use_fill = str(obj.current.params.get("fill", fill))
+            if isinstance(obj.diagnostics.get("clones"), dict):
+                body.append(shape_to_svg(shape, use_fill, elem_id))
+                continue
             shape = _inlined_use_shape(source.current, shape.params["transform"])
             body.append(path_svg(shape_to_path_d(shape), use_fill, fill_rule_for(shape)))
             continue

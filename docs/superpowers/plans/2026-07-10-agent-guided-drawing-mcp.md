@@ -1,5 +1,12 @@
 # Agent-Guided Drawing MCP Implementation Plan
 
+> **Architecture amendment (implemented):** the earlier `DrawingScene` /
+> `RenderTarget` executor described below has been superseded. A drawing version
+> caches only `tuple[VectorRegion, ...]`; `drawing_id` and `source_regions` are
+> first-class `VectorRegion` fields, child handles are derived as `r1-<id>`, and
+> SVG/report/preview are on-demand projections. The task history remains below
+> for implementation provenance.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (- [ ]) syntax for tracking.
 
 **Goal:** Replace logo-specific MCP tools with trace_drawing, which either one-shot auto-idealizes or retains an interactive trace for immutable branching refinements.
@@ -301,7 +308,16 @@ def validate_plan(plan: DrawingPlan, trace: TraceResult,
                   scene: object) -> None: ...
 ~~~
 
-Support only group, set_geometry, set_fill, and set_z_order at region level. Nested path operations are group, fit(line|quadratic|cubic|keep), break, and close. Reject unknown targets, duplicate IDs, non-finite numbers, invalid fill fields, omitted or repeated z-order targets, and missing path-operation dependencies. A path group may contain only contiguous non-M/non-Z commands from one trace subpath. Semantic group never invokes boolean union. PlanValidationError must carry an RFC 6901 JSON pointer rooted at /ops.
+Support scene-level merge, split, detect_primitives, detect_symmetry,
+detect_clones, set_symmetry, clone, set_geometry, set_fill, and set_z_order.
+`detect_*` is the existing automatic pass, globally or with an optional singular
+target; the paired explicit operation carries the agent-supplied relationship.
+Nested path operations are group, fit(line|quadratic|cubic|keep), simplify,
+seams, break, and close. Reject unknown targets, duplicate IDs, non-finite
+numbers, invalid fill fields, omitted or repeated z-order targets, and missing
+path-operation dependencies. A path group may contain only contiguous
+non-M/non-Z commands from one trace subpath. PlanValidationError must carry an
+RFC 6901 JSON pointer rooted at /ops.
 
 - [ ] **Step 4: Run the test to verify it passes**
 

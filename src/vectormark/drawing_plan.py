@@ -11,16 +11,22 @@ from dataclasses import dataclass
 from types import MappingProxyType
 from typing import Literal
 
-from .drawing_trace import TraceCommand, TraceResult
+from .drawing_trace import TraceCommand, TraceResult, svg_path_commands
+from .optimizer.vector_region import VectorRegion
 
 
 _VERSION = "vectormark.plan.v1"
-_PLAN_KEYS = frozenset({"version", "drawing_id", "base_version", "label", "ops"})
+_PLAN_KEYS = frozenset({"version", "drawing_id", "base_version", "label", "defaults", "ops"})
+_TOLERANCE_KEYS = frozenset({"epsilon", "max_error"})
 _HEX_COLOR = re.compile(r"^#[0-9A-Fa-f]{6}$")
 _BASE_VERSION = re.compile(r"^v\d+(?:\.\d+)*$")
-_GEOMETRY_TYPES = frozenset({"circle", "ellipse", "rect", "polygon", "path"})
+_GEOMETRY_TYPES = frozenset(
+    {"circle", "ellipse", "rect", "rounded_rect", "polygon", "trapezoid", "rounded_trapezoid", "cap", "path"}
+)
 _FILL_TYPES = frozenset({"flat", "linear_gradient", "radial_gradient", "raster"})
 _FIT_TYPES = frozenset({"line", "quadratic", "cubic", "keep"})
+_DETECT_OPS = frozenset({"detect_primitives", "detect_symmetry", "detect_clones"})
+_POLISH_OPS = frozenset({"simplify", "stitch"})
 _PNG_SIGNATURE = b"\x89PNG\r\n\x1a\n"
 
 
@@ -39,6 +45,7 @@ class DrawingPlan:
     drawing_id: str
     base_version: str
     label: str | None
+    defaults: Mapping[str, float]
     ops: tuple[object, ...]
 
 
@@ -64,6 +71,9 @@ def parse_plan(payload: Mapping[str, object]) -> DrawingPlan:
         raise PlanValidationError("/label", "must be a string or null")
     if isinstance(label, str) and len(label) > 200:
         raise PlanValidationError("/label", "must be at most 200 characters")
+    defaults_value = _mapping(payload.get("defaults", {}), "/defaults")
+    _reject_unknown_keys(defaults_value, set(_TOLERANCE_KEYS), "/defaults")
+    defaults = _tolerances(defaults_value, "/defaults")
     ops = payload.get("ops")
     if not isinstance(ops, list):
         raise PlanValidationError("/ops", "must be an array")
@@ -71,33 +81,36 @@ def parse_plan(payload: Mapping[str, object]) -> DrawingPlan:
     for index, op in enumerate(frozen_ops):
         if not isinstance(op, Mapping):
             raise PlanValidationError(f"/ops/{index}", "must be an object")
-    return DrawingPlan(_VERSION, drawing_id, base_version, label, frozen_ops)
+    return DrawingPlan(_VERSION, drawing_id, base_version, label, MappingProxyType(defaults), frozen_ops)
 
 
-def validate_plan(plan: DrawingPlan, trace: TraceResult, scene: object) -> None:
-    """Validate plan references and semantics against one trace and base scene."""
-    source_regions = _scene_target_source_regions(scene)
+def validate_plan(plan: DrawingPlan, trace: TraceResult, regions: Sequence[VectorRegion]) -> None:
+    """Validate plan references and semantics against one trace and region roots."""
+    source_regions = _region_target_source_regions(regions)
     target_ids = tuple(source_regions)
-    trace_region_ids = {region.id for region in trace.regions}
-    commands = _trace_commands(trace)
+    commands = _target_commands(regions)
     known_targets = set(target_ids)
     used_commands: set[str] = set()
     used_target_ids = set(target_ids)
     z_order_seen = False
     z_order: tuple[Mapping[object, object], str] | None = None
+    symmetry_targets: set[str] = set()
+    symmetry_block = False
 
     for index, raw_op in enumerate(plan.ops):
         pointer = f"/ops/{index}"
         op = _mapping(raw_op, pointer)
         name = _required_str(op, "op", pointer)
-        if name == "group":
+        if symmetry_block and name != "detect_symmetry":
+            raise PlanValidationError(pointer, "detect_symmetry must be the final operation or part of a terminal targeted-symmetry block")
+        if name == "merge":
             _reject_unknown_keys(op, {"op", "id", "regions"}, pointer)
             group_id = _required_str(op, "id", pointer)
             if group_id in used_target_ids:
                 raise PlanValidationError(f"{pointer}/id", "duplicate operation id")
             regions = _strings(op.get("regions"), f"{pointer}/regions", nonempty=True)
             for region_index, region_id in enumerate(regions):
-                if region_id not in trace_region_ids or region_id not in known_targets:
+                if region_id not in known_targets:
                     raise PlanValidationError(f"{pointer}/regions/{region_index}", "unknown region")
             if len(set(regions)) != len(regions):
                 repeated = _first_repeat(regions)
@@ -109,13 +122,41 @@ def validate_plan(plan: DrawingPlan, trace: TraceResult, scene: object) -> None:
                 del source_regions[region_id]
             source_regions[group_id] = group_sources
             used_target_ids.add(group_id)
+        elif name == "split":
+            _reject_unknown_keys(op, {"op", "target"}, pointer)
+            _validate_target(op, pointer, known_targets)
+            if index != len(plan.ops) - 1:
+                raise PlanValidationError(pointer, "split must be the final operation; refine child regions in a new version")
+        elif name in _DETECT_OPS:
+            _validate_detect_op(op, pointer, known_targets)
+            if name == "detect_symmetry":
+                target = op.get("target")
+                if target is None:
+                    if index != len(plan.ops) - 1:
+                        raise PlanValidationError(pointer, "global detect_symmetry must be the final operation; refine derived child regions in a new version")
+                    if symmetry_block:
+                        raise PlanValidationError(pointer, "global detect_symmetry cannot follow targeted symmetry operations")
+                else:
+                    assert type(target) is str
+                    if target in symmetry_targets:
+                        raise PlanValidationError(f"{pointer}/target", "target already has a symmetry operation in this plan")
+                    symmetry_targets.add(target)
+                    symmetry_block = True
+        elif name in _POLISH_OPS:
+            _validate_polish_op(op, pointer, known_targets)
+        elif name == "set_symmetry":
+            _validate_set_symmetry_op(op, pointer, known_targets)
+        elif name == "clone":
+            _validate_clone_op(op, pointer, known_targets)
         elif name == "set_geometry":
-            _validate_geometry_op(op, pointer, known_targets, source_regions, commands, used_commands)
+            _validate_geometry_op(op, pointer, known_targets, commands, used_commands)
         elif name == "set_fill":
             _validate_fill_op(op, pointer, known_targets)
         elif name == "set_z_order":
             if z_order_seen:
                 raise PlanValidationError(pointer, "only one set_z_order operation is allowed")
+            if index != len(plan.ops) - 1:
+                raise PlanValidationError(pointer, "set_z_order must be the final operation")
             z_order_seen = True
             z_order = (op, pointer)
         else:
@@ -129,11 +170,11 @@ def _validate_geometry_op(
     op: Mapping[object, object],
     pointer: str,
     targets: set[str],
-    source_regions: Mapping[str, frozenset[str]],
     commands: Mapping[str, tuple[str, int, int, TraceCommand]],
     used_commands: set[str],
 ) -> None:
-    _reject_unknown_keys(op, {"op", "target", "geometry"}, pointer)
+    _reject_unknown_keys(op, {"op", "target", "geometry"} | _TOLERANCE_KEYS, pointer)
+    _tolerances(op, pointer)
     target = _validate_target(op, pointer, targets)
     geometry = _mapping(op.get("geometry"), f"{pointer}/geometry")
     geometry_type = _required_str(geometry, "type", f"{pointer}/geometry")
@@ -152,16 +193,69 @@ def _validate_geometry_op(
         path_ops,
         f"{pointer}/geometry/ops",
         commands,
-        source_regions[target],
+        target,
         used_commands,
     )
+
+
+def _validate_detect_op(op: Mapping[object, object], pointer: str, targets: set[str]) -> None:
+    _reject_unknown_keys(op, {"op", "target"} | _TOLERANCE_KEYS, pointer)
+    _tolerances(op, pointer)
+    if "target" in op:
+        _validate_target(op, pointer, targets)
+
+
+def _validate_polish_op(op: Mapping[object, object], pointer: str, targets: set[str]) -> None:
+    _reject_unknown_keys(op, {"op", "target"} | _TOLERANCE_KEYS, pointer)
+    _tolerances(op, pointer)
+    if "target" in op:
+        _validate_target(op, pointer, targets)
+
+
+def _validate_set_symmetry_op(op: Mapping[object, object], pointer: str, targets: set[str]) -> None:
+    _reject_unknown_keys(op, {"op", "source", "target", "axis"}, pointer)
+    source = _required_str(op, "source", pointer)
+    target = _required_str(op, "target", pointer)
+    if source not in targets:
+        raise PlanValidationError(f"{pointer}/source", "unknown target")
+    if target not in targets:
+        raise PlanValidationError(f"{pointer}/target", "unknown target")
+    if source == target:
+        raise PlanValidationError(f"{pointer}/target", "must differ from source")
+    _validate_axis(op.get("axis"), f"{pointer}/axis")
+
+
+def _validate_clone_op(op: Mapping[object, object], pointer: str, targets: set[str]) -> None:
+    _reject_unknown_keys(op, {"op", "source", "target", "transform"}, pointer)
+    source = _required_str(op, "source", pointer)
+    target = _required_str(op, "target", pointer)
+    if source not in targets:
+        raise PlanValidationError(f"{pointer}/source", "unknown target")
+    if target not in targets:
+        raise PlanValidationError(f"{pointer}/target", "unknown target")
+    if source == target:
+        raise PlanValidationError(f"{pointer}/target", "must differ from source")
+    transform = op.get("transform")
+    if not isinstance(transform, Sequence) or isinstance(transform, (str, bytes)) or len(transform) != 6:
+        raise PlanValidationError(f"{pointer}/transform", "must be a six-number affine matrix")
+    for index, value in enumerate(transform):
+        if not _finite_number(value):
+            raise PlanValidationError(f"{pointer}/transform/{index}", "must be a finite number")
+
+
+def _validate_axis(value: object, pointer: str) -> None:
+    axis = _mapping(value, pointer)
+    _reject_unknown_keys(axis, {"theta", "cx", "cy"}, pointer)
+    for key in ("theta", "cx", "cy"):
+        if not _finite_number(axis.get(key)):
+            raise PlanValidationError(f"{pointer}/{key}", "must be a finite number")
 
 
 def _validate_path_ops(
     path_ops: Sequence[object],
     pointer: str,
     commands: Mapping[str, tuple[str, int, int, TraceCommand]],
-    allowed_source_regions: frozenset[str],
+    target_id: str,
     used_commands: set[str],
 ) -> None:
     groups: set[str] = set()
@@ -184,10 +278,10 @@ def _validate_path_ops(
                 try:
                     record = commands[command_id]
                 except KeyError:
-                    raise PlanValidationError(f"{op_pointer}/commands/{command_index}", "unknown trace command") from None
-                if record[0] not in allowed_source_regions:
+                    raise PlanValidationError(f"{op_pointer}/commands/{command_index}", "unknown retained-path command") from None
+                if record[0] != target_id:
                     raise PlanValidationError(
-                        f"{op_pointer}/commands/{command_index}", "trace command is not owned by the target"
+                        f"{op_pointer}/commands/{command_index}", "command is not owned by the target's retained path"
                     )
                 if command_id in used_commands:
                     raise PlanValidationError(
@@ -230,6 +324,10 @@ def _validate_path_ops(
                 raise PlanValidationError(op_pointer, "close requires a preceding fit")
             since_close = False
             latest_fitted = None
+        elif name in {"simplify", "stitch"}:
+            _reject_unknown_keys(op, {"op"}, op_pointer)
+            if not fitted:
+                raise PlanValidationError(op_pointer, f"{name} requires a preceding fit")
         else:
             raise PlanValidationError(f"{op_pointer}/op", "unsupported path operation")
     if groups - fitted:
@@ -300,37 +398,53 @@ def _validate_z_order(op: Mapping[object, object], pointer: str, target_ids: set
         raise PlanValidationError(f"{pointer}/targets", "must list every target exactly once")
 
 
-def _scene_target_source_regions(scene: object) -> dict[str, frozenset[str]]:
-    targets = getattr(scene, "targets", None)
-    if not isinstance(targets, Sequence) or isinstance(targets, (str, bytes)):
-        raise PlanValidationError("/ops", "base scene must expose targets")
+def _region_target_source_regions(regions: Sequence[VectorRegion]) -> dict[str, frozenset[str]]:
+    if isinstance(regions, (str, bytes)):
+        raise PlanValidationError("/ops", "base drawing must expose vector regions")
     source_regions: dict[str, frozenset[str]] = {}
-    for target in targets:
-        target_id = getattr(target, "id", None)
-        if type(target_id) is not str:
-            raise PlanValidationError("/ops", "base scene target ids must be strings")
-        if target_id in source_regions:
-            raise PlanValidationError("/ops", "base scene contains duplicate target ids")
-        regions = getattr(target, "source_regions", None)
-        source_regions[target_id] = (
-            frozenset({target_id}) if regions is None else frozenset(regions)
-        )
+
+    def visit(region: VectorRegion, target_id: str, sources: frozenset[str]) -> None:
+        if region.is_leaf:
+            if target_id in source_regions:
+                raise PlanValidationError("/ops", "base drawing contains duplicate target ids")
+            source_regions[target_id] = sources
+            return
+        for child in region.children:
+            visit(child, f"{target_id}-{child.id}", sources)
+
+    for region in regions:
+        if type(region.drawing_id) is not str:
+            raise PlanValidationError("/ops", "base drawing regions require stable drawing ids")
+        visit(region, region.drawing_id, frozenset(region.source_regions or (region.drawing_id,)))
     return source_regions
 
 
-def _trace_commands(trace: TraceResult) -> dict[str, tuple[str, int, int, TraceCommand]]:
+def _target_commands(regions: Sequence[VectorRegion]) -> dict[str, tuple[str, int, int, TraceCommand]]:
     commands: dict[str, tuple[str, int, int, TraceCommand]] = {}
-    for region in trace.regions:
-        subpath = -1
-        index = 0
-        for command in region.trace_path.commands:
-            if command.command == "M":
-                subpath += 1
-                index = 0
-            if command.id in commands:
-                raise PlanValidationError("/ops", "trace contains duplicate command ids")
-            commands[command.id] = (region.id, subpath, index, command)
-            index += 1
+
+    def visit(region: VectorRegion, target_id: str) -> None:
+        if region.is_leaf:
+            assert region.current is not None
+            if region.current.kind != "path":
+                return
+            subpath = -1
+            index = 0
+            for command in svg_path_commands(str(region.current.params["d"]), target_id):
+                if command.command == "M":
+                    subpath += 1
+                    index = 0
+                if command.id in commands:
+                    raise PlanValidationError("/ops", "retained drawing contains duplicate path command ids")
+                commands[command.id] = (target_id, subpath, index, command)
+                index += 1
+            return
+        for child in region.children:
+            visit(child, f"{target_id}-{child.id}")
+
+    for region in regions:
+        if type(region.drawing_id) is not str:
+            raise PlanValidationError("/ops", "base drawing regions require stable drawing ids")
+        visit(region, region.drawing_id)
     return commands
 
 
@@ -380,6 +494,20 @@ def _color(value: object, pointer: str) -> None:
 
 def _finite_number(value: object) -> bool:
     return type(value) in (int, float) and math.isfinite(float(value))
+
+
+def _tolerances(value: object, pointer: str) -> dict[str, float]:
+    """Validate optional fitting tolerances at plan or operation scope."""
+    tolerances = _mapping(value, pointer)
+    result: dict[str, float] = {}
+    for key in _TOLERANCE_KEYS:
+        if key not in tolerances:
+            continue
+        raw = tolerances[key]
+        if not _finite_number(raw) or float(raw) < 0:
+            raise PlanValidationError(f"{pointer}/{key}", "must be a finite number greater than or equal to zero")
+        result[key] = float(raw)
+    return result
 
 
 def _first_repeat(items: Sequence[str]) -> int:

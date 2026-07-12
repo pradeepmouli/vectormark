@@ -23,9 +23,10 @@ refine_drawing(plan)
 ## Product boundary
 
 Only `trace_drawing(refine="interactive")` is stateful and MCP-server-local. It retains the
-original resolved image bytes, processed RGB array, image metadata, segmented
-regions, masks, contour samples, trace paths, and command IDs in memory. It returns an
-opaque `drawing_id`; `refine_drawing` accepts no image and reads the ID from the
+immutable trace artifact plus the native `VectorRegion` roots for every retained
+version. A root carries its optimizer ID, current/original geometry, fill,
+z-order, raster evidence, stable `drawing_id`, and `source_regions` provenance.
+`refine_drawing` accepts no image and reads the opaque `drawing_id` from the
 plan. Auto calls do not allocate a drawing ID, retain state, or participate in
 versioning.
 
@@ -57,9 +58,17 @@ shape.
 ## Interactive trace contract
 
 Interactive `trace_drawing` uses the existing secure image resolver and preprocessor,
-then performs only deterministic palette segmentation, contour extraction, and
-path fitting. It does **not** run primitive recognition, symmetry detection,
-surface merging, fill inference, clone detection, or optimizer passes.
+then retains both deterministic raw paths and a compact agent-facing root
+forest. Raw paths are produced by palette segmentation, contour extraction, and
+path fitting; roots use the one-shot pipeline's size filtering and soft-surface
+merge so an agent does not need to reason about every palette fragment. It does
+**not** run primitive recognition, symmetry detection, clone detection, or
+other optimizer passes.
+
+Before interactive `v0` is retained, its compact root forest is automatically
+stitched so neighboring retained regions share reconciled boundaries. This does
+not alter the on-demand `raw_trace` artifact. Agents may still invoke `stitch`
+after later geometry, merge, or split edits create new neighboring edges.
 
 The public path is named `trace_path`, not `raw_path`. The stored contour samples
 are the raw pixel or coverage evidence; `trace_path` is a pre-simplified line and
@@ -73,6 +82,7 @@ reasoning.
 {
   "max_colors": 16,
   "min_region_size": 16,
+  "min_region_fraction": 0.02,
   "trace_level": "pixel",
   "simplify_tolerance": 1.5,
   "curve_tolerance": 1.0,
@@ -82,7 +92,10 @@ reasoning.
 
 - `max_colors` is the palette-quantization ceiling.
 - `min_region_size` is the minimum retained connected-component pixel count.
-  No relative-to-largest-region cutoff is applied in this workflow.
+- `min_region_fraction` is the relative-to-largest-region floor used when
+  constructing the agent-facing root regions. The complete raw trace remains
+  available on demand, but small fragments do not become editable roots by
+  default.
 - `trace_level` is `pixel` for binary quantized-mask contours or `subpixel` for
   anti-alias-aware coverage contours. The result reports each region's effective
   level because the coverage safety guard may fall back to `pixel`.
@@ -95,41 +108,44 @@ Input crop, resize, and alpha handling remain in the existing preprocess options
 There are no trace options for symmetry, primitive recognition, fill inference,
 surface merging, flattening, or shadow removal.
 
-The returned structured result contains:
+The returned structured result contains compact root data plus artifact
+references; it does not embed large SVG strings or raw command lists in the
+trace response. `raw_trace` is the on-demand artifact for the underlying raw
+paths and stable command IDs:
 
 ```json
 {
   "drawing_id": "drw_<opaque>",
   "version": "v0",
-  "canvas": { "width": 1024, "height": 1024, "view_box": [0, 0, 1024, 1024] },
-  "regions": [
+  "trace": {
+    "width": 1024,
+    "height": 1024,
+    "regions": [
     {
       "id": "r1",
-      "color": "#0074F0",
-      "area": 42120,
-      "bbox": [172, 240, 540, 670],
-      "trace_path": {
-        "d": "M…Z",
-        "fill_rule": "nonzero",
-        "commands": [
-          { "id": "r1.p0.c0", "command": "M", "values": [172, 240] },
-          { "id": "r1.p0.c1", "command": "Q", "values": [310, 242, 390, 260] }
-        ]
-      }
+      "source_regions": ["r1", "r7"],
+      "geometry": { "type": "path", "d": "M…Z" },
+      "fill": { "type": "linear_gradient" }
     }
-  ],
-  "region_map_svg": "<svg …/>"
+    ]
+  },
+  "artifacts": {
+    "svg": "drawing://drw_<opaque>/v0.svg",
+    "preview": "drawing://drw_<opaque>/v0.png",
+    "labeled_svg": "drawing://drw_<opaque>/v0.labels.svg",
+    "raw_trace": "drawing://drw_<opaque>/v0.trace.json"
+  },
+  "report": { "targets": [{ "id": "r1", "source_regions": ["r1"], "geometry": "path", "z": 0 }] }
 }
 ```
 
-Region IDs are deterministic for one trace: sort retained regions by
-descending area, then bounding-box top, bounding-box left, color, and original
-segment label. Command IDs include a subpath index so holes and disconnected
-contours remain unambiguous.
+Root IDs are deterministic for one trace: the retained one-shot surfaces sort
+by descending area, segment label, and color. Raw command IDs include a
+subpath index so holes and disconnected contours remain unambiguous.
 
-The region-map SVG renders every raw region with a translucent fill and its
-region ID centered in the region bounding box. It is a diagnostic artifact for
-the agent, not final artwork.
+The default labeled SVG renders editable roots and their region IDs. The raw
+trace artifact contains the exhaustive raw-path region map for command-level
+planning when a root needs a custom path.
 
 ## Refinement-plan contract
 
@@ -141,6 +157,7 @@ the agent, not final artwork.
   "drawing_id": "drw_<opaque>",
   "base_version": "v0",
   "label": "optional user-facing description",
+  "defaults": { "epsilon": 1.5, "max_error": 1.0 },
   "ops": []
 }
 ```
@@ -152,6 +169,15 @@ operation IDs are unique; and path source commands form a directed contiguous
 run within one raw subpath. Validation errors are returned as `INVALID_PLAN`
 with a JSON pointer and actionable message.
 
+`defaults.epsilon` and `defaults.max_error` override the retained trace
+defaults for the plan. `set_geometry`, `detect_primitives`, and
+`detect_symmetry` may each supply either field directly; an operation value
+overrides the plan default. `epsilon` governs simplification/primitive fitting
+and `max_error` bounds Bézier fitting. Both must be finite and non-negative.
+Detection diagnostics are included with each returned target. In particular,
+`detect_symmetry` returns its accepted axis there, so the next versioned plan
+can use that axis directly in `set_symmetry`.
+
 ### Version tree
 
 Every trace begins at immutable version `v0`. A successful plan creates a new
@@ -161,23 +187,60 @@ are branch paths: the first, second, and third refinements of `v0` are `v0.0`,
 next child segment atomically, so agents provide only `base_version` and cannot
 collide when submitting alternatives concurrently.
 
-Each version stores its parent version, the accepted plan, derived render
-targets, SVG, report, preview availability, and the optional plan `label`.
-Agents can branch from any retained version and present sibling alternatives to
-users without retracing the original raster.
+Each version stores its parent version, accepted plan, immutable tuple of native
+`VectorRegion` roots, and optional plan `label`. SVG, preview, labeled SVG, and
+the target report are rendered on demand from those roots. There is no parallel
+`DrawingScene` or `RenderTarget` tree. Agents can branch from any retained
+version and present sibling alternatives without retracing the original raster.
+Each operation is a pure transform that returns fresh affected `VectorRegion`
+objects; the complete plan is atomically committed as one child drawing version.
+No operation mutates the base version or creates a separately persisted partial
+version.
 
-### MVP region operations
+### Scene operations
 
-- `group`: create a semantic group from regions without altering their
-  boundaries or paint order.
-- `set_geometry`: assign a target to `circle`, `ellipse`, `rect`, `polygon`, or
-  `path`.
+- `merge`: create a semantic target from regions, retain their combined
+  source-region ancestry, and serialize their `SkPath` boolean union as one
+  outline. This removes shared interior edges before SVG emission so adjacent
+  same-fill regions cannot produce anti-aliased hairlines. Path-local `group`
+  remains separate.
+- `split`: invoke the existing compound-region splitter for the selected target.
+  Its returned branch children are addressed in the next plan using the existing
+  hyphenated convention (`r1-1`, `r1-2`).
+- `detect_primitives`, `detect_symmetry`, and `detect_clones`: run the named
+  existing automatic inference pass globally when `target` is omitted, or only
+  for an explicitly supplied target. A targeted symmetry operation also permits
+  a mirror-pair match involving that target. Clone detection includes
+  translation, rotation, and reflected affine clones; accepted clones emit SVG
+  `<use>` rather than a baked duplicate path.
+- `set_symmetry`: apply an agent-supplied mirror relationship between `source`
+  and `target` using an axis `{theta, cx, cy}` rather than infer one.
+- `clone`: apply an agent-supplied source/target/transform relationship.
+- `set_geometry`: assign a target to `circle`, `ellipse`, `rect`,
+  `rounded_rect`, `polygon`, `trapezoid`, `rounded_trapezoid`, `cap`, or `path`.
 - `set_fill`: assign `flat`, `linear_gradient`, `radial_gradient`, or `raster`.
 - `set_z_order`: establish final paint order for all emitted targets.
+- `simplify`: reduce path complexity globally or for an optional `target`.
+- `stitch`: reconcile shared boundaries globally or for an optional `target`.
 
-`group` is intentionally not boolean union. A future explicit boolean operation
-will create a new derived boundary and command-ID namespace; silently treating a
-group as a union would make the agent's raw command references invalid.
+`split` is structural and must be the final operation in a plan.
+`detect_symmetry` is structural only when it needs to split a freeform
+self-symmetric path. A global symmetry detection must be final; a terminal
+block may contain several targeted `detect_symmetry` operations for distinct
+regions. Inspect the returned report, then address any derived hyphenated
+children in a new versioned plan. Explicitly selected intrinsically symmetric
+geometry, such as a cap or rounded trapezoid, is retained as one region and
+reported as `mode: "intrinsic"` rather than being split into a redundant pair.
+Clone `<use>` relationships remain symbolic through interactive and one-shot
+output unless explicit SVG flattening is requested. A self-symmetry mirror
+`<use>` is the exception: it is baked to a concrete path immediately before
+`simplify` or `stitch`, so polish passes see both sides of a shared seam and
+cannot leave an anti-aliased hairline.
+
+Automatic one-shot refinement runs the existing optimizer pass sequence,
+including occlusion, compound splitting, symmetry, clones, simplification, and
+stitching. Interactive tracing remains raw; interactive plans opt into automatic
+behavior through the ordered `detect_*` scene operations.
 
 ### MVP path operations
 
@@ -186,6 +249,9 @@ array:
 
 - `group`: trace-path commands -> named logical segment.
 - `fit`: logical segment -> `line`, `quadratic`, `cubic`, or `keep`.
+- `simplify` and `stitch`: geometry-local cleanup operations. `stitch` is the
+  public name for shared-boundary reconciliation; `smooth` is automatic
+  residual-gated tangent smoothing whenever a path is fitted.
 - `break`: request a G0 discontinuity after a named segment.
 - `close`: close the current subpath.
 
@@ -196,16 +262,16 @@ not author final path coordinates.
 ## Execution model
 
 The trace module produces an internal `DrawingState` and a public,
-JSON-safe summary. The plan executor creates fresh render targets from this
-immutable state, fits requested geometry to its raw contour evidence, maps
-declared fills to the existing fill classes, and serializes through the existing
-SVG emitter. It does not mutate the stored trace. Each accepted plan creates an
-immutable version, so the agent may issue multiple branches for one drawing.
+JSON-safe summary. The plan executor transforms only cached `VectorRegion`
+roots, fits requested geometry to raw contour evidence, maps declared fills to
+the existing fill classes, and runs named `detect_*` operations through the
+existing optimizer passes. It does not mutate the stored trace. Each accepted
+plan creates an immutable version, so the agent may issue multiple branches for
+one drawing.
 
-The refinement result includes its new version ID, final SVG, preview
-availability, target-level geometry/fill summaries, and residual measurements
-against the stored raster masks. It also returns warnings for lossy fits without
-silently falling back to automatic idealization.
+The refinement result includes its new version ID, artifact references, and
+target-level geometry/fill/provenance summaries. Call
+`get_drawing_artifact` to retrieve the SVG, clean PNG preview, or labeled SVG.
 
 ### Trace-engine boundary and native follow-up
 
@@ -226,9 +292,7 @@ does not alter the MCP tools, drawing store, version tree, or plan schema.
 ## Non-goals
 
 - CLI commands or a portable trace file.
-- Automatic primitive/candidate suggestions.
-- Auto symmetry, clone inference, path congruency, constraints, ribbons, arcs,
-  split regions, or boolean unions.
+- Ribbons, arcs, path congruency, and a general constraint solver.
 - Persistence across an MCP server restart or session end.
 - Retaining state for automatic calls.
 

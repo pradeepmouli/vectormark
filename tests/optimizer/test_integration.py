@@ -292,13 +292,14 @@ def test_optimizer_pipeline_keeps_daikonic_fixture_objects_present():
 def test_optimizer_pipeline_reconstructs_mastercard_as_scene_branch():
     svg, report = idealize(_synthetic_mastercard_image(), options=Options(optimizer=True), report=True)
 
-    assert svg.count("<circle") == 2
+    assert svg.count("<circle") == 1
+    assert svg.count("<use") == 1
     assert svg.count("<path") == 1
     diagnostics = report.diagnostics.to_dict()
     assert diagnostics["optimizer_fallback"] is None
     assert diagnostics["optimizer_regions"][0]["kind"] == "branch"
     assert diagnostics["optimizer_regions"][0]["children"] == 3
-    assert [obj["shape"] for obj in diagnostics["optimizer_objects"]] == ["circle", "circle", "path", "path"]
+    assert [obj["shape"] for obj in diagnostics["optimizer_objects"]] == ["circle", "use", "path", "path"]
     assert diagnostics["optimizer_objects"][2]["diagnostics"]["symmetry"]["mode"] == "self"
     assert diagnostics["optimizer_objects"][3]["diagnostics"]["symmetry"]["mode"] == "self_mirror"
 
@@ -326,6 +327,29 @@ def test_optimizer_inlines_same_gradient_fill_mirror_to_preserve_paint_space():
     assert "<use" not in svg_body
     assert svg_body.count("<path") == 2
     assert svg_body.count('fill="url(#g0)"') == 2
+
+
+def test_optimizer_retains_recolored_clone_as_use_with_its_own_fill():
+    source = VectorRegion(
+        1,
+        Shape("circle", {"cx": 10.0, "cy": 10.0, "r": 8.0}),
+        FlatFill("#FF0000"),
+        0,
+    )
+    clone = VectorRegion(
+        2,
+        Shape("use", {"href_obj_id": 1, "transform": (1.0, 0.0, 0.0, 1.0, 20.0, 0.0)}),
+        FlatFill("#0000FF"),
+        1,
+        footprint=source.footprint,
+        diagnostics={"clones": {"accepted": True, "matched_source": 1}},
+    )
+
+    body, _defs = _render_optimizer_body([source, clone])
+
+    assert body[0].startswith('<circle id="s1" fill="#FF0000"')
+    assert body[1].startswith('<use id="s2" href="#s1"')
+    assert 'fill="#0000FF"' in body[1]
 
 
 def test_optimizer_emits_tree_ids_for_branch_children():
