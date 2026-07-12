@@ -516,6 +516,25 @@ def test_z_order_uses_the_final_target_created_by_grouping():
     validate_plan(plan, _trace(), _scene("r1"))
 
 
+def test_z_order_must_be_the_final_operation():
+    from vectormark.drawing_plan import PlanValidationError, parse_plan, validate_plan
+
+    plan = parse_plan(
+        {
+            "version": "vectormark.plan.v1",
+            "drawing_id": "drw_x",
+            "base_version": "v0",
+            "ops": [
+                {"op": "set_z_order", "targets": ["r1", "r2"]},
+                {"op": "merge", "id": "g1", "regions": ["r1", "r2"]},
+            ],
+        }
+    )
+
+    with pytest.raises(PlanValidationError, match="set_z_order must be the final operation"):
+        validate_plan(plan, _two_region_trace(), _scene("r1", "r2"))
+
+
 def test_parse_plan_recursively_freezes_nested_path_op_sequences():
     from vectormark.drawing_plan import parse_plan, validate_plan
 

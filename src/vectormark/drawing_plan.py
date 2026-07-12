@@ -155,6 +155,8 @@ def validate_plan(plan: DrawingPlan, trace: TraceResult, regions: Sequence[Vecto
         elif name == "set_z_order":
             if z_order_seen:
                 raise PlanValidationError(pointer, "only one set_z_order operation is allowed")
+            if index != len(plan.ops) - 1:
+                raise PlanValidationError(pointer, "set_z_order must be the final operation")
             z_order_seen = True
             z_order = (op, pointer)
         else:

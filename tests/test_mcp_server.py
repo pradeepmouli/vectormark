@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from typing import get_args, get_type_hints
 import base64
 import io
 from types import SimpleNamespace
@@ -221,3 +222,11 @@ def test_stdio_server_exposes_only_the_drawing_first_surface():
     assert auto.structuredContent["svg"].startswith("<svg ")
     assert refined.structuredContent["version"] == "v0.0"
     assert '<circle id="r1"' in artifact.structuredContent["svg"]
+
+
+def test_drawing_artifact_accepts_the_preview_alias_returned_by_trace_and_refine():
+    from vectormark.mcp_server import get_drawing_artifact
+
+    artifact_type = get_type_hints(get_drawing_artifact)["artifact"]
+
+    assert "preview" in get_args(artifact_type)

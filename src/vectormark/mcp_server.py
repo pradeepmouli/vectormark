@@ -708,7 +708,7 @@ def refine_drawing(
 
 @mcp.tool(title="Get drawing artifact", description="Fetch an SVG, clean PNG preview, or labeled trace SVG for a live drawing version.")
 def get_drawing_artifact(
-    drawing_id: str, version: str = "v0", artifact: Literal["svg", "preview_png", "labeled_svg", "raw_trace"] = "svg",
+    drawing_id: str, version: str = "v0", artifact: Literal["svg", "preview", "preview_png", "labeled_svg", "raw_trace"] = "svg",
     ctx: Context | None = None,
 ) -> Annotated[CallToolResult, DrawingArtifactOutput]:
     if ctx is None:
@@ -731,13 +731,13 @@ def get_drawing_artifact(
         )
     if artifact == "svg":
         return CallToolResult(content=[TextContent(type="text", text=rendered.svg)], structuredContent={"mime_type": "image/svg+xml", "svg": rendered.svg})
-    if artifact == "preview_png":
+    if artifact in {"preview", "preview_png"}:
         preview = _render_preview_png(rendered.svg, drawing.trace.width, drawing.trace.height, [])
         if preview is None:
             raise ToolError("[PREVIEW_UNAVAILABLE] PNG preview renderer is unavailable")
         content = ImageContent(type="image", data=base64.b64encode(preview).decode(), mimeType="image/png")
         return CallToolResult(content=[content], structuredContent={"mime_type": "image/png"})
-    raise ToolError("[ARTIFACT_UNKNOWN] artifact must be svg, preview_png, labeled_svg, or raw_trace")
+    raise ToolError("[ARTIFACT_UNKNOWN] artifact must be svg, preview, preview_png, labeled_svg, or raw_trace")
 
 
 def idealize_logo(image: ImageRef, options: IdealizeOptions | None = None) -> CallToolResult:
@@ -797,8 +797,10 @@ def idealize_logo_data(
 )
 def render_drawing(result: dict | None = None, image_path: str = "", svg: str = "",
                           width: int = 0, height: int = 0) -> RenderedSvgOutput:
-    """Render an existing idealized SVG result in the vectormark app. Accepts the full
-    `idealize_logo` result (preferred) or the legacy flat fields."""
+    """Render an existing traced/refined drawing SVG in the vectormark app.
+
+    Accepts a drawing-tool result (preferred) or the legacy flat SVG fields.
+    """
     if result:
         svg = result.get("svg", svg)
         width = result.get("width", width)
