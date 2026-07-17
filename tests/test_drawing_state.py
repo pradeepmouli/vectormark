@@ -172,18 +172,20 @@ def test_store_allocates_sibling_versions_atomically(fake_clock: FakeClock) -> N
     ]
 
 
-def test_store_rejects_cross_session_and_expired_drawings(fake_clock: FakeClock) -> None:
+def test_store_accepts_request_session_handoffs_and_expires_drawings(fake_clock: FakeClock) -> None:
     store = DrawingStore(now=fake_clock, idle_ttl_seconds=1800)
     owner, other = object(), object()
     drawing = store.create(owner, _trace(), regions=_regions())
 
-    with pytest.raises(DrawingNotFound) as cross_session_error:
-        store.get(other, drawing.id, "v0")
-    assert cross_session_error.value.__cause__ is None
+    # An outbound MCP tunnel can create a fresh transport session for every
+    # request.  The opaque drawing ID, rather than the transient session
+    # object, is the live-state capability.
+    _, root = store.get(other, drawing.id, "v0")
+    assert root.id == "v0"
 
     fake_clock.advance(1800)
     with pytest.raises(DrawingNotFound) as expired_error:
-        store.get(owner, drawing.id, "v0")
+        store.get(other, drawing.id, "v0")
     assert expired_error.value.__cause__ is None
 
 

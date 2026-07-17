@@ -1,3 +1,5 @@
+from types import SimpleNamespace
+
 import numpy as np
 
 from vectormark.candidate import FlatFill
@@ -13,6 +15,42 @@ from vectormark._fitcurve import cubic_inflects
 
 def _mask(shape: Shape, shape_hw: tuple[int, int] = (80, 120)) -> np.ndarray:
     return rasterize(to_polygon(shape), shape_hw)
+
+
+def test_regions_close_rejects_separated_bounds_without_exact_path_distance():
+    class Footprint:
+        is_empty = False
+
+        def __init__(self, bounds):
+            self.bounds = bounds
+
+        def distance(self, _other):
+            raise AssertionError("far bounds must not require exact path distance")
+
+    left = SimpleNamespace(footprint=Footprint((0.0, 0.0, 10.0, 10.0)))
+    right = SimpleNamespace(footprint=Footprint((20.0, 0.0, 30.0, 10.0)))
+
+    assert not seams_module._regions_close(left, right, tol=2.0)
+
+
+def test_regions_close_rejects_overlapping_bounds_with_no_near_path_endpoints():
+    class Footprint:
+        is_empty = False
+        bounds = (0.0, 0.0, 100.0, 100.0)
+
+        def distance(self, _other):
+            raise AssertionError("separated path endpoints must reject before exact distance")
+
+    left = SimpleNamespace(
+        current=Shape("path", {"d": "M0 0 L0 100 L100 100 L100 0 Z"}),
+        footprint=Footprint(),
+    )
+    right = SimpleNamespace(
+        current=Shape("path", {"d": "M40 40 L40 60 L60 60 L60 40 Z"}),
+        footprint=Footprint(),
+    )
+
+    assert not seams_module._regions_close(left, right, tol=2.0)
 
 
 def test_seams_pass_closes_adjacent_path_gap_to_shared_boundary():
@@ -38,6 +76,49 @@ def test_seams_pass_closes_adjacent_path_gap_to_shared_boundary():
     assert by_id[2].current.params["d"].startswith("M49.8 10")
     assert by_id[1].footprint.boundary.distance(by_id[2].footprint.boundary) == 0
     assert by_id[1].diagnostics["seams"]["selected"] == "midpoint"
+
+
+def test_seams_pass_projects_shared_line_endpoints_exactly_after_trace_jitter():
+    left = VectorRegion(
+        1,
+        Shape("path", {"d": "M10 10 L49 10 L49 70 L10 70 Z"}),
+        FlatFill("#111111"),
+        0,
+    )
+    right = VectorRegion(
+        2,
+        Shape("path", {"d": "M51.4 10 L90 10 L90 70 L51.4 70 Z"}),
+        FlatFill("#222222"),
+        1,
+    )
+
+    out = optimize([left, right], {1: _mask(left.current), 2: _mask(right.current)}, [seams_pass])
+
+    by_id = {obj.id: obj for obj in out}
+    assert "L50.2 10 L50.2 70" in by_id[1].current.params["d"]
+    assert by_id[2].current.params["d"].startswith("M50.2 10")
+    assert by_id[1].footprint.boundary.distance(by_id[2].footprint.boundary) == 0
+
+
+def test_seams_pass_does_not_stitch_nearby_distinct_surface_fill_groups():
+    left = VectorRegion(
+        1,
+        Shape("path", {"d": "M10 10 L49.2 10 L49.2 70 L10 70 Z"}),
+        FlatFill("#111111"),
+        0,
+        diagnostics={"surface_fill": {"group": 1}},
+    )
+    right = VectorRegion(
+        2,
+        Shape("path", {"d": "M50.4 10 L90 10 L90 70 L50.4 70 Z"}),
+        FlatFill("#ffffff"),
+        1,
+        diagnostics={"surface_fill": {"group": 2}},
+    )
+
+    out = optimize([left, right], {1: _mask(left.current), 2: _mask(right.current)}, [seams_pass])
+
+    assert [obj.current.params["d"] for obj in out] == [left.current.params["d"], right.current.params["d"]]
 
 
 def test_seams_pass_adjusts_primitive_and_path_to_close_gap():
@@ -458,9 +539,33 @@ def test_seams_pass_clusters_sketch_like_bottom_junction_with_duplicate_tip_segm
     assert len(set(coordinates)) == 1
 
 
-def test_optimizer_runs_seams_after_symmetry_before_render_inlining():
+def test_optimizer_runs_one_final_full_scene_stitch_after_symmetry_before_render_inlining():
     pass_names = [getattr(pass_fn, "__name__", pass_fn.__class__.__name__) for pass_fn in _optimizer_passes(Options(optimizer=True))]
 
     assert pass_names.count("clones_pass") == 1
-    assert pass_names.count("seams_pass") == 2
-    assert pass_names[-6:] == ["symmetry_pass", "seams_pass", "simplify_pass", "clones_pass", "simplify_pass", "seams_pass"]
+    assert pass_names.count("seams_pass") == 1
+    assert pass_names[-6:] == [
+        "clones_pass",
+        "straighten_pass",
+        "linelet_simplify_pass",
+        "smooth_pass",
+        "symmetry_pass",
+        "seams_pass",
+    ]
+
+
+def test_optimizer_final_stitch_reconciles_all_shared_boundaries(monkeypatch):
+    import vectormark.optimizer.passes as passes
+
+    calls: list[bool] = []
+
+    def record_seams_pass(objects, masks, **kwargs):
+        del objects, masks
+        calls.append(kwargs["post_symmetry"])
+        return []
+
+    monkeypatch.setattr(passes, "seams_pass", record_seams_pass)
+    final_stitch = _optimizer_passes(Options(optimizer=True))[-1]
+
+    assert final_stitch([], {}) == []
+    assert calls == [False]

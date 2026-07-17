@@ -70,6 +70,53 @@ def test_generate_corpus_html_can_opt_into_cubic_paths(tmp_path):
     assert '"cubic_paths": true' in options.read_text()
 
 
+def test_generate_corpus_html_can_use_mcp_trace_drawing_auto_workflow(tmp_path):
+    output = tmp_path / "corpus"
+    index = generate_corpus_html(
+        output,
+        [CorpusEntry("tiny_disk", "current", _tiny_disk, Options())],
+        workflow="trace_auto",
+    )
+
+    svg = (output / "svg" / "trace_auto-tiny_disk.svg").read_text()
+    diagnostics = (output / "diagnostics" / "trace_auto-tiny_disk.json").read_text()
+    options = (output / "options" / "trace_auto-tiny_disk.json").read_text()
+
+    assert "trace_auto / tiny_disk" in index.read_text()
+    assert svg.startswith("<svg ")
+    assert '"workflow": "trace_drawing_auto"' in diagnostics
+    assert '"refine": "auto"' in options
+    assert any((output / "cache").glob("drawing-trace-tiny_disk-*.pkl"))
+
+
+def test_trace_auto_cache_reuses_trace_roots_but_reruns_auto_refinement(tmp_path, monkeypatch):
+    output = tmp_path / "corpus"
+    entry = CorpusEntry("tiny_disk", "current", _tiny_disk, Options())
+    trace_calls = 0
+    refine_calls = 0
+    original_trace = corpus_html._trace_result
+    original_refine = corpus_html.auto_refine
+
+    def trace_once(*args, **kwargs):
+        nonlocal trace_calls
+        trace_calls += 1
+        return original_trace(*args, **kwargs)
+
+    def refine_each_run(*args, **kwargs):
+        nonlocal refine_calls
+        refine_calls += 1
+        return original_refine(*args, **kwargs)
+
+    monkeypatch.setattr(corpus_html, "_trace_result", trace_once)
+    monkeypatch.setattr(corpus_html, "auto_refine", refine_each_run)
+
+    generate_corpus_html(output, [entry], workflow="trace_auto")
+    generate_corpus_html(output, [entry], workflow="trace_auto")
+
+    assert trace_calls == 1
+    assert refine_calls == 2
+
+
 def test_generate_corpus_html_can_override_corpus_tolerances(tmp_path):
     index = generate_corpus_html(
         tmp_path / "corpus",

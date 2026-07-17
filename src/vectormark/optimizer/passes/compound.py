@@ -85,6 +85,11 @@ def _fill_from_render_evidence(
 
     if best_coverage >= _FILL_COVERAGE_THRESHOLD:
         return best_fill, best_coverage, best_id
+    if isinstance(source.fill, FlatFill):
+        # A nested winding subpath with no visible source layer is a real
+        # cutout.  Materialize the canvas plate so outer and inner geometry can
+        # be optimized independently instead of retaining one compound path.
+        return _DEFAULT_BACKGROUND_FILL, best_coverage, None
     if not isinstance(source.fill, (LinearGradientFill, RadialGradientFill)):
         return None, best_coverage, best_id
     return _DEFAULT_BACKGROUND_FILL, best_coverage, None
@@ -98,8 +103,6 @@ def split_compound_pass(
     next_id = max((int(obj.id) for obj in objects), default=-1) + 1
     for obj in sorted(objects, key=lambda current: int(current.id)):
         if not obj.is_leaf or obj.current is None or obj.current.kind != "path":
-            continue
-        if not obj.current.params.get("fill_rule"):
             continue
         if not isinstance(obj.fill, (FlatFill, LinearGradientFill, RadialGradientFill)):
             continue
@@ -136,6 +139,21 @@ def split_compound_pass(
         if len(footprints) != len(kept):
             continue
 
+        # SVG permits a nested hole to rely on winding direction instead of an
+        # explicit fill-rule.  Treat that as a compound cutout too: retaining
+        # it as one path prevents primitive fitting of the exterior and the
+        # interior independently.  Disconnected subpaths without a fill rule
+        # remain one path, because they may be intentional islands rather than
+        # a layer-plus-cutout relationship.
+        if not obj.current.params.get("fill_rule"):
+            source_footprint = footprints[0]
+            contains_nested_subpath = any(
+                source_footprint._path.contains(float(footprint.centroid.x), float(footprint.centroid.y))
+                for footprint in footprints[1:]
+            )
+            if not contains_nested_subpath:
+                continue
+
         children: list[VectorRegion] = []
         for output_index, (_subpath_index, tokens, _area) in enumerate(kept):
             child_id = obj.id if output_index == 0 else next_id
@@ -171,6 +189,7 @@ def split_compound_pass(
                     original=shape,
                     source_label=obj.source_label,
                     color_hex=obj.color_hex,
+                    source_regions=obj.source_regions,
                     coverage=obj.coverage,
                     diagnostics={
                         "compound": {
@@ -195,6 +214,7 @@ def split_compound_pass(
             fill=obj.fill,
             source_label=obj.source_label,
             color_hex=obj.color_hex,
+            source_regions=obj.source_regions,
             diagnostics={
                 "compound": {
                     "accepted": True,

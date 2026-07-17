@@ -16,10 +16,12 @@ from PIL import Image, ImageDraw
 from vectormark.mcp_server import (
     WIDGET_URI,
     ImageRef,
+    GeometryGuideOptions,
     TraceDrawingOptions,
     get_drawing_artifact,
     mcp,
     refine_drawing,
+    retrace_drawing,
     render_drawing,
     trace_drawing,
 )
@@ -33,6 +35,41 @@ def _png_data_uri() -> str:
     return "data:image/png;base64," + base64.b64encode(data.getvalue()).decode()
 
 
+def _transparent_png_data_uri() -> str:
+    image = Image.new("RGBA", (64, 64), (0, 0, 0, 0))
+    ImageDraw.Draw(image).rounded_rectangle((12, 12, 52, 52), radius=10, fill=(200, 55, 171, 255))
+    data = io.BytesIO()
+    image.save(data, format="PNG")
+    return "data:image/png;base64," + base64.b64encode(data.getvalue()).decode()
+
+
+def _geometry_guide_data_uri() -> str:
+    image = Image.new("RGBA", (64, 64), (0, 0, 0, 0))
+    ImageDraw.Draw(image).rounded_rectangle((16, 16, 48, 48), radius=6, fill=(255, 0, 255, 255))
+    data = io.BytesIO()
+    image.save(data, format="PNG")
+    return "data:image/png;base64," + base64.b64encode(data.getvalue()).decode()
+
+
+def _small_geometry_guide_data_uri() -> str:
+    image = Image.new("RGBA", (32, 32), (0, 0, 0, 0))
+    ImageDraw.Draw(image).rectangle((8, 8, 24, 24), fill=(255, 0, 255, 255))
+    data = io.BytesIO()
+    image.save(data, format="PNG")
+    return "data:image/png;base64," + base64.b64encode(data.getvalue()).decode()
+
+
+def test_trace_drawing_uses_alpha_for_initial_geometry_and_composited_rgb_for_fill():
+    trace, rgb = mcp_server_module._trace_result(
+        ImageRef(data_uri=_transparent_png_data_uri()), TraceDrawingOptions()
+    )
+
+    assert trace.background["mode"] == "native_alpha"
+    assert trace.background["applied"] is True
+    assert trace.geometry_regions
+    assert tuple(rgb[0, 0]) == (255, 255, 255)
+
+
 def test_unrefined_trace_refine_and_artifact_share_one_live_region_forest():
     """The public MCP helpers preserve v0 roots and refine child versions."""
     ctx = SimpleNamespace(session=object())
@@ -41,6 +78,13 @@ def test_unrefined_trace_refine_and_artifact_share_one_live_region_forest():
     assert trace is not None
     drawing_id = trace["drawing_id"]
     assert trace["version"] == "v0"
+    assert trace["artifacts"]["review_panel"].endswith(".review.png")
+    panel_content = next(item for item in traced.content if item.type == "image")
+    assert Image.open(io.BytesIO(base64.b64decode(panel_content.data))).size == (1140, 640)
+    panel_artifact = get_drawing_artifact(drawing_id, "v0", "review_panel", ctx)
+    panel = panel_artifact.content[0]
+    assert panel.type == "image"
+    assert Image.open(io.BytesIO(base64.b64decode(panel.data))).size == (1140, 640)
     assert trace["report"]["targets"]
     assert "region_map_svg" not in trace["trace"]
     assert "geometry" in trace["trace"]["regions"][0]
@@ -63,6 +107,27 @@ def test_unrefined_trace_refine_and_artifact_share_one_live_region_forest():
 
     artifact = get_drawing_artifact(drawing_id, "v0.0", "svg", ctx).structuredContent
     assert artifact is not None and '<circle id="r1"' in artifact["svg"]
+
+
+def test_mcp_split_accepts_an_explicit_infinite_line_divider():
+    ctx = SimpleNamespace(session=object())
+    traced = trace_drawing(ImageRef(data_uri=_png_data_uri()), TraceDrawingOptions(refine="none"), ctx).structuredContent
+    assert traced is not None
+
+    split = refine_drawing(
+        {
+            "version": "vectormark.plan.v1",
+            "drawing_id": traced["drawing_id"],
+            "base_version": "v0",
+            "ops": [
+                {"op": "split", "target": "r1", "divider": {"type": "line", "points": [[32, 0], [32, 64]]}},
+            ],
+        },
+        ctx,
+    ).structuredContent
+
+    assert split is not None
+    assert [target["id"] for target in split["report"]["targets"]] == ["r1-1", "r1-2"]
 
 
 def test_trace_options_name_the_absence_of_automatic_refinement_none():
@@ -121,31 +186,75 @@ def test_mcp_detect_symmetry_exposes_an_axis_for_a_follow_up_set_symmetry_plan()
     assert updated["diagnostics"]["symmetry"]["mode"] == "pair"
 
 
-def test_trace_auto_returns_a_one_shot_svg_without_live_state():
+def test_trace_auto_refines_the_retained_trace_into_a_live_child_version():
     ctx = SimpleNamespace(session=object())
     result = trace_drawing(
         ImageRef(data_uri=_png_data_uri()), TraceDrawingOptions(refine="auto", max_colors=4), ctx
     ).structuredContent
 
     assert result is not None
-    assert result["svg"].startswith("<svg ")
-    assert "drawing_id" not in result
+    assert result["drawing_id"]
+    assert result["version"] == "v0.0"
+    assert result["artifacts"]["svg"].endswith("/v0.0.svg")
 
 
-def test_trace_auto_threads_trace_controls_into_idealize_options(monkeypatch):
+def test_geometry_guide_retraces_geometry_but_refills_every_leaf_from_the_original_source():
+    ctx = SimpleNamespace(session=object())
+    traced = trace_drawing(ImageRef(data_uri=_png_data_uri()), TraceDrawingOptions(refine="none"), ctx).structuredContent
+    assert traced is not None
+
+    guided_result = retrace_drawing(
+        traced["drawing_id"],
+        "v0",
+        ImageRef(data_uri=_geometry_guide_data_uri()),
+        GeometryGuideOptions(max_colors=4),
+        ctx=ctx,
+    )
+    guided = guided_result.structuredContent
+
+    assert guided is not None
+    assert guided["version"] == "v0.0"
+    panel = guided_result.content
+    assert Image.open(io.BytesIO(base64.b64decode(next(item for item in panel if item.type == "image").data))).size == (1140, 640)
+
+    guide_trace = get_drawing_artifact(traced["drawing_id"], guided["version"], "raw_trace", ctx).structuredContent
+    svg = get_drawing_artifact(traced["drawing_id"], guided["version"], "svg", ctx).structuredContent
+    assert guide_trace is not None and "#ff00ff" in str(guide_trace["trace"]).lower()
+    assert svg is not None and "#ff00ff" not in svg["svg"].lower()
+
+
+def test_geometry_guide_requires_the_live_trace_canvas_without_silent_resampling():
+    ctx = SimpleNamespace(session=object())
+    traced = trace_drawing(ImageRef(data_uri=_png_data_uri()), TraceDrawingOptions(refine="none"), ctx).structuredContent
+    assert traced is not None
+
+    with pytest.raises(ToolError, match="geometry guide must be exactly 64x64"):
+        retrace_drawing(
+            traced["drawing_id"],
+            "v0",
+            ImageRef(data_uri=_small_geometry_guide_data_uri()),
+            GeometryGuideOptions(max_colors=4),
+            ctx=ctx,
+        )
+
+
+def test_trace_auto_threads_trace_controls_into_python_trace_and_auto_refinement(monkeypatch):
     captured = {}
 
-    def capture(_image, options):
-        captured["options"] = options
-        return SimpleNamespace(structuredContent={"svg": "<svg />"})
+    def capture(trace, regions, *, rgb):
+        captured["trace"] = trace
+        captured["regions"] = regions
+        captured["rgb"] = rgb
+        return tuple(regions)
 
-    monkeypatch.setattr(mcp_server_module, "idealize_logo", capture)
+    monkeypatch.setattr(mcp_server_module, "auto_refine", capture)
     trace_drawing(
         ImageRef(data_uri=_png_data_uri()),
         TraceDrawingOptions(
             refine="auto",
             max_colors=9,
             min_region_size=37,
+            max_hole_area=91,
             min_region_fraction=0.125,
             simplify_tolerance=2.25,
             curve_tolerance=0.75,
@@ -153,12 +262,14 @@ def test_trace_auto_threads_trace_controls_into_idealize_options(monkeypatch):
         SimpleNamespace(session=object()),
     )
 
-    options = captured["options"]
-    assert options.colors == 9
+    options = captured["trace"].options
+    assert options.max_colors == 9
     assert options.min_region_size == 37
-    assert options.min_region_fraction == 0.125
-    assert options.epsilon == 2.25
-    assert options.max_error == 0.75
+    assert options.max_hole_area == 91
+    assert options.simplify_tolerance == 2.25
+    assert options.curve_tolerance == 0.75
+    assert captured["rgb"].shape[:2] == (captured["trace"].height, captured["trace"].width)
+    assert captured["regions"]
 
 
 def test_idealize_logo_threads_region_thresholds_into_pipeline_options(monkeypatch):
@@ -261,22 +372,24 @@ def test_stdio_server_exposes_only_the_drawing_first_surface():
 
     initialized, tools, resources, widget, auto, refined, artifact = asyncio.run(list_tools_and_run_drawing_workflow())
 
-    assert set(tools) == {"trace_drawing", "refine_drawing", "get_drawing_artifact", "render_drawing"}
+    assert set(tools) == {"trace_drawing", "retrace_drawing", "refine_drawing", "get_drawing_artifact", "render_drawing"}
     assert "refine='none'" in (initialized.instructions or "")
     assert tools["trace_drawing"].meta["openai/fileParams"] == ["image"]
+    assert tools["retrace_drawing"].meta["openai/fileParams"] == ["geometry_guide"]
     refine_schema = tools["refine_drawing"].inputSchema
     plan_schema = refine_schema["$defs"]["RefinementPlanInput"]
     assert "oneOf" in plan_schema["properties"]["ops"]["items"]
     assert "set_geometry" in str(refine_schema)
-    assert "r1.p1.c14-1" in str(refine_schema)
+    assert "r1.p1.c14" in str(refine_schema)
     assert "match_length" in str(refine_schema)
     assert "quadratic" in str(refine_schema)
-    for tool_name in ("trace_drawing", "refine_drawing", "get_drawing_artifact", "render_drawing"):
+    for tool_name in ("trace_drawing", "retrace_drawing", "refine_drawing", "get_drawing_artifact", "render_drawing"):
         assert tools[tool_name].outputSchema is not None
     assert WIDGET_URI in resources
-    assert "Logo idealizer" in widget
+    assert "Trace & refine" in widget
     assert auto.structuredContent is not None
-    assert auto.structuredContent["svg"].startswith("<svg ")
+    assert auto.structuredContent["drawing_id"]
+    assert auto.structuredContent["version"] == "v0.0"
     assert refined.structuredContent["version"] == "v0.0"
     assert '<circle id="r1"' in artifact.structuredContent["svg"]
 
@@ -287,3 +400,4 @@ def test_drawing_artifact_accepts_the_preview_alias_returned_by_trace_and_refine
     artifact_type = get_type_hints(get_drawing_artifact)["artifact"]
 
     assert "preview" in get_args(artifact_type)
+    assert "review_panel" in get_args(artifact_type)

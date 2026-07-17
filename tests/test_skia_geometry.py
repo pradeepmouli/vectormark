@@ -33,3 +33,10 @@ def test_area_subtracts_holes_in_each_disjoint_component():
     path = SkPath(shell=first, holes=[first_hole]).union(SkPath(shell=second, holes=[second_hole]))
 
     assert path.area == 160.0
+
+
+def test_symmetric_difference_area_normalizes_overlapping_evenodd_contours():
+    left = SkPath(shell=[(0, 0), (10, 0), (10, 10), (0, 10)])
+    right = SkPath(shell=[(5, 0), (15, 0), (15, 10), (5, 10)])
+
+    assert left.symmetric_difference(right).area == 100.0

@@ -134,6 +134,56 @@ def mean_delta_e(a: np.ndarray, b: np.ndarray) -> float:
     return float(np.linalg.norm(la - lb, axis=1).mean())
 
 
+def infer_max_colors(
+    rgb_image: np.ndarray,
+    *,
+    candidates: tuple[int, ...] = (8, 16, 32, 64),
+    sample_size: int = 16_384,
+    minimum_improvement: float = 0.001,
+) -> int:
+    """Choose the smallest palette before quantization improvements flatten.
+
+    Palette extraction is deterministic and frequency ordered, so candidate
+    palettes are prefixes of one maximum palette.  This lets the selector score
+    every palette size in a single incremental nearest-colour sweep over a
+    bounded deterministic sample rather than repeatedly quantizing the image.
+    """
+    levels = tuple(sorted({int(level) for level in candidates if int(level) >= 2}))
+    if not levels:
+        raise ValueError("palette candidates must contain an integer >= 2")
+    image = np.asarray(rgb_image, dtype=np.uint8)
+    if image.ndim != 3 or image.shape[2] != 3:
+        raise ValueError("palette inference expects an RGB image")
+    palette = extract_palette(image, max_colors=levels[-1], min_fraction=0.0)
+    if len(palette) <= levels[0]:
+        return int(len(palette))
+
+    effective_levels = tuple(sorted({min(level, len(palette)) for level in levels}))
+    flat = image.reshape(-1, 3)
+    if len(flat) > sample_size:
+        sample = flat[np.linspace(0, len(flat) - 1, sample_size, dtype=np.intp)]
+    else:
+        sample = flat
+    sample_lab = srgb_to_oklab(sample / 255.0)
+    palette_lab = srgb_to_oklab(palette / 255.0)
+    best = np.full(len(sample_lab), np.inf, dtype=float)
+    errors: dict[int, float] = {}
+    level_index = 0
+    for index, color in enumerate(palette_lab, start=1):
+        best = np.minimum(best, np.linalg.norm(sample_lab - color, axis=1))
+        while level_index < len(effective_levels) and index >= effective_levels[level_index]:
+            errors[effective_levels[level_index]] = float(best.mean())
+            level_index += 1
+    while level_index < len(effective_levels):
+        errors[effective_levels[level_index]] = float(best.mean())
+        level_index += 1
+
+    for current, following in zip(effective_levels, effective_levels[1:]):
+        if errors[current] - errors[following] <= minimum_improvement:
+            return current
+    return effective_levels[-1]
+
+
 def quantize(rgb_image: np.ndarray, palette: np.ndarray) -> np.ndarray:
     """Assign every pixel to its nearest palette colour by OKLab ΔE."""
     h, w, _ = rgb_image.shape

@@ -7,30 +7,42 @@ from dataclasses import asdict, dataclass, field
 from typing import Literal, Protocol
 
 import numpy as np
+from scipy.ndimage import binary_erosion, distance_transform_edt, label
 
 from .color import extract_palette, quantize
 from .contour import region_contours
 from .emit import render_svg_doc
-from .fit import fit_path
+from .fit import fit_path_stages
+from .optimizer.corners import path_corner_diagnostics
 from .pipeline import attach_coverage_field
-from .segment import segment
+from .segment import fill_tiny_isolated_holes, segment
 
 
 @dataclass(frozen=True)
 class TraceOptions:
     max_colors: int = 16
+    requested_max_colors: int | Literal["auto"] | None = None
     min_region_size: int = 16
+    max_hole_area: int = 128
     trace_level: Literal["pixel", "subpixel"] = "pixel"
     simplify_tolerance: float = 1.5
     curve_tolerance: float = 1.0
-    curve_type: Literal["quadratic", "cubic"] = "quadratic"
+    fit_strategy: Literal["quadratic", "progressive", "progressive_allow_lines"] = "quadratic"
+    corner_normalize: bool = False
+    remove_background: Literal["auto", "off", "on"] = "auto"
+    # ``None`` means this lower-level engine was given RGB only and must retain
+    # legacy behaviour.  MCP supplies an explicit value from the source image.
+    source_has_alpha: bool | None = None
+    background_tolerance: float = 32.0
 
 
 @dataclass(frozen=True)
 class TraceCommand:
     id: str
-    command: Literal["M", "L", "Q", "C", "Z"]
+    command: Literal["M", "L", "Q", "C", "A", "Z"]
     values: tuple[float, ...]
+    anchor_kind: Literal["corner"] | None = None
+    corner_id: str | None = None
 
 
 @dataclass(frozen=True)
@@ -38,6 +50,7 @@ class TracePath:
     d: str
     fill_rule: Literal["nonzero", "evenodd"]
     commands: tuple[TraceCommand, ...]
+    fit_stages: dict[str, str] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -52,12 +65,60 @@ class TraceRegion:
 
 
 @dataclass(frozen=True)
+class GeometryTraceRegion:
+    """An authoritative foreground component, independent of its materials."""
+
+    id: str
+    mask: np.ndarray = field(compare=False, repr=False)
+    contours: tuple[np.ndarray, ...] = field(compare=False, repr=False)
+    trace_path: TracePath
+
+
+_FOUR_CONNECTED = np.array(((0, 1, 0), (1, 1, 1), (0, 1, 0)), dtype=np.uint8)
+
+
+def _split_pinched_alpha_component(mask: np.ndarray, *, min_region_size: int) -> list[np.ndarray]:
+    """Split a native-alpha component joined only by a one-pixel pinch.
+
+    Alpha artwork often has separately designed diamonds or petals whose
+    antialiased tips meet at one pixel.  They should remain independently
+    traceable surfaces; otherwise their union erases the intended transparent
+    negative space.  Erode once only to discover disconnected cores, then
+    assign every original pixel to its nearest core so the returned masks keep
+    the source silhouette rather than its eroded version.
+    """
+    cores = binary_erosion(mask, structure=_FOUR_CONNECTED.astype(bool), border_value=0)
+    core_labels, count = label(cores, structure=_FOUR_CONNECTED)
+    if count < 2:
+        return [mask]
+    core_ids = [
+        component_id
+        for component_id in range(1, count + 1)
+        if int(np.count_nonzero(core_labels == component_id)) >= min_region_size
+    ]
+    if len(core_ids) < 2:
+        return [mask]
+
+    # ``distance_transform_edt`` returns the nearest False location in
+    # ``core_labels == 0``.  Those False locations are the retained core
+    # pixels, whose labels identify the owning split surface.
+    _distance, nearest = distance_transform_edt(core_labels == 0, return_indices=True)
+    owner = core_labels[tuple(nearest)]
+    pieces = [mask & (owner == component_id) for component_id in core_ids]
+    if any(int(piece.sum()) < min_region_size for piece in pieces):
+        return [mask]
+    return pieces
+
+
+@dataclass(frozen=True)
 class TraceResult:
     width: int
     height: int
     options: TraceOptions
     regions: tuple[TraceRegion, ...]
     region_map_svg: str
+    geometry_regions: tuple[GeometryTraceRegion, ...] = ()
+    background: dict[str, object] = field(default_factory=dict)
 
     def to_public_dict(self, *, include_region_map: bool = False) -> dict[str, object]:
         """Return the stable, JSON-ready portion of the trace artifact."""
@@ -79,6 +140,8 @@ class TraceResult:
                                 "id": command.id,
                                 "command": command.command,
                                 "values": list(command.values),
+                                "anchor_kind": command.anchor_kind,
+                                "corner_id": command.corner_id,
                             }
                             for command in region.trace_path.commands
                         ],
@@ -86,6 +149,29 @@ class TraceResult:
                 }
                 for region in self.regions
             ],
+            "geometry": {
+                "background": self.background,
+                "regions": [
+                    {
+                        "id": region.id,
+                        "trace_path": {
+                            "d": region.trace_path.d,
+                            "fill_rule": region.trace_path.fill_rule,
+                            "commands": [
+                                {
+                                "id": command.id,
+                                "command": command.command,
+                                "values": list(command.values),
+                                "anchor_kind": command.anchor_kind,
+                                "corner_id": command.corner_id,
+                                }
+                                for command in region.trace_path.commands
+                            ],
+                        },
+                    }
+                    for region in self.geometry_regions
+                ],
+            },
         }
         if include_region_map:
             result["region_map_svg"] = self.region_map_svg
@@ -96,8 +182,8 @@ class TraceEngine(Protocol):
     def trace(self, rgb: np.ndarray, options: TraceOptions) -> TraceResult: ...
 
 
-_PATH_TOKEN = re.compile(r"[MLQCZ]|-?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?")
-_COORDINATE_COUNTS = {"M": 2, "L": 2, "Q": 4, "C": 6, "Z": 0}
+_PATH_TOKEN = re.compile(r"[MLQCAZ]|-?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?")
+_COORDINATE_COUNTS = {"M": 2, "L": 2, "Q": 4, "C": 6, "A": 7, "Z": 0}
 
 
 def svg_path_commands(d: str, region_id: str, subpath_index: int = 0) -> tuple[TraceCommand, ...]:
@@ -107,6 +193,12 @@ def svg_path_commands(d: str, region_id: str, subpath_index: int = 0) -> tuple[T
     index = 0
     command_index = 0
     current_subpath = subpath_index
+    corner_annotations = path_corner_diagnostics(d)["anchors"]
+    anchors_by_command = {
+        (int(anchor["subpath"]), int(anchor["command_index"])): anchor
+        for anchor in corner_annotations
+        if isinstance(anchor, dict)
+    }
     while index < len(tokens):
         command = tokens[index]
         if command not in _COORDINATE_COUNTS:
@@ -120,11 +212,14 @@ def svg_path_commands(d: str, region_id: str, subpath_index: int = 0) -> tuple[T
         if len(values) != count:
             raise ValueError(f"incomplete {command} command in trace: {d!r}")
         index += count
+        annotation = anchors_by_command.get((current_subpath - subpath_index, command_index))
         commands.append(
             TraceCommand(
                 id=f"{region_id}.p{current_subpath}.c{command_index}",
                 command=command,  # type: ignore[arg-type]
                 values=values,
+                anchor_kind="corner" if annotation is not None else None,
+                corner_id=str(annotation["corner_id"]) if annotation is not None else None,
             )
         )
         command_index += 1
@@ -153,10 +248,196 @@ def _region_map(width: int, height: int, regions: tuple[TraceRegion, ...]) -> st
     return render_svg_doc(width, height, body)
 
 
+def _fit_trace_path(
+    mask: np.ndarray,
+    *,
+    region_id: str,
+    options: TraceOptions,
+) -> tuple[tuple[np.ndarray, ...], TracePath] | None:
+    contours = tuple(contour for contour in region_contours(mask) if len(contour) >= 3)
+    if not contours:
+        return None
+    path_stages = tuple(
+        fit_path_stages(
+            contour,
+            epsilon=options.simplify_tolerance,
+            max_error=options.curve_tolerance,
+            cubic=False,
+            progressive=options.fit_strategy != "quadratic",
+            progressive_allow_lines=options.fit_strategy == "progressive_allow_lines",
+            # Command reduction is an explicit downstream optimization, not a
+            # trace-time choice.  Preserve the baseline fit here so the
+            # editable drawing begins faithful to the extracted contour.
+            prefer_simple_curves=False,
+        )
+        for contour in contours
+    )
+    paths = tuple(stages.atomic_d for stages in path_stages)
+    commands = tuple(
+        command
+        for subpath_index, d in enumerate(paths)
+        for command in svg_path_commands(d, region_id, subpath_index)
+    )
+    return contours, TracePath(
+        d=" ".join(paths),
+        fill_rule="evenodd" if len(paths) > 1 else "nonzero",
+        commands=commands,
+        fit_stages={
+            "baseline": " ".join(stages.baseline_d for stages in path_stages),
+            "simple": " ".join(stages.simple_d for stages in path_stages),
+            "atomic": " ".join(paths),
+        },
+    )
+
+
+def _polyline_trace_path(
+    contours: tuple[np.ndarray, ...],
+    *,
+    region_id: str,
+) -> TracePath:
+    """Expose raw material contours without eagerly curve-fitting them.
+
+    Material traces are provenance for the decomposition.  The canonical
+    drawing paths are fitted only after boundary clipping and material merging,
+    so fitting every palette fragment here would be both misleading and wasted
+    work.  The polyline remains addressable through the normal trace-command
+    IDs when raw provenance is explicitly inspected.
+    """
+    paths = [
+        "M" + " L".join(f"{float(x):g} {float(y):g}" for x, y in contour) + " Z"
+        for contour in contours
+    ]
+    d = " ".join(paths)
+    commands = tuple(
+        command
+        for subpath_index, subpath_d in enumerate(paths)
+        for command in svg_path_commands(subpath_d, region_id, subpath_index)
+    )
+    return TracePath(
+        d=d,
+        fill_rule="evenodd" if len(paths) > 1 else "nonzero",
+        commands=commands,
+        fit_stages={"polyline": d},
+    )
+
+
+def _geometry_trace(
+    quantized: np.ndarray,
+    *,
+    options: TraceOptions,
+    alpha: np.ndarray | None = None,
+) -> tuple[tuple[GeometryTraceRegion, ...], dict[str, object]]:
+    """Derive geometry from native alpha or a border-connected canvas plate.
+
+    Palette regions remain raw provenance and fill evidence.  This trace instead
+    owns the exterior geometry, so soft matte colours cannot turn into notches
+    merely because they differ from the nearest material palette entry.
+    """
+    if options.remove_background == "off":
+        return (), {"mode": "native_alpha" if options.source_has_alpha else "opaque", "applied": False}
+
+    if alpha is not None:
+        if alpha.shape != quantized.shape[:2]:
+            raise ValueError("alpha coverage dimensions must match the trace image")
+        return _geometry_components(
+            alpha > 8,
+            options=options,
+            background={"mode": "native_alpha", "applied": True, "threshold": 8},
+        )
+
+    if options.remove_background == "auto" and options.source_has_alpha is not False:
+        return (), {"mode": "native_alpha" if options.source_has_alpha else "opaque", "applied": False}
+
+    border = np.concatenate((quantized[0], quantized[-1], quantized[:, 0], quantized[:, -1]))
+    colors, counts = np.unique(border, axis=0, return_counts=True)
+    background = colors[int(counts.argmax())].astype(float)
+    distance = np.linalg.norm(quantized.astype(float) - background, axis=2)
+    candidates = distance <= options.background_tolerance
+    labels, _ = label(candidates, structure=np.ones((3, 3), dtype=np.uint8))
+    border_labels = np.unique(np.concatenate((labels[0], labels[-1], labels[:, 0], labels[:, -1])))
+    outer_background = candidates & np.isin(labels, border_labels)
+    border_coverage = float(outer_background[0].sum() + outer_background[-1].sum()
+                            + outer_background[:, 0].sum() + outer_background[:, -1].sum()) / float(len(border))
+    if options.remove_background == "auto" and border_coverage < 0.75:
+        return (), {
+            "mode": "opaque",
+            "applied": False,
+            "confidence": border_coverage,
+        }
+
+    return _geometry_components(
+        ~outer_background,
+        options=options,
+        background={
+            "mode": "inferred_alpha",
+            "applied": True,
+            "color": "#{:02X}{:02X}{:02X}".format(*(int(value) for value in background)),
+            "tolerance": options.background_tolerance,
+            "confidence": border_coverage,
+        },
+    )
+
+
+def _geometry_components(
+    foreground: np.ndarray,
+    *,
+    options: TraceOptions,
+    background: dict[str, object],
+) -> tuple[tuple[GeometryTraceRegion, ...], dict[str, object]]:
+    """Fit stable geometry roots from an already-established foreground mask."""
+    # Geometry roots deliberately use 4-connectivity.  A one-pixel diagonal
+    # touch is typically JPEG/AA noise, not a semantic join; keeping it with
+    # 8-connectivity turns a discarded speck into an extra contour on an
+    # otherwise clean root.  Native alpha can additionally preserve separate
+    # intended surfaces when their antialiased tips create a one-pixel bridge.
+    component_labels, component_count = label(
+        foreground,
+        structure=_FOUR_CONNECTED,
+    )
+    masks: list[np.ndarray] = []
+    for component_id in range(1, component_count + 1):
+        component = component_labels == component_id
+        if background.get("mode") == "native_alpha":
+            masks.extend(_split_pinched_alpha_component(component, min_region_size=options.min_region_size))
+        else:
+            masks.append(component)
+    # The inferred canvas plate can leave isolated near-white pixels inside a
+    # material after resampling.  Remove those topology-noise pinholes before
+    # contour extraction; otherwise each becomes a visible degenerate SVG
+    # subpath.  Native alpha remains literal source geometry.
+    if background.get("mode") == "inferred_alpha":
+        masks = [
+            fill_tiny_isolated_holes(mask, max_area=min(options.max_hole_area, 4))[0]
+            for mask in masks
+        ]
+    masks = [mask for mask in masks if int(mask.sum()) >= options.min_region_size]
+    masks.sort(key=lambda mask: (-int(mask.sum()), *_bbox_origin(mask)))
+    traced: list[GeometryTraceRegion] = []
+    for index, mask in enumerate(masks, start=1):
+        region_id = f"g{index}"
+        fitted = _fit_trace_path(mask, region_id=region_id, options=options)
+        if fitted is None:
+            continue
+        contours, trace_path = fitted
+        frozen_mask = mask.copy()
+        frozen_mask.setflags(write=False)
+        frozen_contours = tuple(contour.copy() for contour in contours)
+        for contour in frozen_contours:
+            contour.setflags(write=False)
+        traced.append(GeometryTraceRegion(region_id, frozen_mask, frozen_contours, trace_path))
+    return tuple(traced), background
+
+
 class PythonTraceEngine:
     """Pure-Python adapter from an RGB image to a deterministic trace artifact."""
 
-    def trace(self, rgb: np.ndarray, options: TraceOptions) -> TraceResult:
+    def trace(
+        self,
+        rgb: np.ndarray,
+        options: TraceOptions,
+        *,
+        alpha: np.ndarray | None = None,
+    ) -> TraceResult:
         image = np.asarray(rgb, dtype=np.uint8)
         if image.ndim != 3 or image.shape[2] != 3:
             raise ValueError("trace expects an RGB image with shape (height, width, 3)")
@@ -164,7 +445,8 @@ class PythonTraceEngine:
         # Interactive tracing is governed by the explicit absolute region floor;
         # a relative palette floor must not erase a region before segmentation.
         palette = extract_palette(image, max_colors=options.max_colors, min_fraction=0.0)
-        regions = segment(quantize(image, palette), min_area=options.min_region_size)
+        quantized = quantize(image, palette)
+        regions = segment(quantized, min_area=options.min_region_size)
         if options.trace_level == "subpixel":
             attach_coverage_field(regions, image, options.max_colors, palette=palette)
 
@@ -186,20 +468,6 @@ class PythonTraceEngine:
                 )
                 if len(contour) >= 3
             )
-            path_ds = [
-                fit_path(
-                    contour,
-                    epsilon=options.simplify_tolerance,
-                    max_error=options.curve_tolerance,
-                    cubic=options.curve_type == "cubic",
-                ).params["d"]
-                for contour in contours
-            ]
-            commands = tuple(
-                command
-                for subpath_index, d in enumerate(path_ds)
-                for command in svg_path_commands(d, region_id, subpath_index)
-            )
             mask = region.mask.copy()
             mask.setflags(write=False)
             immutable_contours = tuple(contour.copy() for contour in contours)
@@ -212,19 +480,18 @@ class PythonTraceEngine:
                     color=region.color_hex,
                     mask=mask,
                     contours=immutable_contours,
-                    trace_path=TracePath(
-                        d=" ".join(path_ds),
-                        fill_rule="evenodd" if len(path_ds) > 1 else "nonzero",
-                        commands=commands,
-                    ),
+                    trace_path=_polyline_trace_path(immutable_contours, region_id=region_id),
                     effective_trace_level=effective_level,
                 )
             )
         result_regions = tuple(traced)
+        geometry_regions, background = _geometry_trace(quantized, options=options, alpha=alpha)
         return TraceResult(
             width=width,
             height=height,
             options=options,
             regions=result_regions,
             region_map_svg=_region_map(width, height, result_regions),
+            geometry_regions=geometry_regions,
+            background=background,
         )

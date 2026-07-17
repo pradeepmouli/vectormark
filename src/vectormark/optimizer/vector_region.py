@@ -15,6 +15,7 @@ from ..skia_geometry import SkPath, unary_union
 
 _NUM = r"-?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?"
 _PATH_TOKEN = re.compile(rf"[MLQCAZ]|{_NUM}")
+_UNSET = object()
 
 
 def _parse_subpaths(d: str) -> list[list[tuple[str, list[float]]]]:
@@ -348,7 +349,7 @@ class VectorRegion:
         *,
         footprint: SkPath | object | None = None,
         raster: np.ndarray | None = None,
-        fill: Fill | None = None,
+        fill: Fill | None | object = _UNSET,
         z: float | None = None,
         diagnostics: Mapping[str, Any] | None = None,
     ) -> "VectorRegion":
@@ -360,7 +361,10 @@ class VectorRegion:
         return VectorRegion(
             id=self.id,
             current=new_shape,
-            fill=self.fill if fill is None else fill,
+            # ``None`` is a meaningful state for a geometry mutation: its old
+            # fill has been invalidated and must pass through fill fitting again.
+            # Omission retains the existing fill for optimizer-only updates.
+            fill=self.fill if fill is _UNSET else fill,
             z=self.z if z is None else z,
             raster=self.raster if raster is None else raster,
             footprint=to_polygon(new_shape) if footprint is None else footprint,

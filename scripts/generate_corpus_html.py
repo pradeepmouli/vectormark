@@ -7,9 +7,11 @@ Run:
 from __future__ import annotations
 
 import argparse
+import base64
 import dataclasses
 import hashlib
 import html
+import io
 import json
 import pickle
 import sys
@@ -18,12 +20,14 @@ import urllib.request
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 import numpy as np
 from PIL import Image
 
 from vectormark import Options, idealize
+from vectormark.drawing_refine import auto_refine, drawing_summary, render_drawing, root_regions, stitch_regions
+from vectormark.mcp_server import ImageRef, TraceDrawingOptions, _trace_result
 from vectormark.pipeline import _flatten_on_white
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -35,6 +39,7 @@ DEFAULT_CORPUS_OUTPUT = Path("corpus")
 DEFAULT_CORPUS_MANIFEST = REPO_ROOT / "corpus" / "sources.json"
 DEFAULT_CORPUS_CACHE = REPO_ROOT / "corpus" / "cache"
 TRACE_CACHE_VERSION = 3
+DRAWING_TRACE_CACHE_VERSION = 27
 TRACE_OPTION_FIELDS = (
     "epsilon",
     "max_error",
@@ -54,6 +59,7 @@ class CorpusEntry:
     mode: str
     image_factory: Callable[[], np.ndarray]
     options: Options
+    source_bytes_factory: Callable[[], bytes] | None = None
 
 
 def default_entries() -> list[CorpusEntry]:
@@ -98,6 +104,10 @@ def _image_factory(path: Path) -> Callable[[], np.ndarray]:
     return _load
 
 
+def _source_bytes_factory(path: Path) -> Callable[[], bytes]:
+    return path.read_bytes
+
+
 def _cache_filename(name: str, url: str, filename: str | None = None) -> str:
     if filename:
         suffix = Path(filename).suffix
@@ -131,6 +141,22 @@ def _downloaded_image_factory(
 
     def _load() -> np.ndarray:
         return _image_factory(_download_source(url, cache_path, refresh=refresh))()
+
+    return _load
+
+
+def _downloaded_source_bytes_factory(
+    name: str,
+    url: str,
+    cache_dir: Path,
+    *,
+    filename: str | None = None,
+    refresh: bool = False,
+) -> Callable[[], bytes]:
+    cache_path = cache_dir / _cache_filename(name, url, filename)
+
+    def _load() -> bytes:
+        return _download_source(url, cache_path, refresh=refresh).read_bytes()
 
     return _load
 
@@ -174,8 +200,11 @@ def source_manifest_entries(
             filename=item.get("filename"),
             refresh=refresh,
         )
-        entries.append(CorpusEntry(item["name"], "current", factory, Options()))
-        entries.append(CorpusEntry(item["name"], "optimizer", factory, Options(optimizer=True)))
+        source_bytes = _downloaded_source_bytes_factory(
+            item["name"], item["url"], cache_dir, filename=item.get("filename"), refresh=refresh,
+        )
+        entries.append(CorpusEntry(item["name"], "current", factory, Options(), source_bytes))
+        entries.append(CorpusEntry(item["name"], "optimizer", factory, Options(optimizer=True), source_bytes))
     return entries
 
 
@@ -215,12 +244,21 @@ def corpus_entries(corpus: Path) -> list[CorpusEntry]:
     entries: list[CorpusEntry] = []
     for path in pngs:
         factory = _image_factory(path)
-        entries.append(CorpusEntry(path.stem, "current", factory, Options()))
-        entries.append(CorpusEntry(path.stem, "optimizer", factory, Options(optimizer=True)))
+        source_bytes = _source_bytes_factory(path)
+        entries.append(CorpusEntry(path.stem, "current", factory, Options(), source_bytes))
+        entries.append(CorpusEntry(path.stem, "optimizer", factory, Options(optimizer=True), source_bytes))
     return entries
 
 
 def _diagnostics_payload(report: Any) -> dict[str, Any]:
+    if isinstance(report, dict) and "trace" in report and "report" in report:
+        return {
+            "workflow": "trace_drawing_auto",
+            "drawing_id": report["drawing_id"],
+            "version": report["version"],
+            "trace": report["trace"],
+            "report": report["report"],
+        }
     diagnostics = report.diagnostics.to_dict() if report.diagnostics is not None else None
     return {
         "strategies": dict(report.strategies),
@@ -237,8 +275,14 @@ def _diagnostics_json(report: Any) -> str:
     return json.dumps(payload, indent=2, sort_keys=True)
 
 
-def _options_json(options: Options) -> str:
-    return json.dumps(dataclasses.asdict(options), indent=2, sort_keys=True, default=repr)
+def _options_json(options: Any) -> str:
+    if dataclasses.is_dataclass(options):
+        payload = dataclasses.asdict(options)
+    elif isinstance(options, dict):
+        payload = options
+    else:
+        payload = options.model_dump(mode="json")
+    return json.dumps(payload, indent=2, sort_keys=True, default=repr)
 
 
 def _trace_options(options: Options) -> dict[str, object]:
@@ -356,6 +400,107 @@ def _idealize_optimizer_with_trace_cache(
     return svg, report
 
 
+def _entry_source_bytes(entry: CorpusEntry, image: np.ndarray) -> bytes:
+    """Use original bytes whenever possible so MCP can retain alpha provenance."""
+    if entry.source_bytes_factory is not None:
+        return entry.source_bytes_factory()
+    encoded = io.BytesIO()
+    Image.fromarray(image).save(encoded, format="PNG")
+    return encoded.getvalue()
+
+
+def _drawing_trace_options(
+    options: Options,
+    *,
+    max_colors: int | Literal["auto"],
+    fit_strategy: Literal["quadratic", "progressive", "progressive_allow_lines"],
+) -> TraceDrawingOptions:
+    return TraceDrawingOptions(
+        refine="auto",
+        max_colors=max_colors,
+        min_region_size=options.min_region_size,
+        min_region_fraction=options.min_region_fraction,
+        trace_level="subpixel" if options.aa_contours else "pixel",
+        simplify_tolerance=options.epsilon,
+        curve_tolerance=options.max_error,
+        fit_strategy=fit_strategy,
+        preprocess={"max_size_px": options.working_max_dim or 1024},
+    )
+
+
+def _drawing_trace_cache_path(
+    cache_dir: Path,
+    entry: CorpusEntry,
+    source: bytes,
+    options: TraceDrawingOptions,
+) -> Path:
+    digest = hashlib.sha256()
+    digest.update(source)
+    digest.update(json.dumps(options.model_dump(mode="json"), sort_keys=True).encode("utf-8"))
+    safe_name = entry.name.replace("/", "_")
+    return cache_dir / f"drawing-trace-{safe_name}-{digest.hexdigest()[:20]}.pkl"
+
+
+def _trace_drawing_auto_with_cache(
+    source: bytes,
+    *,
+    entry: CorpusEntry,
+    options: Options,
+    cache_dir: Path,
+    max_colors: int | Literal["auto"],
+    fit_strategy: Literal["quadratic", "progressive", "progressive_allow_lines"],
+) -> tuple[str, dict[str, Any], dict[str, Any]]:
+    trace_options = _drawing_trace_options(options, max_colors=max_colors, fit_strategy=fit_strategy)
+    cache_path = _drawing_trace_cache_path(cache_dir, entry, source, trace_options)
+    if cache_path.exists():
+        cached = pickle.loads(cache_path.read_bytes())
+        if cached.get("version") == DRAWING_TRACE_CACHE_VERSION:
+            trace = cached["trace"]
+            rgb = cached["rgb"]
+            roots = cached["roots"]
+        else:
+            trace = rgb = roots = None
+    else:
+        trace = rgb = roots = None
+
+    if trace is None or rgb is None or roots is None:
+        trace, rgb = _trace_result(
+            ImageRef(data_uri="data:image/png;base64," + base64.b64encode(source).decode("ascii")),
+            trace_options,
+        )
+        roots = stitch_regions(
+            trace,
+            root_regions(trace, rgb, min_region_fraction=trace_options.min_region_fraction),
+        )
+        cache_path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = cache_path.with_suffix(cache_path.suffix + ".tmp")
+        tmp.write_bytes(pickle.dumps({
+            "version": DRAWING_TRACE_CACHE_VERSION,
+            "trace": trace,
+            "rgb": rgb,
+            "roots": roots,
+        }))
+        tmp.replace(cache_path)
+
+    # Cache only tracing and retained v0 geometry.  Auto refinement, final fill
+    # fitting, SVG emission, and diagnostics are intentionally rerun so an
+    # optimizer or renderer change appears in the next corpus invocation.
+    regions = auto_refine(trace, roots, rgb=rgb)
+    rendered = render_drawing(trace, regions)
+    svg = rendered.svg
+    report = {
+        "trace": drawing_summary(trace, regions),
+        "report": rendered.report,
+        "drawing_id": f"corpus-{entry.name}",
+        "version": "v0.auto",
+    }
+    public_options = {
+        **trace_options.model_dump(mode="json"),
+        "effective_max_colors": trace.options.max_colors,
+    }
+    return svg, report, public_options
+
+
 def _safe_filename(entry: CorpusEntry) -> str:
     return f"{entry.mode}-{entry.name}.svg".replace("/", "_")
 
@@ -407,13 +552,28 @@ def _gallery_options(
 
 
 def _sorted_entries(entries: Iterable[CorpusEntry]) -> list[CorpusEntry]:
-    mode_order = {"current": 0, "optimizer": 1}
+    mode_order = {"current": 0, "optimizer": 1, "trace_auto": 2}
     return sorted(entries, key=lambda item: (item.name, mode_order.get(item.mode, 99)))
+
+
+def _entries_for_workflow(entries: Iterable[CorpusEntry], workflow: str) -> list[CorpusEntry]:
+    if workflow == "oneshot":
+        return _sorted_entries(entries)
+    if workflow != "trace_auto":
+        raise ValueError(f"unsupported corpus workflow: {workflow!r}")
+    chosen: dict[str, CorpusEntry] = {}
+    for entry in _sorted_entries(entries):
+        # The old corpus has a current/optimizer pair per source.  Drawing-auto
+        # has one stateful trace per source, so retain the current entry's trace
+        # settings and its original-byte factory exactly once.
+        if entry.name not in chosen or entry.mode == "current":
+            chosen[entry.name] = dataclasses.replace(entry, mode="trace_auto", options=Options())
+    return _sorted_entries(chosen.values())
 
 
 def _manifest_payload(entries: list[CorpusEntry]) -> dict[str, Any]:
     return {
-        "version": 2,
+        "version": 3,
         "entries": [
             {
                 "id": _entry_id(entry),
@@ -451,6 +611,40 @@ def _summary_table(headers: list[str], rows: list[list[Any]]) -> str:
 
 def _diagnostics_summary_html(report: Any) -> str:
     payload = _diagnostics_payload(report)
+    if payload.get("workflow") == "trace_drawing_auto":
+        trace = payload["trace"]
+        drawing_report = payload["report"]
+        target_rows = [
+            [
+                target.get("id"),
+                target.get("geometry"),
+                target.get("fill"),
+                target.get("z"),
+                ", ".join(target.get("source_regions") or ()),
+                json.dumps(target.get("diagnostics") or {}, sort_keys=True),
+            ]
+            for target in drawing_report.get("targets", [])
+        ]
+        geometry_rows = [
+            [
+                region.get("id"),
+                region.get("geometry", {}).get("type"),
+                region.get("fill", {}).get("type"),
+                ", ".join(region.get("source_regions") or ()),
+            ]
+            for region in trace.get("regions", [])
+        ]
+        return f"""<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><style>
+body {{ margin: 0; color: #161616; font: 12px/1.45 system-ui, sans-serif; }}
+h3 {{ margin: 12px 0 6px; font-size: 13px; }} h3:first-child {{ margin-top: 0; }}
+table {{ width: 100%; border-collapse: collapse; }} th,td {{ padding: 4px 6px; border: 1px solid #e2e2dc; text-align: left; vertical-align: top; overflow-wrap: anywhere; }} th {{ background: #f2f2ee; }}
+</style></head><body>
+  <h3>Trace drawing / {html.escape(str(payload["version"]))}</h3>
+  {_summary_table(["id", "geometry", "fill", "source regions"], geometry_rows)}
+  <h3>Auto-refined targets</h3>
+  {_summary_table(["id", "geometry", "fill", "z", "source regions", "diagnostics"], target_rows)}
+</body></html>"""
     diagnostics = payload.get("diagnostics") or {}
     stats = diagnostics.get("stats") or {}
     optimizer_regions = diagnostics.get("optimizer_regions") or []
@@ -614,6 +808,9 @@ def generate_corpus_html(
     max_error: float = DEFAULT_CORPUS_MAX_ERROR,
     only: Iterable[str] | None = None,
     rebuild_index: bool = False,
+    workflow: str = "oneshot",
+    trace_max_colors: int | Literal["auto"] = 16,
+    trace_fit_strategy: Literal["quadratic", "progressive", "progressive_allow_lines"] = "quadratic",
 ) -> Path:
     output = Path(output)
     svg_dir = output / "svg"
@@ -631,7 +828,7 @@ def generate_corpus_html(
     options_dir.mkdir(parents=True, exist_ok=True)
     trace_cache_dir.mkdir(parents=True, exist_ok=True)
 
-    all_entries = _sorted_entries(entries or default_entries())
+    all_entries = _entries_for_workflow(entries or default_entries(), workflow)
     _write_index_if_needed(output, all_entries, force=rebuild_index)
 
     selectors = set(only or ())
@@ -649,7 +846,17 @@ def generate_corpus_html(
             max_error=max_error,
         )
         print(f"rendering {entry.mode}/{entry.name}", file=sys.stderr)
-        if options.optimizer:
+        if workflow == "trace_auto":
+            source = _entry_source_bytes(entry, image)
+            svg, report, rendered_options = _trace_drawing_auto_with_cache(
+                source,
+                entry=entry,
+                options=options,
+                cache_dir=trace_cache_dir,
+                max_colors=trace_max_colors,
+                fit_strategy=trace_fit_strategy,
+            )
+        elif options.optimizer:
             svg, report = _idealize_optimizer_with_trace_cache(
                 image,
                 options=options,
@@ -664,7 +871,9 @@ def generate_corpus_html(
         (raw_dir / _raw_svg_filename(entry)).write_text(svg)
         (diagnostics_dir / _diagnostics_filename(entry)).write_text(_diagnostics_json(report))
         (diagnostics_summary_dir / _diagnostics_summary_filename(entry)).write_text(_diagnostics_summary_html(report))
-        (options_dir / _options_filename(entry)).write_text(_options_json(options))
+        (options_dir / _options_filename(entry)).write_text(
+            _options_json(rendered_options if workflow == "trace_auto" else options)
+        )
     return output / "index.html"
 
 
@@ -823,6 +1032,23 @@ def main() -> None:
         action="store_true",
         help="Rewrite index.html even when the corpus manifest is unchanged.",
     )
+    parser.add_argument(
+        "--workflow",
+        choices=("trace-auto", "oneshot"),
+        default="trace-auto",
+        help="trace-auto uses the MCP trace_drawing(refine='auto') workflow; oneshot preserves the legacy current/optimizer gallery.",
+    )
+    parser.add_argument(
+        "--trace-max-colors",
+        default="16",
+        help="Trace-auto palette ceiling: an integer >=2 or auto. Defaults to 16.",
+    )
+    parser.add_argument(
+        "--trace-fit-strategy",
+        choices=("quadratic", "progressive", "progressive_allow_lines"),
+        default="quadratic",
+        help="Trace-auto path fitting strategy. Defaults to quadratic.",
+    )
     args = parser.parse_args()
     if args.source_manifest is not None:
         entries = source_manifest_entries(
@@ -834,6 +1060,17 @@ def main() -> None:
         entries = corpus_entries(args.input_dir)
     else:
         entries = None
+    trace_max_colors: int | Literal["auto"]
+    if args.trace_max_colors == "auto":
+        trace_max_colors = "auto"
+    else:
+        try:
+            trace_max_colors = int(args.trace_max_colors)
+        except ValueError as error:
+            parser.error("--trace-max-colors must be auto or an integer >= 2")
+            raise AssertionError("parser.error exits") from error
+        if trace_max_colors < 2:
+            parser.error("--trace-max-colors must be auto or an integer >= 2")
     index = generate_corpus_html(
         args.output,
         entries,
@@ -843,6 +1080,9 @@ def main() -> None:
         max_error=args.max_error,
         only=args.only,
         rebuild_index=args.rebuild_index,
+        workflow=args.workflow.replace("-", "_"),
+        trace_max_colors=trace_max_colors,
+        trace_fit_strategy=args.trace_fit_strategy,
     )
     print(index)
 

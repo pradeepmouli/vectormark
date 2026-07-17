@@ -64,6 +64,7 @@ class Options:
                                         # Set e.g. working_max_dim=768 for noisy AI-raster inputs
                                         # where high resolution amplifies quantization noise.
     optimizer: bool = False             # experimental geometry optimizer path; default off.
+    corner_normalize: bool = False      # canonicalize recognised rounded corners to Q/point.
 
 
 COVERAGE_HOLE_TOL = 0.05   # if >5% of a region's eroded interior would fall below the 0.5
@@ -1029,7 +1030,35 @@ def _render_optimizer_body(
             visit(obj, top_scope_ids[int(obj.id)], top_scope_ids, top_scope_objects)
         return sorted(items, key=lambda item: (float(item[0].z), item[1]))
 
-    for obj, elem_id, scope_ids, scope_objects in _render_items(list(objects)):
+    render_items = _render_items(list(objects))
+    # A clone can retain geometry while using a different fill.  Keep the
+    # shared shape unpainted in ``defs`` and paint every visible instance via
+    # ``<use>``; otherwise the source element's explicit ``fill`` wins over a
+    # clone instance's fill attribute.
+    clone_definition_ids: dict[tuple[int, str], str] = {}
+    clone_sources: dict[tuple[int, str], VectorRegion] = {}
+    for obj, _elem_id, scope_ids, scope_objects in render_items:
+        if obj.current is None or obj.current.kind != "use":
+            continue
+        if not isinstance(obj.diagnostics.get("clones"), dict):
+            continue
+        source_id = obj.current.params.get("href_obj_id")
+        if not isinstance(source_id, int):
+            continue
+        source = scope_objects.get(source_id)
+        source_label = scope_ids.get(source_id)
+        if source is None or source_label is None or source.current is None or source.current.kind == "use":
+            continue
+        key = (id(source), source_label)
+        clone_sources[key] = source
+        clone_definition_ids[key] = f"{source_label}-geometry"
+
+    for key, source in clone_sources.items():
+        source_shape = source.current
+        assert source_shape is not None
+        defs.append(shape_to_svg(source_shape, None, clone_definition_ids[key]))
+
+    for obj, elem_id, scope_ids, scope_objects in render_items:
         assert obj.current is not None
         assert obj.fill is not None
         fill = _resolved_fill(obj.fill)
@@ -1042,12 +1071,24 @@ def _render_optimizer_body(
             body.append(path_svg(shape_to_path_d(shape), fill, fill_rule_for(shape)))
             continue
 
+        source_definition_id = clone_definition_ids.get((id(obj), elem_id))
+        if source_definition_id is not None:
+            source_shape = Shape("use", {"href": source_definition_id, "transform": (1, 0, 0, 1, 0, 0)})
+            body.append(shape_to_svg(source_shape, fill, elem_id))
+            continue
+
         if shape.kind == "use":
             source = scope_objects[int(obj.current.params["href_obj_id"])]
             assert source.fill is not None
             use_fill = str(obj.current.params.get("fill", fill))
             if isinstance(obj.diagnostics.get("clones"), dict):
-                body.append(shape_to_svg(shape, use_fill, elem_id))
+                source_label = scope_ids[int(obj.current.params["href_obj_id"])]
+                definition_id = clone_definition_ids.get((id(source), source_label))
+                if definition_id is not None:
+                    params = dict(shape.params)
+                    params["href"] = definition_id
+                    shape = Shape("use", params)
+                body.append(shape_to_svg(shape, fill, elem_id))
                 continue
             shape = _inlined_use_shape(source.current, shape.params["transform"])
             body.append(path_svg(shape_to_path_d(shape), use_fill, fill_rule_for(shape)))
@@ -1060,11 +1101,15 @@ def _render_optimizer_body(
 def _optimizer_passes(opt: Options):
     """Pass order for the experimental geometry optimizer."""
     from .optimizer.passes import (
+        atomic_flatten_pass,
         clones_pass,
+        corner_normalize_pass,
         occlusion_pass,
         primitives_pass,
         seams_pass,
         simplify_pass,
+        smooth_pass,
+        straighten_pass,
         split_compound_pass,
         symmetry_pass,
     )
@@ -1091,13 +1136,23 @@ def _optimizer_passes(opt: Options):
             epsilon=opt.epsilon,
             max_error=opt.max_error,
             cubic=opt.cubic_paths,
+            # Earlier passes can independently refit neighbouring leaves.  A
+            # final full-scene stitch is therefore required to restore their
+            # shared edge after primitive fitting, straightening, smoothing,
+            # or symmetry.  ``post_symmetry=True`` only repaired a new
+            # self-mirror axis and left ordinary material seams drifting.
+            post_symmetry=False,
         )
 
     _configured_primitives_pass.__name__ = "primitives_pass"
     _configured_occlusion_pass.__name__ = "occlusion_pass"
     _configured_symmetry_pass.__name__ = "symmetry_pass"
     _configured_seams_pass.__name__ = "seams_pass"
-    passes = [_configured_primitives_pass, _configured_occlusion_pass]
+    # Establish semantic surfaces before assigning a primitive.  In particular,
+    # a compound path can hide a simple exterior behind one or more counters;
+    # fitting it both before and after splitting gives the same trace-owned
+    # region two competing primitive interpretations.
+    passes = [_configured_occlusion_pass]
 
     def _configured_simplify_pass(objects, masks):
         return simplify_pass(
@@ -1106,9 +1161,20 @@ def _optimizer_passes(opt: Options):
             epsilon=opt.epsilon,
             max_error=opt.max_error,
             cubic=opt.cubic_paths,
+            max_boundary_error=opt.max_error,
         )
 
     _configured_simplify_pass.__name__ = "simplify_pass"
+
+    def _configured_smooth_pass(objects, masks):
+        return smooth_pass(objects, masks, max_error=opt.max_error)
+
+    _configured_smooth_pass.__name__ = "smooth_pass"
+
+    def _configured_straighten_pass(objects, masks):
+        return straighten_pass(objects, masks, epsilon=opt.epsilon)
+
+    _configured_straighten_pass.__name__ = "straighten_pass"
 
     def _configured_linelet_simplify_pass(objects, masks):
         return simplify_pass(
@@ -1118,19 +1184,43 @@ def _optimizer_passes(opt: Options):
             max_error=opt.max_error,
             cubic=opt.cubic_paths,
             linelet_only=True,
+            max_boundary_error=opt.max_error,
         )
 
-    _configured_linelet_simplify_pass.__name__ = "simplify_pass"
-    passes.append(_configured_simplify_pass)
+    _configured_linelet_simplify_pass.__name__ = "linelet_simplify_pass"
+
+    def _configured_atomic_flatten_pass(objects, masks):
+        return atomic_flatten_pass(objects, masks, epsilon=opt.epsilon)
+
+    _configured_atomic_flatten_pass.__name__ = "atomic_flatten_pass"
+
+    def _configured_corner_normalize_pass(objects, masks):
+        return corner_normalize_pass(
+            objects,
+            masks,
+            max_error=opt.max_error,
+            enabled=opt.corner_normalize,
+        )
+
+    _configured_corner_normalize_pass.__name__ = "corner_normalize_pass"
     passes.append(split_compound_pass)
     passes.append(_configured_primitives_pass)
+    # A compound trace mixes an exterior with its counters.  Split it before
+    # symmetry so primitives can claim the exterior and automatic symmetry
+    # only sees addressable semantic leaves.  The symmetry pass explicitly
+    # excludes compound implementation children, so a cutout is never
+    # reflected as an independent shape.
     if not opt.no_symmetry:
         passes.append(_configured_symmetry_pass)
-    passes.append(_configured_seams_pass)
-    passes.append(_configured_simplify_pass)
     passes.append(clones_pass)
+    passes.append(_configured_straighten_pass)
     passes.append(_configured_linelet_simplify_pass)
+    passes.append(_configured_smooth_pass)
     passes.append(_configured_seams_pass)
+    passes.append(_configured_atomic_flatten_pass)
+    # A corner normalizer keeps all endpoints fixed, so it cannot reopen a
+    # seam already repaired by the preceding terminal passes.
+    passes.append(_configured_corner_normalize_pass)
     return passes
 
 

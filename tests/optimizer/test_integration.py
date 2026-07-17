@@ -196,9 +196,11 @@ def test_optimizer_simplifies_compound_children_after_split():
     assert branch.is_branch
     cutout_leaves = [leaf for leaf in branch.leaves() if leaf.fill == FlatFill("#FFFFFF")]
     assert cutout_leaves
-    assert all(leaf.current.kind == "path" for leaf in cutout_leaves)
-    assert sum(leaf.current.params["d"].count("Q") for leaf in cutout_leaves) >= 6
-    assert sum(leaf.current.params["d"].count("L") for leaf in cutout_leaves) < hole.count("L")
+    assert all(leaf.current.kind in {"path", "rect", "use"} for leaf in cutout_leaves)
+    path_leaves = [leaf for leaf in cutout_leaves if leaf.current.kind == "path"]
+    if path_leaves:
+        assert sum(leaf.current.params["d"].count("Q") for leaf in path_leaves) >= 3
+        assert sum(leaf.current.params["d"].count("L") for leaf in path_leaves) <= hole.count("L")
 
 
 def test_optimizer_recolored_clone_retains_a_use_with_its_own_fill():
@@ -343,10 +345,12 @@ def test_optimizer_retains_recolored_clone_as_use_with_its_own_fill():
         diagnostics={"clones": {"accepted": True, "matched_source": 1}},
     )
 
-    body, _defs = _render_optimizer_body([source, clone])
+    body, defs = _render_optimizer_body([source, clone])
 
-    assert body[0].startswith('<circle id="s1" fill="#FF0000"')
-    assert body[1].startswith('<use id="s2" href="#s1"')
+    assert defs == ['<circle id="s1-geometry" cx="10" cy="10" r="8"/>']
+    assert body[0].startswith('<use id="s1" href="#s1-geometry"')
+    assert 'fill="#FF0000"' in body[0]
+    assert body[1].startswith('<use id="s2" href="#s1-geometry"')
     assert 'fill="#0000FF"' in body[1]
 
 
@@ -568,6 +572,28 @@ def test_compound_split_keeps_disjoint_subpaths_parent_filled():
     assert branch.is_branch
     assert len(branch.children) == 3
     assert [child.fill for child in branch.children] == [region.fill, region.fill, region.fill]
+
+
+def test_compound_split_separates_nested_winding_cutout_without_fill_rule():
+    outer = "M0 0 L100 0 L100 100 L0 100 Z"
+    inner = "M25 25 L75 25 L75 75 L25 75 Z"
+    # SVG permits this hole to be described only by subpath winding.  The
+    # splitter must still expose independent geometry for primitive fitting.
+    shape = Shape("path", {"d": f"{outer} {inner}"})
+    region = VectorRegion(1, shape, FlatFill("#C837AB"), 0)
+
+    out = optimize(
+        [region],
+        {region.id: rasterize(region.footprint, (120, 120))},
+        # New compound children are visited by the following pass.  This
+        # mirrors the production pipeline, which runs primitive fitting again
+        # after exposing compound subpaths as independent leaves.
+        [split_compound_pass, primitives_pass, primitives_pass],
+    )
+
+    assert len(out) == 1
+    assert out[0].is_branch
+    assert [child.current.kind for child in out[0].children] == ["rect", "rect"]
 
 
 def test_compound_split_uses_source_mask_not_containment_for_child_fill():

@@ -158,7 +158,7 @@ def test_clones_pass_skips_self_symmetric_regions():
     assert clones_pass(objects, masks) == []
 
 
-def test_clones_pass_skips_non_flat_fill_clone_proposals():
+def test_clones_pass_reuses_geometry_for_gradient_filled_clone_proposals():
     canonical = _square(1, center=(18.0, 18.0), fill=FlatFill("#112233"))
     clone = _square(
         2,
@@ -171,9 +171,10 @@ def test_clones_pass_skips_non_flat_fill_clone_proposals():
     objects = [canonical, clone]
     masks = {obj.id: _mask_for_polygon(obj.footprint) for obj in objects}
 
-    assert clones_pass(objects, masks) == []
+    assert [proposal.obj_ids for proposal in clones_pass(objects, masks)] == [(2,)]
     out = optimize(objects, masks, [clones_pass])
-    assert [obj.current.kind for obj in out] == ["path", "path"]
+    assert [obj.current.kind for obj in out] == ["path", "use"]
+    assert out[1].fill == clone.fill
 
 
 def test_clones_pass_does_not_chain_targets_as_canonicals(monkeypatch):

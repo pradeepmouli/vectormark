@@ -19,6 +19,15 @@ from .gradient import _GATE_DELTA_E, _best_parametric
 # search / occlusion hot paths are made fast natively (algorithmic + numba/Rust follow-up),
 # so correctness never depends on a threshold. See the perf follow-up.
 _FLAT_OKLAB_SPREAD_THRESHOLD = 0.005
+_DOMINANT_RGB_FRACTION = 0.90
+
+
+def _dominant_rgb_fraction(pixels: np.ndarray) -> float:
+    """Return the share represented by the most common sampled RGB color."""
+    if len(pixels) == 0:
+        return 0.0
+    _colors, counts = np.unique(pixels, axis=0, return_counts=True)
+    return float(counts.max() / len(pixels))
 
 
 def fit_fill(mask: np.ndarray, rgb: np.ndarray, *, flat_hex: str,
@@ -32,7 +41,16 @@ def fit_fill(mask: np.ndarray, rgb: np.ndarray, *, flat_hex: str,
     ys, xs = np.where(mask)
     if len(xs) == 0:
         return FlatFill(flat_hex)
-    pixels = rgb[ys, xs].astype(float)
+    sampled = rgb[ys, xs]
+    # A vector silhouette can cover a thin antialias fringe from the source
+    # background.  Those sparse white/blended samples have a large OKLab
+    # distance from an otherwise flat interior and can spuriously satisfy the
+    # parametric-gradient gate.  A genuine gradient does not have one exact
+    # RGB color covering almost all of its area.
+    if _dominant_rgb_fraction(sampled) >= _DOMINANT_RGB_FRACTION:
+        return FlatFill(flat_hex)
+
+    pixels = sampled.astype(float)
     oklab = srgb_to_oklab(pixels / 255.0)
     centroid = oklab.mean(axis=0)
     spread = float(np.linalg.norm(oklab - centroid, axis=1).mean())

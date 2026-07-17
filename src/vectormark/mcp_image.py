@@ -230,14 +230,22 @@ def _content_bbox(im: Image.Image):
     return bbox
 
 
-def preprocess_image(data: bytes, *, crop_to_content: bool = True,
-                     max_size_px: int = DEFAULT_MAX_SIZE_PX, preserve_transparency: bool = True,
-                     quantize: bool = False) -> tuple[np.ndarray, ProcessedMeta]:
-    """Fidelity-preserving preprocess: optionally crop to content, downscale only if larger
-    than max_size_px, keep alpha until the final white composite. Returns an (H,W,3) uint8
-    RGB array ready for idealize, plus the processing metadata."""
+def preprocess_image_with_alpha(data: bytes, *, crop_to_content: bool = True,
+                                max_size_px: int = DEFAULT_MAX_SIZE_PX,
+                                preserve_transparency: bool = True,
+                                quantize: bool = False) -> tuple[np.ndarray, ProcessedMeta, np.ndarray | None]:
+    """Preprocess RGB plus aligned source alpha coverage when present.
+
+    Geometry tracing can use the alpha plane as its exterior baseline, while
+    material and fill analysis keeps using the white-composited RGB values.
+    Both products undergo exactly the same crop/resize/quantize operations.
+    """
     im = Image.open(io.BytesIO(data))
     im.load()
+    # Palette PNGs can carry transparency in a tRNS chunk instead of exposing
+    # an ``A`` band.  Normalize before inspecting alpha so indexed and RGBA
+    # sources follow the same geometry-trace contract.
+    im = im.convert("RGBA")
     transparent = "A" in im.getbands() and im.getchannel("A").getextrema()[0] < 255
 
     cropped = False
@@ -258,10 +266,29 @@ def preprocess_image(data: bytes, *, crop_to_content: bool = True,
         im = im.convert("RGBA").quantize(colors=256).convert("RGBA")
         quantized = True
 
+    alpha = np.asarray(im.getchannel("A"), dtype=np.uint8) if transparent else None
     arr = _flatten_on_white(im) if (preserve_transparency or transparent) else np.asarray(im.convert("RGB"), np.uint8)
     h, w = arr.shape[:2]
     return arr, ProcessedMeta(width=w, height=h, cropped=cropped, resized=resized,
-                              transparent=bool(transparent), quantized=quantized)
+                              transparent=bool(transparent), quantized=quantized), alpha
+
+
+def preprocess_image(data: bytes, *, crop_to_content: bool = True,
+                     max_size_px: int = DEFAULT_MAX_SIZE_PX, preserve_transparency: bool = True,
+                     quantize: bool = False) -> tuple[np.ndarray, ProcessedMeta]:
+    """Preprocess an image for RGB consumers.
+
+    Use :func:`preprocess_image_with_alpha` when geometry must retain source
+    transparency too.
+    """
+    arr, meta, _alpha = preprocess_image_with_alpha(
+        data,
+        crop_to_content=crop_to_content,
+        max_size_px=max_size_px,
+        preserve_transparency=preserve_transparency,
+        quantize=quantize,
+    )
+    return arr, meta
 
 
 _PRIMITIVE_RE = re.compile(r"<(rect|circle|ellipse|polygon|line)\b")
