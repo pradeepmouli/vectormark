@@ -214,6 +214,8 @@ def idealize_logo_image(
         epsilon=options.get("epsilon", 1.5),
         max_error=options.get("max_error", 1.0),
         max_colors=options.get("colors", DEFAULT_COLORS),
+        min_region_size=options.get("min_region_size", 16),
+        min_region_fraction=options.get("min_region_fraction", 0.02),
         flatten=options.get("flatten", False),
         no_symmetry=options.get("no_symmetry", False),
         optimizer=options.get("optimizer", False),
@@ -273,7 +275,7 @@ mcp = FastMCP(
     "vectormark",
     instructions=(
         "Convert rendered raster artwork into clean, editable SVG. Use trace_drawing with "
-        "refine='auto' for one-shot idealization. For interactive work, use refine='interactive', "
+        "refine='auto' for one-shot idealization. Use refine='none' to retain unrefined trace roots, "
         "inspect the returned preview, labeled_svg, and raw_trace artifacts, then make semantic "
         "judgments about every retained region (primitive, path geometry, symmetry, clones, fill, "
         "z-order, simplify, and stitch). Submit refine_drawing plans with the drawing_id and an "
@@ -337,21 +339,46 @@ class PrimitiveGeometrySpec(_PlanSchema):
     type: Literal["circle", "ellipse", "rect", "rounded_rect", "polygon", "trapezoid", "rounded_trapezoid", "cap"]
 
 
-class PathGroupOp(_PlanSchema):
-    op: Literal["group"]
-    id: str = Field(description="Logical segment ID used by subsequent path operations.")
-    commands: list[str] = Field(
-        min_length=1,
-        description="Contiguous command IDs from the target's retained base-version path; excludes M and Z.",
-    )
-
-
 class PathFitOp(_PlanSchema):
     op: Literal["fit"]
-    target: str = Field(description="A preceding path group ID.")
+    target: str = Field(description="A retained, version-scoped segment ID, for example r1.p1.c14-1.")
     type: Literal["line", "quadratic", "cubic", "keep"] = Field(
-        description="Geometry for the grouped commands. Use line for deliberate straight edges; keep preserves raw commands."
+        description="Geometry for this segment. Use line for deliberate straight edges; keep preserves its retained command."
     )
+
+
+class PathMatchLengthOp(_PlanSchema):
+    op: Literal["match_length"]
+    target: str = Field(description="Retained, version-scoped segment to resize.")
+    reference: str = Field(description="Retained, version-scoped segment whose length is matched.")
+
+
+class PathMatchOp(_PlanSchema):
+    op: Literal["match"]
+    target: str = Field(description="Retained, version-scoped segment to reconstruct.")
+    reference: str = Field(description="Retained, version-scoped segment to copy.")
+    transform: tuple[float, float, float, float, float, float] = Field(
+        description="SVG affine transform [a, b, c, d, e, f] from the reference segment to the target segment."
+    )
+
+
+class PathSetParallelOp(_PlanSchema):
+    op: Literal["set_parallel"]
+    target: str = Field(description="Retained, version-scoped segment to fit as a parallel line.")
+    reference: str = Field(description="Retained segment supplying the supporting-line direction, never its length.")
+    distance: float | None = Field(None, description="Optional signed perpendicular offset. Omit to fit the offset from the target's existing geometry.")
+
+
+class PathAlignOp(_PlanSchema):
+    op: Literal["align"]
+    target: str = Field(description="Retained, version-scoped segment whose endpoint is aligned.")
+    reference: str = Field(description="Retained, version-scoped segment supplying the endpoint coordinate.")
+    axes: list[Literal["x", "y"]] = Field(min_length=1, description="Endpoint axes to align: x, y, or both.")
+
+
+class PathRemoveOp(_PlanSchema):
+    op: Literal["remove"]
+    target: str = Field(description="Retained, version-scoped segment to remove while preserving following geometry.")
 
 
 class PathBreakOp(_PlanSchema):
@@ -372,7 +399,7 @@ class PathStitchOp(_PlanSchema):
 
 
 PathOp = Annotated[
-    PathGroupOp | PathFitOp | PathBreakOp | PathCloseOp | PathSimplifyOp | PathStitchOp,
+    PathFitOp | PathMatchLengthOp | PathMatchOp | PathSetParallelOp | PathAlignOp | PathRemoveOp | PathBreakOp | PathCloseOp | PathSimplifyOp | PathStitchOp,
     Field(discriminator="op"),
 ]
 
@@ -381,7 +408,7 @@ class PathGeometrySpec(_PlanSchema):
     type: Literal["path"]
     ops: list[PathOp] = Field(
         min_length=1,
-        description="Path-local program. Group raw commands, fit each group, then optionally break, close, simplify, or stitch.",
+        description="Path-local program. Fit retained segments, then optionally break, close, simplify, or stitch.",
     )
 
 
@@ -455,6 +482,13 @@ class CloneOp(_PlanSchema):
     )
 
 
+class AlignOp(_PlanSchema):
+    op: Literal["align"]
+    target: str = Field(description="Current retained region to translate.")
+    reference: str = Field(description="Current retained region whose bounds center is used as the reference.")
+    axes: list[Literal["x", "y"]] = Field(min_length=1, description="Axes to align: x, y, or both.")
+
+
 class SetSymmetryOp(_PlanSchema):
     op: Literal["set_symmetry"]
     source: str = Field(description="Existing source target ID.")
@@ -464,7 +498,7 @@ class SetSymmetryOp(_PlanSchema):
 
 PlanOp = Annotated[
     MergeOp | SplitOp | DetectPrimitivesOp | DetectSymmetryOp | DetectClonesOp | SimplifyOp | StitchOp
-    | SetGeometryOp | SetFillOp | SetZOrderOp | CloneOp | SetSymmetryOp,
+    | SetGeometryOp | SetFillOp | SetZOrderOp | CloneOp | AlignOp | SetSymmetryOp,
     Field(discriminator="op"),
 ]
 
@@ -478,7 +512,7 @@ class RefinementPlanInput(_PlanSchema):
     label: str | None = Field(None, max_length=200, description="Optional human-readable branch label.")
     defaults: PlanDefaults = Field(default_factory=PlanDefaults, description="Default fitting tolerances for operations.")
     ops: list[PlanOp] = Field(
-        description="Ordered semantic transformations. IDs refer to the selected base version; use raw_trace command IDs only in path geometry.",
+        description="Ordered semantic transformations. IDs refer to the selected base version; path geometry uses retained segment IDs such as r1.p1.c14-1.",
         json_schema_extra={
             "examples": [[
                 {"op": "set_geometry", "target": "r1", "geometry": {"type": "circle"}},
@@ -529,7 +563,7 @@ class TraceSummaryOutput(_DrawingOutputSchema):
 
 
 class TraceDrawingOutput(_DrawingOutputSchema):
-    """One output envelope for auto one-shot and interactive trace modes."""
+    """One output envelope for auto-refined and unrefined trace modes."""
 
     drawing_id: str | None = None
     version: str | None = None
@@ -606,16 +640,18 @@ class IdealizeOptions(BaseModel):
     optimizer: bool = Field(False, description="Run the existing geometry optimizer passes.")
     epsilon: float = Field(1.5, description="Primitive/polygon recognition tolerance in pixels.")
     max_error: float = Field(1.0, description="Bézier fit tolerance in pixels.")
+    min_region_size: int = Field(16, ge=1, description="Absolute pixel-area floor before optimizer tracing.")
+    min_region_fraction: float = Field(0.02, ge=0, lt=1, description="Relative retained-region floor before optimizer tracing.")
     preprocess: PreprocessOpts = Field(default_factory=PreprocessOpts, description="Server-side preprocessing options.")
 
 
 class TraceDrawingOptions(BaseModel):
-    refine: Literal["auto", "interactive"] = Field(
-        "interactive", description="interactive retains a live drawing for semantic plans; auto returns a one-shot idealization."
+    refine: Literal["auto", "none"] = Field(
+        "none", description="Automatic refinement at trace time: none retains trace roots; auto returns a one-shot idealization."
     )
     max_colors: int = Field(16, ge=2, description="Maximum quantized palette colors used by the raw trace.")
     min_region_size: int = Field(16, ge=1, description="Absolute pixel-area floor for raw trace regions.")
-    min_region_fraction: float = Field(0.02, ge=0, lt=1, description="Relative area floor for interactive root regions; raw trace remains available on demand.")
+    min_region_fraction: float = Field(0.02, ge=0, lt=1, description="Relative area floor for retained trace roots; raw trace remains available on demand.")
     trace_level: Literal["pixel", "subpixel"] = Field(
         "pixel", description="Boundary trace precision. subpixel uses anti-alias coverage when available."
     )
@@ -650,9 +686,10 @@ def trace_drawing(
     options = options or TraceDrawingOptions()
     if options.refine == "auto":
         return idealize_logo(image, IdealizeOptions(colors=options.max_colors, epsilon=options.simplify_tolerance,
-            max_error=options.curve_tolerance, optimizer=True, preprocess=options.preprocess))
-    if options.refine != "interactive" or ctx is None:
-        raise ToolError("[DRAWING_CONTEXT_REQUIRED] interactive tracing requires an MCP session context")
+            max_error=options.curve_tolerance, min_region_size=options.min_region_size,
+            min_region_fraction=options.min_region_fraction, optimizer=True, preprocess=options.preprocess))
+    if options.refine != "none" or ctx is None:
+        raise ToolError("[DRAWING_CONTEXT_REQUIRED] refine='none' tracing requires an MCP session context")
     try:
         trace, rgb = _trace_result(image, options)
     except ImageError as err:

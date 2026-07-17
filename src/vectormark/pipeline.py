@@ -49,6 +49,7 @@ class Options:
                                   # of the binary mask; off by default — coverage isn't
                                   # left-right symmetric, so it drifts flat symmetric regions.
     max_colors: int = 16
+    min_region_size: int = 16       # absolute pixel-area floor before relative filtering
     min_region_fraction: float = 0.02  # drop regions smaller than this × largest region
     flatten: bool = False
     no_symmetry: bool = False
@@ -128,7 +129,7 @@ def _segment_image(arr: np.ndarray, opt: Options) -> tuple[int, int, list[Region
     h, w, _ = arr.shape
     palette = extract_palette(arr, max_colors=opt.max_colors)
     q = quantize(arr, palette)
-    regions = segment(q, min_area=16)
+    regions = segment(q, min_area=opt.min_region_size)
     if regions:
         cut = opt.min_region_fraction * max(r.area for r in regions)
         regions = [r for r in regions if r.area >= cut]
@@ -723,7 +724,7 @@ def _render_optimizer_body(
     """Serialize optimized objects, resolving object-id based <use> references."""
     from .optimizer.vector_region import VectorRegion, _parse_subpaths, _sample_subpath
     from .optimizer.passes.simplify import _rounded_rect_path, _simplified_path_shape
-    from .skia_geometry import SkPath
+    from .skia_geometry import SkPath, unary_union
 
     defs: list[str] = []
     fill_cache: dict[str, str] = {}
@@ -930,6 +931,29 @@ def _render_optimizer_body(
             return None
         if children[0].fill is None or any(child.fill != children[0].fill for child in children):
             return None
+
+        # The fitted half path may drift microscopically from the symmetry cut.
+        # Do not serialize those two independent commands: union the exact Skia
+        # half-footprints first, which removes their coincident interior edge.
+        combined_footprint = unary_union([child.footprint for child in children])
+        if isinstance(combined_footprint, SkPath) and not combined_footprint.is_empty:
+            params: dict[str, object] = {"d": combined_footprint.to_svg_d()}
+            source_rule = fill_rule_for(children[0].current)
+            if source_rule is not None:
+                params["fill_rule"] = source_rule
+            combined_shape = _simplify_stitched_region_shape(Shape("path", params))
+            return VectorRegion(
+                region.id,
+                combined_shape,
+                children[0].fill,
+                region.z,
+                footprint=combined_footprint,
+                raster=region.raster,
+                source_label=region.source_label,
+                color_hex=region.color_hex,
+                diagnostics=region.diagnostics,
+            )
+
         scope_objects = {int(child.id): child for child in children}
         source_shape = children[0].current
         mirror_shape = children[1].current

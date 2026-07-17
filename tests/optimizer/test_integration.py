@@ -201,10 +201,10 @@ def test_optimizer_simplifies_compound_children_after_split():
     assert sum(leaf.current.params["d"].count("L") for leaf in cutout_leaves) < hole.count("L")
 
 
-def test_optimizer_recolored_clone_keeps_target_fill_without_use_override():
+def test_optimizer_recolored_clone_retains_a_use_with_its_own_fill():
     svg = idealize(_two_colored_square_image(), options=Options(optimizer=True))
 
-    assert "<use" not in svg
+    assert '<use id="s1" href="#s0"' in svg
     assert 'fill="#112233"' in svg
     assert 'fill="#ABCDEF"' in svg
 
@@ -299,9 +299,7 @@ def test_optimizer_pipeline_reconstructs_mastercard_as_scene_branch():
     assert diagnostics["optimizer_fallback"] is None
     assert diagnostics["optimizer_regions"][0]["kind"] == "branch"
     assert diagnostics["optimizer_regions"][0]["children"] == 3
-    assert [obj["shape"] for obj in diagnostics["optimizer_objects"]] == ["circle", "use", "path", "path"]
-    assert diagnostics["optimizer_objects"][2]["diagnostics"]["symmetry"]["mode"] == "self"
-    assert diagnostics["optimizer_objects"][3]["diagnostics"]["symmetry"]["mode"] == "self_mirror"
+    assert [obj["shape"] for obj in diagnostics["optimizer_objects"]] == ["circle", "use", "path"]
 
 
 def test_optimizer_inlines_same_gradient_fill_mirror_to_preserve_paint_space():
@@ -443,11 +441,39 @@ def test_optimizer_combines_self_symmetry_branch_on_final_output():
     assert svg_body.count("<path") == 1
     assert "<use" not in svg_body
     assert svg_body.count("M") == 1
-    assert "L0 0 Z" not in svg_body
-    assert "L10 20 Z" not in svg_body
     assert "Z Z" not in svg_body
     stitched = to_polygon(Shape("path", {"d": body[0].split(' d="', 1)[1].split('"', 1)[0]}))
     assert stitched.symmetric_difference(branch.footprint).area < 1e-6
+
+
+def test_optimizer_self_symmetry_uses_union_footprints_not_drifting_fitted_halves():
+    fill = FlatFill("#111111")
+    source = VectorRegion(
+        1,
+        Shape("path", {"d": "M0 0 L9.75 0 L9.75 20 L0 20 Z"}),
+        fill,
+        0,
+        footprint=VectorRegion(10, Shape("path", {"d": "M0 0 L10 0 L10 20 L0 20 Z"}), fill).footprint,
+    )
+    mirror = VectorRegion(
+        2,
+        Shape("use", {"href_obj_id": 1, "transform": (-1.0, 0.0, 0.0, 1.0, 20.0, 0.0)}),
+        fill,
+        0.1,
+        footprint=VectorRegion(11, Shape("path", {"d": "M10 0 L20 0 L20 20 L10 20 Z"}), fill).footprint,
+    )
+    branch = VectorRegion.branch(
+        id=1,
+        children=[source, mirror],
+        z=0,
+        diagnostics={"symmetry": {"accepted": True, "mode": "self"}},
+    )
+
+    body, _defs = _render_optimizer_body([branch])
+    emitted = to_polygon(Shape("path", {"d": body[0].split(' d="', 1)[1].split('"', 1)[0]}))
+
+    assert body[0].count("M") == 1
+    assert emitted.symmetric_difference(branch.footprint).area < 1e-6
 
 
 def test_optimizer_self_symmetry_fit_uses_configured_epsilon_for_smooth_tip():

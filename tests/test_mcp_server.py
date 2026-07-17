@@ -33,7 +33,7 @@ def _png_data_uri() -> str:
     return "data:image/png;base64," + base64.b64encode(data.getvalue()).decode()
 
 
-def test_interactive_trace_refine_and_artifact_share_one_live_region_forest():
+def test_unrefined_trace_refine_and_artifact_share_one_live_region_forest():
     """The public MCP helpers preserve v0 roots and refine child versions."""
     ctx = SimpleNamespace(session=object())
     traced = trace_drawing(ImageRef(data_uri=_png_data_uri()), TraceDrawingOptions(), ctx)
@@ -65,7 +65,15 @@ def test_interactive_trace_refine_and_artifact_share_one_live_region_forest():
     assert artifact is not None and '<circle id="r1"' in artifact["svg"]
 
 
-def test_interactive_trace_stitches_retained_roots_before_creating_v0(monkeypatch):
+def test_trace_options_name_the_absence_of_automatic_refinement_none():
+    from pydantic import ValidationError
+
+    assert TraceDrawingOptions(refine="none").refine == "none"
+    with pytest.raises(ValidationError):
+        TraceDrawingOptions(refine="interactive")
+
+
+def test_unrefined_trace_stitches_retained_roots_before_creating_v0(monkeypatch):
     observed: list[int] = []
     original_stitch = mcp_server_module.stitch_regions
 
@@ -122,6 +130,54 @@ def test_trace_auto_returns_a_one_shot_svg_without_live_state():
     assert result is not None
     assert result["svg"].startswith("<svg ")
     assert "drawing_id" not in result
+
+
+def test_trace_auto_threads_trace_controls_into_idealize_options(monkeypatch):
+    captured = {}
+
+    def capture(_image, options):
+        captured["options"] = options
+        return SimpleNamespace(structuredContent={"svg": "<svg />"})
+
+    monkeypatch.setattr(mcp_server_module, "idealize_logo", capture)
+    trace_drawing(
+        ImageRef(data_uri=_png_data_uri()),
+        TraceDrawingOptions(
+            refine="auto",
+            max_colors=9,
+            min_region_size=37,
+            min_region_fraction=0.125,
+            simplify_tolerance=2.25,
+            curve_tolerance=0.75,
+        ),
+        SimpleNamespace(session=object()),
+    )
+
+    options = captured["options"]
+    assert options.colors == 9
+    assert options.min_region_size == 37
+    assert options.min_region_fraction == 0.125
+    assert options.epsilon == 2.25
+    assert options.max_error == 0.75
+
+
+def test_idealize_logo_threads_region_thresholds_into_pipeline_options(monkeypatch):
+    captured = {}
+
+    def capture(_rgb, *, options):
+        captured["options"] = options
+        return '<svg xmlns="http://www.w3.org/2000/svg"/>'
+
+    monkeypatch.setattr(mcp_server_module, "idealize", capture)
+    mcp_server_module.idealize_logo_image(
+        {"data_uri": _png_data_uri()},
+        {"min_region_size": 37, "min_region_fraction": 0.125},
+        local_trust=True,
+    )
+
+    options = captured["options"]
+    assert options.min_region_size == 37
+    assert options.min_region_fraction == 0.125
 
 
 def test_render_drawing_accepts_widget_result_shape():
@@ -183,7 +239,7 @@ def test_stdio_server_exposes_only_the_drawing_first_surface():
                 )
                 traced = await session.call_tool(
                     "trace_drawing",
-                    {"image": {"data_uri": _png_data_uri()}, "options": {"refine": "interactive", "max_colors": 4}},
+                    {"image": {"data_uri": _png_data_uri()}, "options": {"refine": "none", "max_colors": 4}},
                 )
                 drawing_id = traced.structuredContent["drawing_id"]
                 refined = await session.call_tool(
@@ -206,13 +262,14 @@ def test_stdio_server_exposes_only_the_drawing_first_surface():
     initialized, tools, resources, widget, auto, refined, artifact = asyncio.run(list_tools_and_run_drawing_workflow())
 
     assert set(tools) == {"trace_drawing", "refine_drawing", "get_drawing_artifact", "render_drawing"}
-    assert "interactive" in (initialized.instructions or "")
+    assert "refine='none'" in (initialized.instructions or "")
     assert tools["trace_drawing"].meta["openai/fileParams"] == ["image"]
     refine_schema = tools["refine_drawing"].inputSchema
     plan_schema = refine_schema["$defs"]["RefinementPlanInput"]
     assert "oneOf" in plan_schema["properties"]["ops"]["items"]
     assert "set_geometry" in str(refine_schema)
-    assert "group" in str(refine_schema)
+    assert "r1.p1.c14-1" in str(refine_schema)
+    assert "match_length" in str(refine_schema)
     assert "quadratic" in str(refine_schema)
     for tool_name in ("trace_drawing", "refine_drawing", "get_drawing_artifact", "render_drawing"):
         assert tools[tool_name].outputSchema is not None
