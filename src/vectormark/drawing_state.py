@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 import secrets
 import time
 from collections.abc import Mapping
@@ -63,6 +64,7 @@ class _StoredDrawing:
 
 
 _IMMUTABLE_SCALAR_TYPES = (type(None), bool, int, float, complex, str, bytes)
+_VERSION_ID = re.compile(r"v\d+(?:\.\d+)*$")
 
 
 def _freeze(value: object, ancestors: set[int] | None = None) -> object:
@@ -335,6 +337,7 @@ class DrawingStore:
         label: str | None = None,
         trace: TraceResult | None = None,
         geometry_guide_rgb: np.ndarray | None = None,
+        version_id: str | None = None,
     ) -> DrawingVersion:
         with self._lock:
             del session
@@ -356,9 +359,12 @@ class DrawingStore:
                 geometry_guide_rgb if geometry_guide_rgb is not None else base.geometry_guide_rgb,
                 frozen_trace,
             )
-            child_number = drawing.child_counts[base_version]
-            version_id = f"{base_version}.{child_number}"
-            drawing.child_counts[base_version] = child_number + 1
+            if version_id is None:
+                child_number = drawing.child_counts[base_version]
+                version_id = f"{base_version}.{child_number}"
+                drawing.child_counts[base_version] = child_number + 1
+            elif not _VERSION_ID.fullmatch(version_id) or version_id in drawing.versions:
+                raise ValueError(f"invalid or duplicate drawing version ID: {version_id}")
             version = DrawingVersion(
                 id=version_id,
                 parent_id=base_version,

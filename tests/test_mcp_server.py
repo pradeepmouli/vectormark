@@ -194,8 +194,9 @@ def test_trace_auto_refines_the_retained_trace_into_a_live_child_version():
 
     assert result is not None
     assert result["drawing_id"]
-    assert result["version"] == "v0.0"
-    assert result["artifacts"]["svg"].endswith("/v0.0.svg")
+    assert result["version"] == "v1"
+    assert [output["version"] for output in result["outputs"]] == ["v0", "v1"]
+    assert result["artifacts"]["svg"].endswith("/v1.svg")
 
 
 def test_geometry_guide_retraces_geometry_but_refills_every_leaf_from_the_original_source():
@@ -389,7 +390,8 @@ def test_stdio_server_exposes_only_the_drawing_first_surface():
     assert "Trace & refine" in widget
     assert auto.structuredContent is not None
     assert auto.structuredContent["drawing_id"]
-    assert auto.structuredContent["version"] == "v0.0"
+    assert auto.structuredContent["version"] == "v1"
+    assert [output["version"] for output in auto.structuredContent["outputs"]] == ["v0", "v1"]
     assert refined.structuredContent["version"] == "v0.0"
     assert '<circle id="r1"' in artifact.structuredContent["svg"]
 

@@ -362,15 +362,15 @@ mcp = FastMCP(
         "discarded and the vector drawing can become the source of truth. Treat the source-minus-SVG diff as a fidelity gate: "
         "remove every visible structural, geometric, alignment, proportion, or fill discrepancy. Residuals limited to normal SVG "
         "versus raster antialiasing, resampling, and continuous-gradient approximation are acceptable; merely being a close trace is not. "
-        "There are three geometry modalities. Both trace_drawing refine modes are interactive: refine='auto' traces, runs baseline automatic geometry passes, "
-        "re-fits final fills from the original source RGB, then creates an auto-refined version for inspection and further refine_drawing plans. refine='none' retains "
+        "There are three geometry modalities. Both trace_drawing refine modes are interactive: refine='auto' always returns pre-optimizer v0 plus automatic v1, "
+        "whose final fills are re-fitted from the original source RGB; refine='none' returns only v0 and retains "
         "unrefined trace roots when you need to judge the raw decomposition before any automatic cleanup. Use retrace_drawing only when you can supply "
         "a better palette-labelled geometry guide; its guide colours are temporary labels and all final fills are still fitted from the original source. "
         "For trace options, use max_colors='auto' when palette complexity is unknown: it selects the smallest 8/16/32/64 palette whose perceptual improvement "
         "has flattened. Use a fixed integer when a known material count matters. fit_strategy='quadratic' is the stable default; 'progressive' protects "
         "pre-fit straight sides, then uses Q/C recursive fitting for the remaining spans; 'progressive_allow_lines' also permits new straight L segments during recursion. "
         "For either refine mode, inspect the returned five-panel review image before making plan decisions: it shows the preprocessed "
-        "source, retained trace v0, current refined SVG, addressable region map, and amplified source-minus-SVG diff. "
+        "source, retained trace v0, current SVG (v1 when auto refinement is enabled), addressable region map, and amplified source-minus-SVG diff. "
         "Use it together with the "
         "labeled_svg and raw_trace artifacts, then make semantic "
         "judgments about every retained region (primitive, path geometry, symmetry, clones, fill, "
@@ -725,10 +725,23 @@ class TraceSummaryOutput(_DrawingOutputSchema):
     regions: list[TraceRegionOutput]
 
 
+class TraceVersionOutput(_DrawingOutputSchema):
+    """One immutable drawing version produced by ``trace_drawing``."""
+
+    version: str = Field(description="Version ID for this output: v0 is always the pre-optimizer trace; v1 is the automatic refinement when requested.")
+    parent_version: str | None = Field(description="Parent version, or null for the pre-optimizer v0 trace.")
+    artifacts: DrawingArtifactsOutput
+    report: DrawingReportOutput
+
+
 class TraceDrawingOutput(_DrawingOutputSchema):
-    """One output envelope for auto-refined and unrefined trace modes."""
+    """Trace envelope with one pre-optimizer output and optional automatic child."""
 
     drawing_id: str | None = None
+    outputs: list[TraceVersionOutput] = Field(
+        default_factory=list,
+        description="Ordered immutable trace outputs: [v0] for refine='none', or [v0, v1] for refine='auto'.",
+    )
     version: str | None = None
     trace: TraceSummaryOutput | None = None
     artifacts: DrawingArtifactsOutput | None = None
@@ -976,7 +989,7 @@ def _trace_result(image: ImageRef, options: TraceDrawingOptions):
         "current result, addressable region map, and amplified source-minus-SVG diff. Inspect that panel before choosing any refine_drawing plan. "
         "The final SVG must be a designer-quality replacement for the supplied render: eliminate visible design discrepancies, "
         "not merely achieve a close trace; renderer-level antialiasing and gradient residuals are the only acceptable diff. "
-        "Both refine modes retain a live drawing: refine='auto' runs baseline automatic geometry cleanup and returns an inspectable, further-refinable auto version; "
+        "Both refine modes retain a live drawing: refine='auto' returns two immutable outputs, pre-optimizer v0 and automatic v1; "
         "refine='none' retains raw trace roots for diagnostic review. "
         "Use max_colors='auto' when palette complexity is unknown. fit_strategy='quadratic' is the stable default; "
         "'progressive' protects pre-fit straight sides then uses Q/C recursion, and 'progressive_allow_lines' also permits L/Q/C fitting during recursion. Set corner_normalize=true to canonicalize recognized rounded corners "
@@ -995,11 +1008,19 @@ def trace_drawing(
         trace, rgb = _trace_result(image, options)
     except ImageError as err:
         raise ToolError(f"[{err.error_code}] {err.message}") from err
-    regions = stitch_regions(trace, root_regions(trace, rgb, min_region_fraction=options.min_region_fraction))
-    drawing = _DRAWINGS.create(ctx.session, trace, regions=regions, source_rgb=rgb)
+    v0_regions = stitch_regions(trace, root_regions(trace, rgb, min_region_fraction=options.min_region_fraction))
+    drawing = _DRAWINGS.create(ctx.session, trace, regions=v0_regions, source_rgb=rgb)
+    v0_rendered = render_drawing_regions(trace, v0_regions)
+    outputs = [{
+        "version": "v0",
+        "parent_version": None,
+        "artifacts": _drawing_artifact_refs(drawing.id, "v0"),
+        "report": dict(v0_rendered.report),
+    }]
+    regions = v0_regions
     version_id = "v0"
     if options.refine == "auto":
-        regions = auto_refine(trace, regions, rgb=rgb)
+        regions = auto_refine(trace, v0_regions, rgb=rgb)
         child = _DRAWINGS.append(
             ctx.session,
             drawing.id,
@@ -1014,14 +1035,22 @@ def trace_drawing(
             },
             regions=regions,
             label="auto",
+            version_id="v1",
         )
         version_id = child.id
+        rendered_auto = render_drawing_regions(trace, regions)
+        outputs.append({
+            "version": child.id,
+            "parent_version": "v0",
+            "artifacts": _drawing_artifact_refs(drawing.id, child.id),
+            "report": dict(rendered_auto.report),
+        })
     rendered = render_drawing_regions(trace, regions)
     preview = _render_preview_png(rendered.svg, trace.width, trace.height, [])
     labels_svg = labeled_drawing_svg(trace, regions)
     assert drawing.versions["v0"].regions is not None
     review_panel = _render_review_panel_png(rgb, trace, drawing.versions["v0"].regions, rendered.svg, labels_svg, [])
-    result = {"drawing_id": drawing.id, "version": version_id, "trace": drawing_summary(trace, regions),
+    result = {"drawing_id": drawing.id, "outputs": outputs, "version": version_id, "trace": drawing_summary(trace, v0_regions),
         "artifacts": _drawing_artifact_refs(drawing.id, version_id), "report": dict(rendered.report)}
     result["trace_options_schema"] = _trace_options_schema()
     content: list[TextContent | ImageContent] = [TextContent(type="text", text=json.dumps(result))]
