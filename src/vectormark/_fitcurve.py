@@ -36,14 +36,14 @@ def _fit_quadratic(pts, error):
     u = _chord_length_parameterize(pts)
     ctrl = _generate_quadratic(pts, u)
     max_err, split = _compute_max_error(pts, ctrl, u)
-    if max_err < error:
+    if max_err < error * error:
         return [ctrl]
     if max_err < error * error:
         for _ in range(20):
             u = _reparameterize(pts, u, ctrl)
             ctrl = _generate_quadratic(pts, u)
             max_err, split = _compute_max_error(pts, ctrl, u)
-            if max_err < error:
+            if max_err < error * error:
                 return [ctrl]
     left = _fit_quadratic(pts[: split + 1], error)
     right = _fit_quadratic(pts[split:], error)
@@ -69,7 +69,22 @@ def _generate_quadratic(pts, u):
 
 
 def _reparameterize(pts, u, ctrl):
-    return np.array([_newton(p, uu, ctrl) for p, uu in zip(pts, u)])
+    u = np.asarray(u, dtype=float)
+    t = u[:, None]
+    v = 1.0 - t
+    point = v * v * ctrl[0] + 2.0 * v * t * ctrl[1] + t * t * ctrl[2]
+    delta = point - pts
+    derivative = 2.0 * (v * (ctrl[1] - ctrl[0]) + t * (ctrl[2] - ctrl[1]))
+    second_derivative = 2.0 * (ctrl[2] - 2.0 * ctrl[1] + ctrl[0])
+    denominator = (
+        np.einsum("ij,ij->i", derivative, derivative)
+        + np.einsum("ij,j->i", delta, second_derivative)
+    )
+    numerator = np.einsum("ij,ij->i", delta, derivative)
+    result = u.copy()
+    valid = denominator != 0.0
+    result[valid] -= numerator[valid] / denominator[valid]
+    return result
 
 
 def _newton(p, u, ctrl):
@@ -87,9 +102,32 @@ def _chord_length_parameterize(pts):
 
 
 def _compute_max_error(pts, ctrl, u):
-    errs = np.array([np.hypot(*(qbezier(ctrl, uu) - p)) ** 2 for p, uu in zip(pts, u)])
+    u = np.asarray(u, dtype=float)[:, None]
+    v = 1.0 - u
+    fitted = v * v * ctrl[0] + 2.0 * v * u * ctrl[1] + u * u * ctrl[2]
+    delta = fitted - pts
+    errs = np.einsum("ij,ij->i", delta, delta)
     split = int(errs.argmax())
     return float(errs[split]), max(1, min(split, len(pts) - 2))
+
+
+def fit_quadratic_once(points: np.ndarray, max_error: float) -> tuple[np.ndarray, float, int]:
+    """Fit one quadratic, returning its squared residual and useful split."""
+    pts = np.asarray(points, dtype=float)
+    if len(pts) == 2:
+        control = (pts[0] + pts[1]) / 2.0
+        return np.array([pts[0], control, pts[1]]), 0.0, 1
+    u = _chord_length_parameterize(pts)
+    ctrl = _generate_quadratic(pts, u)
+    max_err, split = _compute_max_error(pts, ctrl, u)
+    if max_err < max_error * max_error:
+        for _ in range(20):
+            u = _reparameterize(pts, u, ctrl)
+            ctrl = _generate_quadratic(pts, u)
+            max_err, split = _compute_max_error(pts, ctrl, u)
+            if max_err < max_error * max_error:
+                break
+    return ctrl, max_err, split
 
 
 # --- Inflection-guarded cubic fitting ----------------------------------------
@@ -160,11 +198,16 @@ def cubic_inflects(ctrl) -> list[float]:
     return sorted(roots)
 
 
-def fit_cubic_beziers(points: np.ndarray, max_error: float) -> list[np.ndarray]:
+def fit_cubic_beziers(
+    points: np.ndarray,
+    max_error: float,
+    *,
+    guard_inflections: bool = True,
+) -> list[np.ndarray]:
     pts = np.asarray(points, dtype=float)
     if len(pts) < 2:
         return []
-    return _fit_cubic(pts, max_error)
+    return _fit_cubic(pts, max_error, guard_inflections=guard_inflections)
 
 
 def _endpoint_tangents(pts):
@@ -180,7 +223,7 @@ def _endpoint_tangents(pts):
     return _unit(pts[k] - pts[0]), _unit(pts[-1 - k] - pts[-1])
 
 
-def _fit_cubic(pts, error):
+def _fit_cubic(pts, error, *, guard_inflections: bool):
     if len(pts) == 2:
         d = (pts[1] - pts[0]) / 3.0
         return [np.array([pts[0], pts[0] + d, pts[1] - d, pts[1]])]
@@ -188,7 +231,7 @@ def _fit_cubic(pts, error):
     u = _chord_length_parameterize(pts)
     ctrl = _generate_cubic(pts, u, t_hat1, t_hat2)
     max_err, split = _compute_max_error_cubic(pts, ctrl, u)
-    inflects = cubic_inflects(ctrl)
+    inflects = cubic_inflects(ctrl) if guard_inflections else []
     if max_err < error and not inflects:
         return [ctrl]
     if not inflects and max_err < error * error:
@@ -201,7 +244,10 @@ def _fit_cubic(pts, error):
     if inflects and max_err < error:
         split = int(np.argmin(np.abs(u - inflects[0])))  # split at the inflection
     split = max(1, min(split, len(pts) - 2))
-    return _fit_cubic(pts[: split + 1], error) + _fit_cubic(pts[split:], error)
+    return (
+        _fit_cubic(pts[: split + 1], error, guard_inflections=guard_inflections)
+        + _fit_cubic(pts[split:], error, guard_inflections=guard_inflections)
+    )
 
 
 def _generate_cubic(pts, u, t_hat1, t_hat2):
@@ -236,7 +282,34 @@ def _generate_cubic(pts, u, t_hat1, t_hat2):
 
 
 def _reparameterize_cubic(pts, u, ctrl):
-    return np.array([_newton_cubic(p, uu, ctrl) for p, uu in zip(pts, u)])
+    u = np.asarray(u, dtype=float)
+    t = u[:, None]
+    v = 1.0 - t
+    point = (
+        v * v * v * ctrl[0]
+        + 3.0 * v * v * t * ctrl[1]
+        + 3.0 * v * t * t * ctrl[2]
+        + t * t * t * ctrl[3]
+    )
+    delta = point - pts
+    derivative = 3.0 * (
+        v * v * (ctrl[1] - ctrl[0])
+        + 2.0 * v * t * (ctrl[2] - ctrl[1])
+        + t * t * (ctrl[3] - ctrl[2])
+    )
+    second_derivative = 6.0 * (
+        v * (ctrl[2] - 2.0 * ctrl[1] + ctrl[0])
+        + t * (ctrl[3] - 2.0 * ctrl[2] + ctrl[1])
+    )
+    denominator = (
+        np.einsum("ij,ij->i", derivative, derivative)
+        + np.einsum("ij,ij->i", delta, second_derivative)
+    )
+    numerator = np.einsum("ij,ij->i", delta, derivative)
+    result = u.copy()
+    valid = denominator != 0.0
+    result[valid] -= numerator[valid] / denominator[valid]
+    return result
 
 
 def _newton_cubic(p, u, ctrl):
@@ -252,6 +325,40 @@ def _newton_cubic(p, u, ctrl):
 
 
 def _compute_max_error_cubic(pts, ctrl, u):
-    errs = np.array([np.hypot(*(cbezier(ctrl, uu) - p)) ** 2 for p, uu in zip(pts, u)])
+    u = np.asarray(u, dtype=float)[:, None]
+    v = 1.0 - u
+    fitted = (
+        v * v * v * ctrl[0]
+        + 3.0 * v * v * u * ctrl[1]
+        + 3.0 * v * u * u * ctrl[2]
+        + u * u * u * ctrl[3]
+    )
+    delta = fitted - pts
+    errs = np.einsum("ij,ij->i", delta, delta)
     split = int(errs.argmax())
     return float(errs[split]), max(1, min(split, len(pts) - 2))
+
+
+def fit_cubic_once(
+    points: np.ndarray,
+    max_error: float,
+    *,
+    guard_inflections: bool = True,
+) -> tuple[np.ndarray, float, int]:
+    """Fit one cubic, returning its squared residual and useful split."""
+    pts = np.asarray(points, dtype=float)
+    if len(pts) == 2:
+        delta = (pts[1] - pts[0]) / 3.0
+        return np.array([pts[0], pts[0] + delta, pts[1] - delta, pts[1]]), 0.0, 1
+    tangent_start, tangent_end = _endpoint_tangents(pts)
+    u = _chord_length_parameterize(pts)
+    ctrl = _generate_cubic(pts, u, tangent_start, tangent_end)
+    max_err, split = _compute_max_error_cubic(pts, ctrl, u)
+    if max_err < max_error * max_error and (not guard_inflections or not cubic_inflects(ctrl)):
+        for _ in range(20):
+            u = _reparameterize_cubic(pts, u, ctrl)
+            ctrl = _generate_cubic(pts, u, tangent_start, tangent_end)
+            max_err, split = _compute_max_error_cubic(pts, ctrl, u)
+            if max_err < max_error * max_error and (not guard_inflections or not cubic_inflects(ctrl)):
+                break
+    return ctrl, max_err, split

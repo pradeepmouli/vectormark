@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from bisect import bisect_left, insort
+
 import numpy as np
 from skimage.measure import find_contours
 
@@ -66,25 +68,103 @@ def rdp(points: np.ndarray, epsilon: float) -> np.ndarray:
     return np.vstack([start, end])
 
 
-def corner_indices(poly: np.ndarray, *, angle_threshold_deg: float = 40.0) -> list[int]:
-    """Indices of `poly` vertices whose turn angle exceeds the threshold.
+def corner_indices(
+    poly: np.ndarray,
+    *,
+    angle_threshold_deg: float = 40.0,
+    min_adjacent_length: float = 0.0,
+    support_radius: float = 0.0,
+) -> list[int]:
+    """Indices of vertices with a sufficiently sharp, well-supported turn.
 
     `poly` is assumed closed (first point repeated at the end).
+
+    ``support_radius`` measures the two tangents over arc length on either
+    side of a candidate rather than using its immediate neighbours.  This
+    recovers a real corner whose raster/AA transition occupies a few short
+    polyline edges; nearby detections from that same transition are reduced to
+    their strongest turn.
     """
     pts = np.asarray(poly, dtype=float)
     n = len(pts) - 1 if np.allclose(pts[0], pts[-1]) else len(pts)
+    if n < 3:
+        return []
     thresh = np.radians(angle_threshold_deg)
-    corners: list[int] = []
+    radius = max(float(support_radius), 0.0)
+    edge_lengths = np.hypot(
+        *(np.roll(pts[:n], -1, axis=0) - pts[:n]).T
+    )
+    arc_at_vertex = np.concatenate(([0.0], np.cumsum(edge_lengths[:-1])))
+    perimeter = float(edge_lengths.sum())
+
+    def point_at_arc(index: int, step: int, distance: float) -> np.ndarray:
+        """Return the closed-polyline point ``distance`` from one vertex."""
+        point = pts[index % n].astype(float, copy=True)
+        remaining = distance
+        current = index % n
+        while remaining > 1e-9:
+            following = (current + step) % n
+            end = pts[following].astype(float, copy=False)
+            direction = end - point
+            length = float(np.hypot(*direction))
+            if length <= 1e-12:
+                current = following
+                continue
+            if length >= remaining:
+                return point + direction * (remaining / length)
+            point = end.copy()
+            remaining -= length
+            current = following
+        return point
+
+    def cyclic_distance(left: float, right: float) -> float:
+        distance = abs(right - left)
+        return min(distance, perimeter - distance)
+
+    scored: list[tuple[int, float]] = []
     for i in range(n):
         prev, cur, nxt = pts[(i - 1) % n], pts[i % n], pts[(i + 1) % n]
-        v1, v2 = cur - prev, nxt - cur
-        if np.hypot(*v1) == 0 or np.hypot(*v2) == 0:
+        # The support window below makes the *angle* AA-tolerant.  It does not
+        # make a tiny adjacent RDP run into meaningful corner evidence: a
+        # short/short or short/long kink is a cornerlet and must not split the
+        # fitted contour.  This is deliberately an OR condition.
+        immediate_incoming = float(np.hypot(*(cur - prev)))
+        immediate_outgoing = float(np.hypot(*(nxt - cur)))
+        if min(immediate_incoming, immediate_outgoing) < min_adjacent_length:
+            continue
+        if radius:
+            v1 = cur - point_at_arc(i, -1, radius)
+            v2 = point_at_arc(i, 1, radius) - cur
+        else:
+            v1, v2 = cur - prev, nxt - cur
+        incoming_length = float(np.hypot(*v1))
+        outgoing_length = float(np.hypot(*v2))
+        if incoming_length == 0 or outgoing_length == 0:
             continue
         cross = v1[0] * v2[1] - v1[1] * v2[0]   # 2-D scalar cross (NumPy 2.0)
         ang = np.arctan2(cross, np.dot(v1, v2))
         if abs(ang) >= thresh:
-            corners.append(i)
-    return corners
+            scored.append((i, abs(float(ang))))
+    if not radius:
+        return [index for index, _score in scored]
+
+    # An AA corner often produces two adjacent candidate vertices.  Retain the
+    # stronger turn once, rather than splitting the curve fit at both sides of
+    # the same soft transition.
+    selected: list[int] = []
+    selected_arcs: list[float] = []
+    for index, _score in sorted(scored, key=lambda item: (-item[1], item[0])):
+        arc = float(arc_at_vertex[index])
+        insertion = bisect_left(selected_arcs, arc)
+        neighbours: list[float] = []
+        if selected_arcs:
+            neighbours.append(selected_arcs[insertion % len(selected_arcs)])
+            neighbours.append(selected_arcs[(insertion - 1) % len(selected_arcs)])
+        if any(cyclic_distance(arc, existing) <= radius for existing in neighbours):
+            continue
+        selected.append(index)
+        insort(selected_arcs, arc)
+    return sorted(selected)
 
 
 def _slice_loop(contour: np.ndarray, i: int, j: int) -> np.ndarray:

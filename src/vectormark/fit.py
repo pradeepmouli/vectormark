@@ -2,13 +2,21 @@
 
 from __future__ import annotations
 
+import math
 import re
 from dataclasses import dataclass
 
 import numpy as np
 from skimage.measure import CircleModel, EllipseModel
 
-from ._fitcurve import cbezier, cubic_inflects, fit_cubic_beziers, fit_quadratic_beziers
+from ._fitcurve import (
+    cbezier,
+    cubic_inflects,
+    fit_cubic_beziers,
+    fit_cubic_once,
+    fit_quadratic_beziers,
+    fit_quadratic_once,
+)
 from .contour import corner_indices, rdp
 from .skia_geometry import SkPath
 
@@ -21,7 +29,10 @@ from .skia_geometry import SkPath
 # at sub-pixel tolerance to collapse the staircase before fitting.
 PATH_DENOISE_EPS = 0.5
 MIN_LINE_LENGTH_FACTOR = 8.0
+MIN_PROTECTED_POLYLINE_LINE_LENGTH = 64.0
 SIMPLE_CURVE_RESIDUAL_TOL = 0.032
+SIDE_NORMALIZATION_FACTOR = 3.0
+SIDE_QUADRATIC_RELATIVE_ERROR_TOL = 0.04
 _PATH_TOKEN = re.compile(r"[MLQCZ]|-?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?")
 
 
@@ -31,14 +42,45 @@ class Shape:
     params: dict
 
 
+@dataclass(frozen=True)
+class PathFitStages:
+    """The independently reviewable stages of a fitted contour.
+
+    ``baseline_d`` is the direct corner-split fit.  ``simple_d`` is the
+    residual-gated looser candidate selected by ``prefer_simple_curves``.
+    ``atomic_d`` is the final local line/curve cleanup. Keeping these values
+    separate makes tracing observable without changing the public ``fit_path``
+    result or silently folding an optimizer decision into the raw trace.
+    """
+
+    baseline_d: str
+    simple_d: str
+    atomic_d: str
+
+
 def _max_residual(model, pts: np.ndarray) -> float:
     return float(np.abs(model.residuals(pts)).max())
+
+
+def _circle_residual_within_epsilon(model: CircleModel, pts: np.ndarray, *, epsilon: float) -> bool:
+    """Accept a circle despite one quantization outlier, never a broad mismatch."""
+    residuals = np.abs(model.residuals(pts))
+    # Circle edges often contain one isolated AA stair-step.  Requiring the
+    # 99th percentile to meet epsilon accepts that negligible defect while the
+    # bounded maximum still rejects a clipped circle, flat dome, or connector.
+    return bool(
+        np.quantile(residuals, 0.99) <= epsilon
+        and residuals.max() <= epsilon + max(0.25, epsilon * 0.25)
+    )
 
 
 def recognize_primitive(contour: np.ndarray, *, epsilon: float) -> Shape | None:
     """Return a native-primitive Shape if `contour` matches one within ε, else None."""
     pts = np.asarray(contour, dtype=float)
-    if len(pts) < 8:
+    # A closed four-edge rectangle has five samples including its repeated
+    # start point.  It is still a perfectly valid primitive candidate even
+    # though circle/ellipse estimation needs more observations.
+    if len(pts) < 4:
         return None
     poly = SkPath(shell=list(map(tuple, pts)))
     normalized = poly.buffer(0)
@@ -47,20 +89,21 @@ def recognize_primitive(contour: np.ndarray, *, epsilon: float) -> Shape | None:
     if abs(normalized.area - poly.area) / max(poly.area, 1.0) > 0.02:
         return None
 
-    # circle
-    cm = CircleModel.from_estimate(pts)
-    if cm and _max_residual(cm, pts) <= epsilon:
-        xc, yc = cm.center
-        return Shape("circle", {"cx": xc, "cy": yc, "r": cm.radius})
+    if len(pts) >= 8:
+        # circle
+        cm = CircleModel.from_estimate(pts)
+        if cm and _circle_residual_within_epsilon(cm, pts, epsilon=epsilon):
+            xc, yc = cm.center
+            return Shape("circle", {"cx": xc, "cy": yc, "r": cm.radius})
 
-    # ellipse (axis-aligned check: snap small thetas to 0 for symmetric output)
-    em = EllipseModel.from_estimate(pts)
-    if em:
-        xc, yc = em.center
-        a, b = em.axis_lengths
-        theta = em.theta
-        if _max_residual(em, pts) <= epsilon and (abs(theta) < 0.08 or abs(abs(theta) - np.pi) < 0.08):
-            return Shape("ellipse", {"cx": xc, "cy": yc, "rx": a, "ry": b})
+        # ellipse (axis-aligned check: snap small thetas to 0 for symmetric output)
+        em = EllipseModel.from_estimate(pts)
+        if em:
+            xc, yc = em.center
+            a, b = em.axis_lengths
+            theta = em.theta
+            if _max_residual(em, pts) <= epsilon and (abs(theta) < 0.08 or abs(abs(theta) - np.pi) < 0.08):
+                return Shape("ellipse", {"cx": xc, "cy": yc, "rx": a, "ry": b})
 
     # axis-aligned rectangle: bbox fill ratio near 1, rotated-rect ~ axis-aligned,
     # AND genuinely four sharp corners. The corner check is what stops a *rounded
@@ -129,6 +172,62 @@ def minimum_line_length(epsilon: float) -> float:
     return max(4.0, epsilon * MIN_LINE_LENGTH_FACTOR)
 
 
+def _protected_line_spans(ring: np.ndarray) -> list[tuple[int, int]]:
+    """Return only literal long straight runs already present in the polyline.
+
+    This intentionally does *not* fit an RDP chord as a line.  A protected
+    line is an existing contiguous collinear run in the traced polyline, long
+    enough to be a deliberate graphic edge rather than a staircase fragment
+    or an approximation of an organic contour.
+    """
+    if len(ring) < 2:
+        return []
+    points = np.vstack([ring, ring[0]])
+    edges = np.diff(points, axis=0)
+    lengths = np.linalg.norm(edges, axis=1)
+    directions = [
+        _unit_vector(edge) if length > 1e-9 else None
+        for edge, length in zip(edges, lengths, strict=True)
+    ]
+    if not any(direction is not None for direction in directions):
+        return []
+
+    def same_direction(left: np.ndarray | None, right: np.ndarray | None) -> bool:
+        return left is not None and right is not None and bool(np.allclose(left, right, atol=1e-9))
+
+    # Start immediately after a direction break so a literal run crossing the
+    # closed-ring seam is considered as one run rather than two fragments.
+    count = len(edges)
+    start = next(
+        (index for index in range(count) if not same_direction(directions[index - 1], directions[index])),
+        0,
+    )
+    spans: list[tuple[int, int]] = []
+    offset = 0
+    while offset < count:
+        run_start = (start + offset) % count
+        direction = directions[run_start]
+        run_length = 0.0
+        run_edges = 0
+        while offset + run_edges < count:
+            current = (start + offset + run_edges) % count
+            if not same_direction(direction, directions[current]):
+                break
+            run_length += float(lengths[current])
+            run_edges += 1
+        if run_length >= MIN_PROTECTED_POLYLINE_LINE_LENGTH:
+            spans.append((run_start, (run_start + run_edges) % count))
+        offset += max(run_edges, 1)
+    return spans
+
+
+def _inside_closed_span(index: int, start: int, end: int) -> bool:
+    """Whether ``index`` is strictly inside the forward closed-ring span."""
+    if start < end:
+        return start < index < end
+    return index > start or index < end
+
+
 def _fmt(v: float) -> str:
     return f"{v:.2f}".rstrip("0").rstrip(".")
 
@@ -194,39 +293,189 @@ def _unit_vector(v: np.ndarray) -> np.ndarray | None:
     return np.asarray(v, dtype=float) / n
 
 
-def _smooth_quadratic_path_d(d: str, *, strength: float = 1.0) -> str:
+# Joins below this are intentional corners more often than trace noise.  A
+# right angle remains protected, while shallow near-corners can be flattened.
+_SMOOTH_MIN_INTERIOR_ANGLE_DEGREES = 120.0
+_SMOOTH_MAX_NODE_SHIFT = 1.0
+
+
+def _curve_endpoint(command: str, values: list[float]) -> np.ndarray | None:
+    if command == "Q":
+        return np.array(values[2:4], dtype=float)
+    if command == "C":
+        return np.array(values[4:6], dtype=float)
+    return None
+
+
+def _curve_endpoint_slot(command: str, values: list[float]) -> tuple[np.ndarray, int] | None:
+    if command == "Q":
+        return np.array(values[2:4], dtype=float), 2
+    if command == "C":
+        return np.array(values[4:6], dtype=float), 4
+    return None
+
+
+def _curve_end_control(command: str, values: list[float]) -> tuple[np.ndarray, int] | None:
+    if command == "Q":
+        return np.array(values[0:2], dtype=float), 0
+    if command == "C":
+        return np.array(values[2:4], dtype=float), 2
+    return None
+
+
+def _curve_start_control(command: str, values: list[float]) -> tuple[np.ndarray, int] | None:
+    if command in {"Q", "C"}:
+        return np.array(values[0:2], dtype=float), 0
+    return None
+
+
+def _project_onto_line(point: np.ndarray, start: np.ndarray, end: np.ndarray) -> np.ndarray | None:
+    direction = end - start
+    length_squared = float(np.dot(direction, direction))
+    if length_squared <= 1e-9:
+        return None
+    return start + direction * float(np.dot(point - start, direction) / length_squared)
+
+
+def _smooth_curve_path_d(d: str) -> str:
     commands = _parse_path_commands(d)
     if commands is None:
         return d
 
+    # Keep the unmodified start point of every command so a quadratic can be
+    # degree-elevated exactly if its single control is claimed by both joins.
+    starts: list[np.ndarray | None] = []
+    cursor: np.ndarray | None = None
+    subpath_start: np.ndarray | None = None
+    for command, values in commands:
+        starts.append(None if cursor is None else cursor.copy())
+        if command == "M":
+            cursor = np.asarray(values[:2], dtype=float)
+            subpath_start = cursor.copy()
+        elif command == "L":
+            cursor = np.asarray(values[:2], dtype=float)
+        elif command == "Q":
+            cursor = np.asarray(values[2:4], dtype=float)
+        elif command == "C":
+            cursor = np.asarray(values[4:6], dtype=float)
+        elif command == "Z":
+            cursor = None if subpath_start is None else subpath_start.copy()
+
+    # Compute every target from the unmodified command list.  A Q has a single
+    # control shared by its two joins, while a C has distinct start/end control
+    # slots; keying targets by slot lets C joins smooth independently.
+    proposals: list[
+        tuple[
+            dict[tuple[int, int], np.ndarray],
+            tuple[tuple[int, int], ...],
+            tuple[int, int],
+            np.ndarray | None,
+            int,
+        ]
+    ] = []
     for i in range(len(commands) - 1):
         command, values = commands[i]
         next_command, next_values = commands[i + 1]
-        if command != "Q" or next_command not in {"Q", "L"}:
+        if command not in {"Q", "C"} or next_command not in {"Q", "C", "L"}:
             continue
-        join = np.array(values[2:4], dtype=float)
-        incoming = join - np.array(values[0:2], dtype=float)
-        outgoing = np.array(next_values[0:2], dtype=float) - join
+        endpoint = _curve_endpoint_slot(command, values)
+        previous = _curve_end_control(command, values)
+        following = _curve_start_control(next_command, next_values)
+        if endpoint is None or previous is None:
+            continue
+        join, endpoint_offset = endpoint
+        previous_control, previous_offset = previous
+        next_control = np.array(next_values[0:2], dtype=float) if following is None else following[0]
+        incoming = join - previous_control
+        outgoing = next_control - join
         in_dir = _unit_vector(incoming)
         out_dir = _unit_vector(outgoing)
         if in_dir is None or out_dir is None:
             continue
-        if float(np.dot(in_dir, out_dir)) <= 0.0:
+        # ``in_dir`` and ``out_dir`` agree for a straight continuation.  The
+        # corresponding path interior angle is 180° minus their turn angle;
+        # avoid smoothing any join sharper than 135° so fitted corners retain
+        # their intentional geometry.
+        min_dot = math.cos(math.radians(180.0 - _SMOOTH_MIN_INTERIOR_ANGLE_DEGREES))
+        # Include the exact 135° boundary despite float round-off.
+        if float(np.dot(in_dir, out_dir)) + 1e-9 < min_dot:
             continue
         tangent = out_dir if next_command == "L" else _unit_vector(in_dir + out_dir)
         if tangent is None:
             continue
         prev_control = join - tangent * float(np.hypot(incoming[0], incoming[1]))
-        values[0:2] = [
-            float(values[0] + strength * (prev_control[0] - values[0])),
-            float(values[1] + strength * (prev_control[1] - values[1])),
+        targets = {(i, previous_offset): prev_control}
+        if following is not None:
+            _control, next_offset = following
+            targets[(i + 1, next_offset)] = join + tangent * float(np.hypot(outgoing[0], outgoing[1]))
+        node_target = _project_onto_line(join, previous_control, next_control)
+        proposals.append((targets, tuple(targets), (i, endpoint_offset), node_target, i))
+
+    control_use_count: dict[tuple[int, int], int] = {}
+    for _targets, controls, _node_slot, _node_target, _join_index in proposals:
+        for control in controls:
+            control_use_count[control] = control_use_count.get(control, 0) + 1
+
+    # A quadratic has one control for both of its joins.  If both joins ask
+    # for a tangent projection, elevate the Q to its exact cubic equivalent
+    # and give each side its own requested handle.  This replaces the old node
+    # projection, which could flatten or move the path rather than preserving
+    # the fitted chain.
+    requests: dict[tuple[int, str], np.ndarray] = {}
+    for targets, _controls, _node_slot, _node_target, join_index in proposals:
+        if commands[join_index][0] == "Q" and (join_index, 0) in targets:
+            requests[(join_index, "end")] = targets[(join_index, 0)]
+        next_index = join_index + 1
+        if next_index < len(commands) and commands[next_index][0] == "Q" and (next_index, 0) in targets:
+            requests[(next_index, "start")] = targets[(next_index, 0)]
+
+    promoted: set[int] = set()
+    for index in sorted({command_index for command_index, _side in requests}):
+        start_target = requests.get((index, "start"))
+        end_target = requests.get((index, "end"))
+        if start_target is None or end_target is None:
+            continue
+        command, values = commands[index]
+        start = starts[index]
+        if command != "Q" or start is None:
+            continue
+        control = np.asarray(values[:2], dtype=float)
+        end = np.asarray(values[2:4], dtype=float)
+        # Exact quadratic-to-cubic degree elevation.  Apply the two requested
+        # join handles after that conversion, never by moving either endpoint.
+        first = start + (control - start) * (2.0 / 3.0)
+        second = end + (control - end) * (2.0 / 3.0)
+        elevated = [
+            float(first[0]),
+            float(first[1]),
+            float(second[0]),
+            float(second[1]),
+            float(end[0]),
+            float(end[1]),
         ]
-        if next_command == "Q":
-            next_control = join + tangent * float(np.hypot(outgoing[0], outgoing[1]))
-            next_values[0:2] = [
-                float(next_values[0] + strength * (next_control[0] - next_values[0])),
-                float(next_values[1] + strength * (next_control[1] - next_values[1])),
-            ]
+        elevated[:2] = [float(start_target[0]), float(start_target[1])]
+        elevated[2:4] = [float(end_target[0]), float(end_target[1])]
+        commands[index] = (
+            "C",
+            elevated,
+        )
+        promoted.add(index)
+    for targets, controls, node_slot, node_target, _join_index in proposals:
+        if any(command_index in promoted for command_index, _offset in controls):
+            continue
+        if all(control_use_count[control] == 1 for control in controls):
+            for control, target in targets.items():
+                command_index, offset = control
+                _command, values = commands[command_index]
+                values[offset:offset + 2] = [
+                    float(target[0]),
+                    float(target[1]),
+                ]
+            continue
+        # Never resolve a shared-control conflict by moving the join node: it
+        # changes the outline.  A Q with two join requests was elevated above;
+        # any other conflict is left untouched.
+        del node_slot, node_target
 
     parts: list[str] = []
     for command, values in commands:
@@ -237,48 +486,31 @@ def _smooth_quadratic_path_d(d: str, *, strength: float = 1.0) -> str:
     return " ".join(parts)
 
 
-def _quadratic_join_min_dot_d(d: str) -> float:
+def _smooth_quadratic_path_d(d: str) -> str:
+    """Backward-compatible name for the now curve-generic join smoother."""
+    return _smooth_curve_path_d(d)
+
+
+def _curve_join_min_dot_d(d: str) -> float:
     commands = _parse_path_commands(d)
     if commands is None:
         return 1.0
-    current: np.ndarray | None = None
-    start: np.ndarray | None = None
-    previous_q: tuple[np.ndarray, np.ndarray, np.ndarray] | None = None
     dots: list[float] = []
-    for command, values in commands:
-        if command == "M":
-            current = np.array(values[:2], dtype=float)
-            start = current.copy()
-            previous_q = None
-        elif command == "Q" and current is not None:
-            control = np.array(values[:2], dtype=float)
-            end = np.array(values[2:4], dtype=float)
-            if previous_q is not None and np.allclose(previous_q[2], current):
-                incoming = current - previous_q[1]
-                outgoing = control - current
-                in_dir = _unit_vector(incoming)
-                out_dir = _unit_vector(outgoing)
-                if in_dir is not None and out_dir is not None:
-                    dots.append(float(np.dot(in_dir, out_dir)))
-            previous_q = (current, control, end)
-            current = end
-        elif command == "L":
-            end = np.array(values[:2], dtype=float)
-            if previous_q is not None and current is not None and np.allclose(previous_q[2], current):
-                incoming = current - previous_q[1]
-                outgoing = end - current
-                in_dir = _unit_vector(incoming)
-                out_dir = _unit_vector(outgoing)
-                if in_dir is not None and out_dir is not None:
-                    dots.append(float(np.dot(in_dir, out_dir)))
-            current = end
-            previous_q = None
-        elif command == "C":
-            current = np.array(values[4:6], dtype=float)
-            previous_q = None
-        elif command == "Z":
-            current = start.copy() if start is not None else current
-            previous_q = None
+    for i in range(len(commands) - 1):
+        command, values = commands[i]
+        next_command, next_values = commands[i + 1]
+        if command not in {"Q", "C"} or next_command not in {"Q", "C", "L"}:
+            continue
+        join = _curve_endpoint(command, values)
+        previous = _curve_end_control(command, values)
+        following = _curve_start_control(next_command, next_values)
+        if join is None or previous is None:
+            continue
+        outgoing_point = np.array(next_values[0:2], dtype=float) if following is None else following[0]
+        in_dir = _unit_vector(join - previous[0])
+        out_dir = _unit_vector(outgoing_point - join)
+        if in_dir is not None and out_dir is not None:
+            dots.append(float(np.dot(in_dir, out_dir)))
     return min(dots) if dots else 1.0
 
 
@@ -299,24 +531,194 @@ def _append_quadratic_run(
     return d
 
 
-def _residual_gated_smooth_quadratic_path_d(contour: np.ndarray, d: str) -> str:
-    residual_limit = max(SIMPLE_CURVE_RESIDUAL_TOL, _path_area_residual(contour, d) + 0.005)
-    smoothed = _smooth_quadratic_path_d(d)
-    if _path_area_residual(contour, smoothed) <= residual_limit:
-        return smoothed
+def _atomic_simplify_line_pairs_d(d: str) -> str:
+    """Collapse a shallow consecutive line pair into one line or quadratic.
 
-    best = d
-    lo = 0.0
-    hi = 1.0
-    for _ in range(10):
-        mid = (lo + hi) / 2.0
-        candidate = _smooth_quadratic_path_d(d, strength=mid)
-        if _path_area_residual(contour, candidate) <= residual_limit:
-            best = candidate
-            lo = mid
-        else:
-            hi = mid
-    return best
+    The point shared by two line commands is a removable node above 160°.
+    Between 135° and 160° it remains useful evidence of a bend, but a single
+    quadratic represents that bend without the visible corner.
+    """
+    commands = _parse_path_commands(d)
+    if commands is None:
+        return d
+
+    def endpoint(command: str, values: list[float]) -> np.ndarray | None:
+        if command in {"M", "L"}:
+            return np.asarray(values[:2], dtype=float)
+        if command == "Q":
+            return np.asarray(values[2:4], dtype=float)
+        if command == "C":
+            return np.asarray(values[4:6], dtype=float)
+        return None
+
+    def format_commands(items: list[tuple[str, list[float]]]) -> str:
+        return " ".join("Z" if command == "Z" else f"{command}{' '.join(_fmt(value) for value in values)}" for command, values in items)
+
+    changed = True
+    current = commands
+    while changed:
+        changed = False
+        output: list[tuple[str, list[float]]] = []
+        cursor: np.ndarray | None = None
+        i = 0
+        while i < len(current):
+            command, values = current[i]
+            if command == "M":
+                output.append((command, values))
+                cursor = endpoint(command, values)
+                i += 1
+                continue
+            if (
+                command == "L"
+                and cursor is not None
+                and i + 1 < len(current)
+                and current[i + 1][0] == "L"
+            ):
+                middle = np.asarray(values[:2], dtype=float)
+                end = np.asarray(current[i + 1][1][:2], dtype=float)
+                incoming = _unit_vector(middle - cursor)
+                outgoing = _unit_vector(end - middle)
+                if incoming is not None and outgoing is not None:
+                    turn = math.degrees(math.acos(float(np.clip(np.dot(incoming, outgoing), -1.0, 1.0))))
+                    interior_angle = 180.0 - turn
+                    if interior_angle > 160.0:
+                        output.append(("L", [float(end[0]), float(end[1])]))
+                        cursor = end
+                        i += 2
+                        changed = True
+                        continue
+                    if interior_angle > 135.0:
+                        output.append(("Q", [float(middle[0]), float(middle[1]), float(end[0]), float(end[1])]))
+                        cursor = end
+                        i += 2
+                        changed = True
+                        continue
+            output.append((command, values))
+            point = endpoint(command, values)
+            if point is not None:
+                cursor = point
+            i += 1
+        current = output
+    return format_commands(current)
+
+
+def atomic_flatten_path_d(d: str, *, epsilon: float) -> str:
+    """Apply endpoint-preserving terminal path cleanup.
+
+    A quadratic whose maximum deviation from its endpoint chord is within
+    ``epsilon`` is just a line with a redundant control point.  Once those
+    redundant quadratics have become lines, the existing shallow ``L + L``
+    transform can reduce the newly adjacent pair to a line, a single quadratic,
+    or leave the corner intact according to its 160°/135° bands.
+    """
+    commands = _parse_path_commands(d)
+    if commands is None:
+        return d
+
+    starts: list[np.ndarray | None] = []
+    cursor: np.ndarray | None = None
+    subpath_start: np.ndarray | None = None
+    for command, values in commands:
+        starts.append(None if cursor is None else cursor.copy())
+        if command == "M":
+            cursor = np.asarray(values[:2], dtype=float)
+            subpath_start = cursor.copy()
+        elif command == "L":
+            cursor = np.asarray(values[:2], dtype=float)
+        elif command == "Q":
+            cursor = np.asarray(values[2:4], dtype=float)
+        elif command == "C":
+            cursor = np.asarray(values[4:6], dtype=float)
+        elif command == "A":
+            cursor = np.asarray(values[5:7], dtype=float)
+        elif command == "Z":
+            cursor = None if subpath_start is None else subpath_start.copy()
+
+    def tangent(index: int, *, entering: bool) -> np.ndarray | None:
+        command, values = commands[index]
+        start = starts[index]
+        if start is None:
+            return None
+        if command == "L":
+            return np.asarray(values[:2], dtype=float) - start
+        if command == "Q":
+            control = np.asarray(values[:2], dtype=float)
+            end = np.asarray(values[2:4], dtype=float)
+            preferred = end - control if entering else control - start
+            fallback = end - start
+            return preferred if _unit_vector(preferred) is not None else fallback
+        if command == "C":
+            first = np.asarray(values[:2], dtype=float)
+            second = np.asarray(values[2:4], dtype=float)
+            end = np.asarray(values[4:6], dtype=float)
+            preferred = end - second if entering else first - start
+            fallback = end - start
+            return preferred if _unit_vector(preferred) is not None else fallback
+        return None
+
+    def sharp_join(before: np.ndarray | None, after: np.ndarray | None) -> bool:
+        incoming = _unit_vector(before) if before is not None else None
+        outgoing = _unit_vector(after) if after is not None else None
+        if incoming is None or outgoing is None:
+            return False
+        turn = math.degrees(math.acos(float(np.clip(np.dot(incoming, outgoing), -1.0, 1.0))))
+        return 180.0 - turn < 135.0
+
+    def neighboring_segment(index: int, step: int) -> int | None:
+        candidate = index + step
+        while 0 <= candidate < len(commands):
+            command = commands[candidate][0]
+            if command in {"M", "Z"}:
+                return None
+            if command in {"L", "Q", "C"}:
+                return candidate
+            candidate += step
+        return None
+
+    flattened: list[tuple[str, list[float]]] = []
+    for index, (command, values) in enumerate(commands):
+        if command == "M":
+            flattened.append((command, values))
+            continue
+        current = starts[index]
+        if command == "Q" and current is not None:
+            control = np.asarray(values[:2], dtype=float)
+            end = np.asarray(values[2:4], dtype=float)
+            chord = end - current
+            chord_length = float(np.linalg.norm(chord))
+            if chord_length > 1e-9:
+                # B(1/2) is displaced from the chord by exactly half the
+                # control point's perpendicular displacement.
+                control_distance = abs(float(np.cross(chord, control - current))) / chord_length
+                previous = neighboring_segment(index, -1)
+                following = neighboring_segment(index, 1)
+                between_sharp_corners = (
+                    previous is not None
+                    and following is not None
+                    and sharp_join(tangent(previous, entering=True), tangent(index, entering=False))
+                    and sharp_join(tangent(index, entering=True), tangent(following, entering=False))
+                )
+                if control_distance * 0.5 <= epsilon and between_sharp_corners:
+                    flattened.append(("L", [float(end[0]), float(end[1])]))
+                    continue
+            flattened.append((command, values))
+            continue
+        flattened.append((command, values))
+
+    def format_commands(items: list[tuple[str, list[float]]]) -> str:
+        return " ".join(
+            "Z" if command == "Z" else f"{command}{' '.join(_fmt(value) for value in values)}"
+            for command, values in items
+        )
+
+    return _atomic_simplify_line_pairs_d(format_commands(flattened))
+
+
+def _residual_gated_atomic_simplify_d(contour: np.ndarray, d: str) -> str:
+    simplified = _atomic_simplify_line_pairs_d(d)
+    if _path_area_residual(contour, simplified) <= max(SIMPLE_CURVE_RESIDUAL_TOL, _path_area_residual(contour, d) + 0.005):
+        return simplified
+    return d
 
 
 def _append_cubic_run(d: str, seg: np.ndarray, max_error: float, *, line_epsilon: float) -> str:
@@ -351,13 +753,208 @@ def _append_cubic_run(d: str, seg: np.ndarray, max_error: float, *, line_epsilon
     return d
 
 
+def _chord_parameters(points: np.ndarray) -> np.ndarray:
+    lengths = np.zeros(len(points), dtype=float)
+    lengths[1:] = np.cumsum(np.linalg.norm(np.diff(points, axis=0), axis=1))
+    return lengths / lengths[-1] if lengths[-1] > 1e-9 else lengths
+
+
+def _fit_free_cubic_once(points: np.ndarray) -> np.ndarray | None:
+    """Fit a cubic with fixed endpoints and unconstrained interior controls."""
+    pts = np.asarray(points, dtype=float)
+    if len(pts) < 4:
+        return None
+    t = _chord_parameters(pts)
+    inverse = 1.0 - t
+    basis = np.column_stack((3.0 * inverse * inverse * t, 3.0 * inverse * t * t))
+    remainder = pts - inverse[:, None] ** 3 * pts[0] - t[:, None] ** 3 * pts[-1]
+    controls, _residuals, rank, _singular_values = np.linalg.lstsq(basis, remainder, rcond=None)
+    if rank < 2:
+        return None
+    return np.asarray([pts[0], controls[0], controls[1], pts[-1]], dtype=float)
+
+
+def _quadratic_max_residual(points: np.ndarray, control: np.ndarray) -> float:
+    """Maximum raw-sample distance from a quadratic fitted to normalized data."""
+    pts = np.asarray(points, dtype=float)
+    if len(pts) < 2:
+        return 0.0
+    t = _chord_parameters(pts)[:, None]
+    if not np.any(t):
+        return 0.0
+    inverse = 1.0 - t
+    curve = inverse * inverse * control[0] + 2.0 * inverse * t * control[1] + t * t * control[2]
+    return float(np.max(np.linalg.norm(curve - pts, axis=1)))
+
+
+def _cubic_max_residual(points: np.ndarray, control: np.ndarray) -> float:
+    pts = np.asarray(points, dtype=float)
+    t = _chord_parameters(pts)[:, None]
+    if not np.any(t):
+        return 0.0
+    inverse = 1.0 - t
+    curve = (
+        inverse**3 * control[0]
+        + 3.0 * inverse * inverse * t * control[1]
+        + 3.0 * inverse * t * t * control[2]
+        + t**3 * control[3]
+    )
+    return float(np.max(np.linalg.norm(curve - pts, axis=1)))
+
+
+def _cubic_inflection_split_indices(points: np.ndarray, control: np.ndarray) -> list[int]:
+    """Map a cubic's interior inflections back to safe raw-side boundaries."""
+    parameters = _chord_parameters(np.asarray(points, dtype=float))
+    cuts = {
+        int(np.argmin(np.abs(parameters - root)))
+        for root in cubic_inflects(control)
+    }
+    return sorted(index for index in cuts if 1 < index < len(points) - 2)
+
+
+def _dual_quadratic_inflection_fit(
+    points: np.ndarray,
+    *,
+    split: int,
+    epsilon: float,
+) -> tuple[list[tuple[str, np.ndarray]], float] | None:
+    """Fit two normalized Q spans around one known cubic inflection."""
+    if not 1 < split < len(points) - 2:
+        return None
+    segments: list[tuple[str, np.ndarray]] = []
+    worst_residual = 0.0
+    for span in (points[: split + 1], points[split:]):
+        normalized = rdp(span, max(PATH_DENOISE_EPS, epsilon * SIDE_NORMALIZATION_FACTOR))
+        quadratic, _error, _fit_split = fit_quadratic_once(normalized, epsilon)
+        segments.append(("Q", quadratic))
+        worst_residual = max(worst_residual, _quadratic_max_residual(span, quadratic))
+    return segments, worst_residual
+
+
+def _progressive_side_segments(
+    seg: np.ndarray,
+    _max_error: float,
+    *,
+    line_epsilon: float,
+    allow_lines: bool,
+    _depth: int = 0,
+) -> list[tuple[str, np.ndarray]]:
+    """Refit one corner-bounded side as Q/C spans split at inflections."""
+    if allow_lines and (len(seg) < 3 or (
+        _segment_is_straight(seg, line_epsilon)
+        and _segment_length(seg) >= minimum_line_length(line_epsilon)
+    )):
+        return [("L", seg[-1])]
+    chord_tolerance = max(line_epsilon, _segment_length(seg) * SIDE_QUADRATIC_RELATIVE_ERROR_TOL)
+    cubic = _fit_free_cubic_once(seg)
+    if cubic is not None:
+        cubic_error = _cubic_max_residual(seg, cubic)
+        inflection_cuts = _cubic_inflection_split_indices(seg, cubic)
+        if len(inflection_cuts) == 1 and cubic_error <= chord_tolerance:
+            dual_quadratic = _dual_quadratic_inflection_fit(
+                seg,
+                split=inflection_cuts[0],
+                epsilon=line_epsilon,
+            )
+            if dual_quadratic is not None and dual_quadratic[1] < cubic_error:
+                return dual_quadratic[0]
+            return [("C", cubic)]
+        if len(inflection_cuts) >= 2 and _depth < 4:
+            boundaries = [0, *inflection_cuts, len(seg) - 1]
+            result: list[tuple[str, np.ndarray]] = []
+            for start, end in zip(boundaries, boundaries[1:]):
+                result.extend(
+                    _progressive_side_segments(
+                        seg[start : end + 1],
+                        _max_error,
+                        line_epsilon=line_epsilon,
+                        allow_lines=allow_lines,
+                        _depth=_depth + 1,
+                    )
+                )
+            return result
+
+    # Do not accept one normalized quadratic for an entire side merely because
+    # its pointwise error is small relative to a long chord.  That shortcut
+    # visibly pulls a broad band inward even when the samples are locally close
+    # to the curve.  Let the residual-preserving recursive fitter subdivide it.
+    return _recursive_progressive_segments(
+        seg,
+        _max_error,
+        line_epsilon=line_epsilon,
+        allow_lines=allow_lines,
+    )
+
+
+def _recursive_progressive_segments(
+    seg: np.ndarray,
+    max_error: float,
+    *,
+    line_epsilon: float,
+    allow_lines: bool,
+) -> list[tuple[str, np.ndarray]]:
+    """The residual-preserving L → Q → C → split fallback for one side."""
+    if allow_lines and (len(seg) < 3 or (
+        _segment_is_straight(seg, line_epsilon)
+        and _segment_length(seg) >= minimum_line_length(line_epsilon)
+    )):
+        return [("L", seg[-1])]
+    quadratic, quadratic_error, quadratic_split = fit_quadratic_once(seg, max_error)
+    max_squared_error = max_error * max_error
+    if quadratic_error < max_squared_error:
+        return [("Q", quadratic)]
+    cubic, cubic_error, cubic_split = fit_cubic_once(seg, max_error, guard_inflections=False)
+    if cubic_error < max_squared_error:
+        return [("C", cubic)]
+    split = quadratic_split if quadratic_error <= cubic_error else cubic_split
+    split = max(1, min(split, len(seg) - 2))
+    return _recursive_progressive_segments(
+        seg[:split + 1], max_error, line_epsilon=line_epsilon, allow_lines=allow_lines
+    ) + _recursive_progressive_segments(
+        seg[split:], max_error, line_epsilon=line_epsilon, allow_lines=allow_lines
+    )
+
+
+def _append_progressive_run(
+    d: str,
+    seg: np.ndarray,
+    max_error: float,
+    *,
+    line_epsilon: float,
+    allow_lines: bool,
+) -> str:
+    for kind, primitive in _progressive_side_segments(
+        seg, max_error, line_epsilon=line_epsilon, allow_lines=allow_lines
+    ):
+        if kind == "L":
+            d += f"L{_fmt(primitive[0])} {_fmt(primitive[1])} "
+        elif kind == "Q":
+            d += f"Q{_fmt(primitive[1][0])} {_fmt(primitive[1][1])} {_fmt(primitive[2][0])} {_fmt(primitive[2][1])} "
+        else:
+            d += (
+                f"C{_fmt(primitive[1][0])} {_fmt(primitive[1][1])} {_fmt(primitive[2][0])} {_fmt(primitive[2][1])} "
+                f"{_fmt(primitive[3][0])} {_fmt(primitive[3][1])} "
+            )
+    return d
+
+
 def _curved_run_d(
     seg: np.ndarray,
     max_error: float,
     *,
     cubic: bool,
     line_epsilon: float,
+    progressive: bool = False,
+    progressive_allow_lines: bool = True,
 ) -> str:
+    if progressive:
+        return _append_progressive_run(
+            "",
+            seg,
+            max_error,
+            line_epsilon=line_epsilon,
+            allow_lines=progressive_allow_lines,
+        )
     quadratic = _append_quadratic_run(
         "",
         seg,
@@ -376,18 +973,73 @@ def _fit_path_d(
     epsilon: float,
     max_error: float,
     cubic: bool = False,
+    progressive: bool = False,
+    progressive_allow_lines: bool = True,
     forced_corners: np.ndarray | None = None,
 ) -> str:
     pts = np.asarray(contour, dtype=float)
     closed = np.allclose(pts[0], pts[-1])
     ring = pts[:-1] if closed else pts
+    # Corner boundaries are established at the normal trace tolerance.  A
+    # coarser normalized copy is used only *inside* a side to classify its
+    # curvature, never to move an existing corner boundary.
     simp = rdp(ring, epsilon)
-    corners = corner_indices(np.vstack([simp, simp[0]]), angle_threshold_deg=40)
-    # map corner positions in `simp` back to indices in `ring`
-    corner_pts = simp[corners] if corners else simp[[0]]
+    corners = corner_indices(
+        np.vstack([simp, simp[0]]),
+        angle_threshold_deg=40,
+        min_adjacent_length=minimum_line_length(epsilon),
+        # Binary/AA boundaries often soften a true corner over ~2px.  Sample
+        # tangents across a 4px neighbourhood so the splitter sees the two
+        # exterior edges rather than the short transition between them.
+        support_radius=max(4.0, epsilon * 2.0),
+    )
+    corner_pts = simp[corners] if corners else np.empty((0, 2), dtype=float)
+    if progressive:
+        # Some long organic corners are softened by anti-aliasing over more
+        # than the normal trace tolerance.  Add (rather than replace with)
+        # coarse corner anchors, so topology is stable without moving the
+        # normal-resolution corners already found above.
+        corner_seed = rdp(ring, epsilon * 4.0)
+        seed_corners = corner_indices(
+            np.vstack([corner_seed, corner_seed[0]]),
+            angle_threshold_deg=40,
+            min_adjacent_length=minimum_line_length(epsilon * 4.0),
+            support_radius=max(4.0, epsilon * 8.0),
+        )
+        if seed_corners:
+            corner_pts = np.vstack([corner_pts, corner_seed[seed_corners]])
+        # A design corner may be softened over several raster samples, making
+        # its immediate RDP neighbours too short for the normal cornerlet
+        # guard.  A long support window recovers it only when the exterior
+        # turn persists across a substantial run on both sides.
+        recovery_seed = rdp(ring, epsilon * 2.0)
+        recovery_corners = corner_indices(
+            np.vstack([recovery_seed, recovery_seed[0]]),
+            angle_threshold_deg=25.0,
+            min_adjacent_length=0.0,
+            support_radius=max(24.0, epsilon * 32.0),
+        )
+        if recovery_corners:
+            corner_pts = np.vstack([corner_pts, recovery_seed[recovery_corners]])
+    if not len(corner_pts):
+        corner_pts = simp[[0]]
+    cut_idx = {int(np.argmin(np.hypot(*(ring - cp).T))) for cp in corner_pts}
+    if progressive:
+        # Protect pre-fit straight sides before progressive recursion.  Their
+        # endpoints are ordinary cut boundaries, but no automatically detected
+        # corner may subdivide the line between those endpoints.
+        for start, end in _protected_line_spans(ring):
+            cut_idx = {
+                index for index in cut_idx
+                if not _inside_closed_span(index, start, end)
+            }
+            cut_idx.update((start, end))
     if forced_corners is not None and len(forced_corners):
-        corner_pts = np.vstack([corner_pts, np.asarray(forced_corners, dtype=float)])
-    cut_idx = sorted({int(np.argmin(np.hypot(*(ring - cp).T))) for cp in corner_pts})
+        cut_idx.update(
+            int(np.argmin(np.hypot(*(ring - point).T)))
+            for point in np.asarray(forced_corners, dtype=float)
+        )
+    cut_idx = sorted(cut_idx)
     if len(cut_idx) < 2:
         cut_idx = [0, len(ring) // 2]
 
@@ -401,7 +1053,14 @@ def _fit_path_d(
         if _segment_is_straight(seg, epsilon) and _segment_length(seg) >= minimum_line_length(epsilon):
             d += f"L{_fmt(seg[-1][0])} {_fmt(seg[-1][1])} "
         else:
-            d += _curved_run_d(seg, max_error, cubic=cubic, line_epsilon=epsilon)
+            d += _curved_run_d(
+                seg,
+                max_error,
+                cubic=cubic,
+                line_epsilon=epsilon,
+                progressive=progressive,
+                progressive_allow_lines=progressive_allow_lines,
+            )
     d += "Z"
     return d
 
@@ -413,9 +1072,15 @@ def _simpler_curve_candidate(
     epsilon: float,
     max_error: float,
     cubic: bool,
+    progressive: bool,
+    progressive_allow_lines: bool,
     forced_corners: np.ndarray | None,
 ) -> str:
-    candidates = [_residual_gated_smooth_quadratic_path_d(contour, baseline_d)]
+    # Trace fitting is deliberately faithful: tangent cleanup is a downstream
+    # optimizer pass, not a candidate-ranking transform.  Applying it here
+    # can pass an area-residual gate while visibly distorting a circle or a
+    # shallow rounded corner before the drawing has stable regions to inspect.
+    candidates = [baseline_d]
     for eps_factor, err_factor in (
         (1.5, 2.0),
         (2.0, 3.0),
@@ -428,15 +1093,57 @@ def _simpler_curve_candidate(
             epsilon=max(epsilon * eps_factor, epsilon + 0.5),
             max_error=max(max_error * err_factor, max_error + 0.75),
             cubic=cubic,
+            progressive=progressive,
+            progressive_allow_lines=progressive_allow_lines,
             forced_corners=forced_corners,
         )
-        candidate = _residual_gated_smooth_quadratic_path_d(contour, candidate)
         if _path_area_residual(contour, candidate) > SIMPLE_CURVE_RESIDUAL_TOL:
             continue
         if _path_command_count(candidate) > _path_command_count(baseline_d):
             continue
         candidates.append(candidate)
-    return min(candidates, key=lambda d: (1.0 - _quadratic_join_min_dot_d(d), _path_command_count(d)))
+    return min(candidates, key=lambda d: (1.0 - _curve_join_min_dot_d(d), _path_command_count(d)))
+
+
+def fit_path_stages(
+    contour: np.ndarray,
+    *,
+    epsilon: float,
+    max_error: float,
+    cubic: bool = False,
+    progressive: bool = False,
+    progressive_allow_lines: bool = True,
+    forced_corners: np.ndarray | None = None,
+    prefer_simple_curves: bool = False,
+) -> PathFitStages:
+    """Fit a contour while retaining each trace-time simplification boundary."""
+    baseline_d = _fit_path_d(
+        contour,
+        epsilon=epsilon,
+        max_error=max_error,
+        cubic=cubic,
+        progressive=progressive,
+        progressive_allow_lines=progressive_allow_lines,
+        forced_corners=forced_corners,
+    )
+    if not prefer_simple_curves:
+        return PathFitStages(baseline_d=baseline_d, simple_d=baseline_d, atomic_d=baseline_d)
+
+    simple_d = _simpler_curve_candidate(
+        contour,
+        baseline_d=baseline_d,
+        epsilon=epsilon,
+        max_error=max_error,
+        cubic=cubic,
+        progressive=progressive,
+        progressive_allow_lines=progressive_allow_lines,
+        forced_corners=forced_corners,
+    )
+    return PathFitStages(
+        baseline_d=baseline_d,
+        simple_d=simple_d,
+        atomic_d=_residual_gated_atomic_simplify_d(contour, simple_d),
+    )
 
 
 def fit_path(
@@ -445,6 +1152,8 @@ def fit_path(
     epsilon: float,
     max_error: float,
     cubic: bool = False,
+    progressive: bool = False,
+    progressive_allow_lines: bool = True,
     forced_corners: np.ndarray | None = None,
     prefer_simple_curves: bool = False,
 ) -> Shape:
@@ -458,20 +1167,14 @@ def fit_path(
     looser smooth-curve fit only when it reduces path commands and stays close to
     the same filled contour.
     """
-    d = _fit_path_d(
+    stages = fit_path_stages(
         contour,
         epsilon=epsilon,
         max_error=max_error,
         cubic=cubic,
+        progressive=progressive,
+        progressive_allow_lines=progressive_allow_lines,
         forced_corners=forced_corners,
+        prefer_simple_curves=prefer_simple_curves,
     )
-    if prefer_simple_curves:
-        d = _simpler_curve_candidate(
-            contour,
-            baseline_d=d,
-            epsilon=epsilon,
-            max_error=max_error,
-            cubic=cubic,
-            forced_corners=forced_corners,
-        )
-    return Shape("path", {"d": d})
+    return Shape("path", {"d": stages.atomic_d})

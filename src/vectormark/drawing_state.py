@@ -2,10 +2,11 @@
 
 from __future__ import annotations
 
+import re
 import secrets
 import time
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from threading import RLock
 from types import MappingProxyType
 from typing import Callable
@@ -13,13 +14,13 @@ from typing import Callable
 import numpy as np
 
 from .candidate import FlatFill, LinearGradientFill, RadialGradientFill, RasterFill
-from .drawing_trace import TraceRegion, TraceResult
+from .drawing_trace import GeometryTraceRegion, TraceRegion, TraceResult
 from .fit import Shape
 from .optimizer.vector_region import VectorRegion
 
 
 class DrawingNotFound(Exception):
-    """Raised when a drawing is unavailable to the requesting session."""
+    """Raised when a live drawing ID or one of its versions is unavailable."""
 
     error_code = "DRAWING_NOT_FOUND"
 
@@ -33,6 +34,11 @@ class DrawingVersion:
     plan: Mapping[str, object] | None
     regions: tuple[VectorRegion, ...] | None
     label: str | None
+    # A geometry-guide retrace owns a different command provenance from the
+    # original source trace.  Keep it on the version that introduced it so
+    # later path operations validate against the correct command IDs.
+    trace: TraceResult | None = field(default=None, compare=False, repr=False)
+    geometry_guide_rgb: np.ndarray | None = field(default=None, compare=False, repr=False)
 
 
 @dataclass(frozen=True)
@@ -42,6 +48,7 @@ class DrawingState:
     id: str
     trace: TraceResult
     versions: Mapping[str, DrawingVersion]
+    source_rgb: np.ndarray | None = field(default=None, compare=False, repr=False)
 
 
 @dataclass
@@ -50,12 +57,14 @@ class _StoredDrawing:
 
     id: str
     trace: TraceResult
+    source_rgb: np.ndarray | None
     versions: dict[str, DrawingVersion]
     child_counts: dict[str, int]
     last_access: float
 
 
 _IMMUTABLE_SCALAR_TYPES = (type(None), bool, int, float, complex, str, bytes)
+_VERSION_ID = re.compile(r"v\d+(?:\.\d+)*$")
 
 
 def _freeze(value: object, ancestors: set[int] | None = None) -> object:
@@ -170,13 +179,41 @@ def _snapshot_trace(trace: TraceResult) -> TraceResult:
                 effective_trace_level=region.effective_trace_level,
             )
         )
+    geometry_regions = []
+    for region in trace.geometry_regions:
+        mask = np.array(region.mask, copy=True)
+        mask.setflags(write=False)
+        contours = tuple(np.array(contour, copy=True) for contour in region.contours)
+        for contour in contours:
+            contour.setflags(write=False)
+        geometry_regions.append(
+            GeometryTraceRegion(
+                id=region.id,
+                mask=mask,
+                contours=contours,
+                trace_path=region.trace_path,
+            )
+        )
     return TraceResult(
         width=trace.width,
         height=trace.height,
         options=trace.options,
         regions=tuple(regions),
         region_map_svg=trace.region_map_svg,
+        geometry_regions=tuple(geometry_regions),
+        background=dict(trace.background),
     )
+
+
+def _snapshot_source_rgb(source_rgb: np.ndarray | None, trace: TraceResult) -> np.ndarray | None:
+    """Detach the preprocessed visual source used by review-panel artifacts."""
+    if source_rgb is None:
+        return None
+    if not isinstance(source_rgb, np.ndarray) or source_rgb.shape != (trace.height, trace.width, 3):
+        raise TypeError("source_rgb must be an HxWx3 array matching the trace canvas")
+    snapshot = np.array(source_rgb, dtype=np.uint8, copy=True)
+    snapshot.setflags(write=False)
+    return snapshot
 
 
 def _validate_label(label: str | None) -> None:
@@ -192,6 +229,12 @@ def _public_version(version: DrawingVersion) -> DrawingVersion:
         plan=_freeze_plan(version.plan) if version.plan is not None else None,
         regions=_snapshot_regions(version.regions) if version.regions is not None else None,
         label=version.label,
+        trace=_snapshot_trace(version.trace) if version.trace is not None else None,
+        geometry_guide_rgb=(
+            _snapshot_source_rgb(version.geometry_guide_rgb, version.trace)
+            if version.geometry_guide_rgb is not None and version.trace is not None
+            else None
+        ),
     )
 
 
@@ -204,11 +247,19 @@ def _public_drawing(drawing: _StoredDrawing) -> DrawingState:
         id=drawing.id,
         trace=_snapshot_trace(drawing.trace),
         versions=MappingProxyType(versions),
+        source_rgb=_snapshot_source_rgb(drawing.source_rgb, drawing.trace),
     )
 
 
 class DrawingStore:
-    """Keep drawings private to a session until their idle timeout elapses."""
+    """Retain live drawings by opaque ID until their idle timeout elapses.
+
+    The outbound tunnel creates a fresh MCP transport session for individual
+    tool calls.  ``drawing_id`` is therefore the durable, high-entropy
+    capability used by trace, artifact, and refinement calls; the ``session``
+    argument remains in the public methods for API compatibility with local
+    transports but is not used as a storage key.
+    """
 
     def __init__(
         self,
@@ -218,7 +269,7 @@ class DrawingStore:
     ) -> None:
         self._idle_ttl_seconds = idle_ttl_seconds
         self._now = now
-        self._drawings: dict[object, dict[str, _StoredDrawing]] = {}
+        self._drawings: dict[str, _StoredDrawing] = {}
         self._lock = RLock()
 
     def create(
@@ -227,8 +278,10 @@ class DrawingStore:
         trace: TraceResult,
         *,
         regions: tuple[VectorRegion, ...],
+        source_rgb: np.ndarray | None = None,
     ) -> DrawingState:
         with self._lock:
+            del session  # Transport sessions are request-scoped under the tunnel.
             now = self._now()
             self._evict_expired(now)
             if not isinstance(regions, tuple) or not all(isinstance(region, VectorRegion) for region in regions):
@@ -236,6 +289,7 @@ class DrawingStore:
             drawing = _StoredDrawing(
                 id=f"drw_{secrets.token_urlsafe(18)}",
                 trace=_snapshot_trace(trace),
+                source_rgb=_snapshot_source_rgb(source_rgb, trace),
                 versions={
                     "v0": DrawingVersion(
                         id="v0",
@@ -243,12 +297,14 @@ class DrawingStore:
                         plan=None,
                         regions=_snapshot_regions(regions),
                         label=None,
+                        trace=_snapshot_trace(trace),
+                        geometry_guide_rgb=None,
                     )
                 },
                 child_counts={"v0": 0},
                 last_access=now,
             )
-            self._drawings.setdefault(session, {})[drawing.id] = drawing
+            self._drawings[drawing.id] = drawing
             return _public_drawing(drawing)
 
     def get(
@@ -258,9 +314,10 @@ class DrawingStore:
         version_id: str,
     ) -> tuple[DrawingState, DrawingVersion]:
         with self._lock:
+            del session
             now = self._now()
             self._evict_expired(now)
-            drawing = self._drawing_for(session, drawing_id)
+            drawing = self._drawing_for(drawing_id)
             try:
                 drawing.versions[version_id]
             except KeyError:
@@ -278,11 +335,15 @@ class DrawingStore:
         plan: Mapping[str, object],
         regions: tuple[VectorRegion, ...],
         label: str | None = None,
+        trace: TraceResult | None = None,
+        geometry_guide_rgb: np.ndarray | None = None,
+        version_id: str | None = None,
     ) -> DrawingVersion:
         with self._lock:
+            del session
             now = self._now()
             self._evict_expired(now)
-            drawing = self._drawing_for(session, drawing_id)
+            drawing = self._drawing_for(drawing_id)
             if base_version not in drawing.versions:
                 raise DrawingNotFound from None
 
@@ -291,31 +352,40 @@ class DrawingStore:
             if not isinstance(regions, tuple) or not all(isinstance(region, VectorRegion) for region in regions):
                 raise TypeError("regions must be a tuple of VectorRegion roots")
             frozen_regions = _snapshot_regions(regions)
-            child_number = drawing.child_counts[base_version]
-            version_id = f"{base_version}.{child_number}"
-            drawing.child_counts[base_version] = child_number + 1
+            base = drawing.versions[base_version]
+            base_trace = base.trace or drawing.trace
+            frozen_trace = _snapshot_trace(trace or base_trace)
+            frozen_guide_rgb = _snapshot_source_rgb(
+                geometry_guide_rgb if geometry_guide_rgb is not None else base.geometry_guide_rgb,
+                frozen_trace,
+            )
+            if version_id is None:
+                child_number = drawing.child_counts[base_version]
+                version_id = f"{base_version}.{child_number}"
+                drawing.child_counts[base_version] = child_number + 1
+            elif not _VERSION_ID.fullmatch(version_id) or version_id in drawing.versions:
+                raise ValueError(f"invalid or duplicate drawing version ID: {version_id}")
             version = DrawingVersion(
                 id=version_id,
                 parent_id=base_version,
                 plan=frozen_plan,
                 regions=frozen_regions,
                 label=label,
+                trace=frozen_trace,
+                geometry_guide_rgb=frozen_guide_rgb,
             )
             drawing.versions[version_id] = version
             drawing.child_counts[version_id] = 0
             drawing.last_access = now
             return _public_version(version)
 
-    def _drawing_for(self, session: object, drawing_id: str) -> _StoredDrawing:
+    def _drawing_for(self, drawing_id: str) -> _StoredDrawing:
         try:
-            return self._drawings[session][drawing_id]
+            return self._drawings[drawing_id]
         except KeyError:
             raise DrawingNotFound from None
 
     def _evict_expired(self, now: float) -> None:
-        for session, drawings in list(self._drawings.items()):
-            for drawing_id, drawing in list(drawings.items()):
-                if now - drawing.last_access >= self._idle_ttl_seconds:
-                    del drawings[drawing_id]
-            if not drawings:
-                del self._drawings[session]
+        for drawing_id, drawing in list(self._drawings.items()):
+            if now - drawing.last_access >= self._idle_ttl_seconds:
+                del self._drawings[drawing_id]

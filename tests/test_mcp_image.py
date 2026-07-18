@@ -162,6 +162,34 @@ def test_preprocess_crops_transparent_margin_and_keeps_size():
     assert arr.shape == (40, 40, 3) and arr.dtype == np.uint8
 
 
+def test_preprocess_with_alpha_keeps_aligned_source_coverage():
+    from vectormark.mcp_image import preprocess_image_with_alpha
+    im = Image.new("RGBA", (12, 12), (0, 0, 0, 0))
+    im.paste((200, 30, 30, 255), (3, 4, 9, 10))
+    buf = io.BytesIO(); im.save(buf, format="PNG")
+
+    arr, meta, alpha = preprocess_image_with_alpha(buf.getvalue(), crop_to_content=False)
+
+    assert meta.transparent is True
+    assert arr.shape == alpha.shape + (3,)
+    assert alpha[4, 3] == 255 and alpha[0, 0] == 0
+
+
+def test_preprocess_with_alpha_recognizes_palette_png_transparency():
+    from vectormark.mcp_image import preprocess_image_with_alpha
+    rgba = Image.new("RGBA", (12, 12), (0, 0, 0, 0))
+    rgba.paste((0, 126, 229, 255), (3, 3, 9, 9))
+    indexed = rgba.convert("P", palette=Image.Palette.ADAPTIVE)
+    buf = io.BytesIO()
+    indexed.save(buf, format="PNG", transparency=0)
+
+    _rgb, meta, alpha = preprocess_image_with_alpha(buf.getvalue(), crop_to_content=False)
+
+    assert meta.transparent is True
+    assert alpha is not None
+    assert alpha[0, 0] == 0 and alpha[4, 4] == 255
+
+
 def test_preprocess_downscales_only_when_larger():
     from vectormark.mcp_image import preprocess_image
     big = io.BytesIO(); Image.new("RGB", (2000, 1000), (10, 20, 30)).save(big, format="PNG")

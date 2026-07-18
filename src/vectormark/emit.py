@@ -15,9 +15,9 @@ _COORD_COUNT = {"M": 2, "L": 2, "C": 6, "Q": 4, "Z": 0}
 _AFFINE_TOKEN = re.compile(r"[MLCQAZ]|-?\d*\.?\d+")
 
 
-def shape_to_svg(shape: Shape, fill: str, elem_id: str) -> str:
+def shape_to_svg(shape: Shape, fill: str | None, elem_id: str) -> str:
     p = shape.params
-    common = f'id="{elem_id}" fill="{fill}"'
+    common = f'id="{elem_id}"' if fill is None else f'id="{elem_id}" fill="{fill}"'
     if shape.kind == "circle":
         return f'<circle {common} cx="{_fmt(p["cx"])}" cy="{_fmt(p["cy"])}" r="{_fmt(p["r"])}"/>'
     if shape.kind == "ellipse":
@@ -48,10 +48,11 @@ def shape_to_svg(shape: Shape, fill: str, elem_id: str) -> str:
             if "href_obj_id" in p:
                 raise ValueError("use shape href_obj_id must be resolved before SVG emission")
             raise ValueError("use shape requires href")
+        fill_attr = "" if use_fill is None else f' fill="{use_fill}"'
         return (
             f'<use id="{elem_id}" href="#{href}" '
-            f'transform="matrix({_fmt(a)} {_fmt(b)} {_fmt(c)} {_fmt(d)} {_fmt(e)} {_fmt(f)})" '
-            f'fill="{use_fill}"/>'
+            f'transform="matrix({_fmt(a)} {_fmt(b)} {_fmt(c)} {_fmt(d)} {_fmt(e)} {_fmt(f)})"'
+            f'{fill_attr}/>'
         )
     raise ValueError(f"unknown shape kind: {shape.kind}")
 
@@ -267,7 +268,7 @@ def pattern_image_def(elem_id: str, x: float, y: float, w: float, h: float,
     return (f'<pattern id="{elem_id}" patternUnits="userSpaceOnUse"{pt} '
             f'x="{_fmt(x)}" y="{_fmt(y)}" width="{_fmt(w)}" height="{_fmt(h)}">'
             f'<image href="data:image/png;base64,{png_b64}" '
-            f'x="{_fmt(x)}" y="{_fmt(y)}" width="{_fmt(w)}" height="{_fmt(h)}" '
+            f'x="0" y="0" width="{_fmt(w)}" height="{_fmt(h)}" '
             f'preserveAspectRatio="none"/></pattern>')
 
 

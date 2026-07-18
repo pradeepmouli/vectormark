@@ -1,8 +1,10 @@
 # SPDX-License-Identifier: MIT
-"""Fill-informed surface merge: two adjacent shapes are one surface only when the source
-has NO hard edge across their shared border (a within-gradient band seam) and the union
-fits a parametric gradient. Boundaries come from clean masks; this decides which masks
-are one surface, never how to draw an edge."""
+"""Material-region construction from source-colour boundaries.
+
+Adjacent quantized pieces belong to one geometry surface when their source seam
+has no hard colour edge.  Fill fitting is deliberately separate: it runs only
+after a material mask and its path geometry have been established.
+"""
 
 from __future__ import annotations
 
@@ -16,6 +18,10 @@ from .gradient import _interp_stops_rgb, _model_t
 from .types import Region
 
 _NEIGHBORS = ((1, 0), (-1, 0), (0, 1), (0, -1))
+_FOUR_CONNECTED = np.array(((0, 1, 0), (1, 1, 1), (0, 1, 0)), dtype=bool)
+_EIGHT_CONNECTED = np.ones((3, 3), dtype=bool)
+_MIN_CREDIBLE_SEAM_LENGTH = 24.0
+_MAX_CREDIBLE_SEAM_TORTUOSITY = 2.5
 
 
 def _kind(fill: Fill) -> str | None:
@@ -69,6 +75,28 @@ def seam_is_soft(mask_a: np.ndarray, mask_b: np.ndarray, rgb: np.ndarray,
     return float(np.median(de)) < edge_de
 
 
+def seam_is_noncredible(mask_a: np.ndarray, mask_b: np.ndarray) -> bool:
+    """Whether a shared seam is too noisy to justify separate regions.
+
+    A clean line, smooth arc, or closed shape has a modest ratio between its
+    traced length and end-to-end span.  A palette staircase has many boundary
+    steps while making little geometric progress.  The latter is evidence of a
+    segmentation artifact independent of source colour, and is the first-pass
+    reason to union two regions.
+    """
+    seam = mask_a & ndimage.binary_dilation(mask_b, structure=_FOUR_CONNECTED)
+    labels, count = ndimage.label(seam, structure=_EIGHT_CONNECTED)
+    for component_id in range(1, count + 1):
+        ys, xs = np.nonzero(labels == component_id)
+        length = float(len(xs))
+        if length < _MIN_CREDIBLE_SEAM_LENGTH:
+            continue
+        span = max(float(np.hypot(float(xs.max() - xs.min()), float(ys.max() - ys.min()))), 1.0)
+        if length / span > _MAX_CREDIBLE_SEAM_TORTUOSITY:
+            return True
+    return False
+
+
 def seam_band(mask_a: np.ndarray, mask_b: np.ndarray, *, width: int = 2):
     """(ys, xs) of mask_a pixels within `width` px of mask_b — the A-side of the seam."""
     band = mask_a & ndimage.binary_dilation(mask_b, iterations=width)
@@ -100,58 +128,179 @@ def gradients_continuous(fill_a: Fill, mask_a: np.ndarray, fill_b: Fill, mask_b:
 _GRADIENT = (LinearGradientFill, RadialGradientFill)
 
 
-# NOTE: the pipeline currently calls merge_surfaces with flat fills only (FlatFill per
-# region), so the B branch (gradients_continuous) is never reached from the pipeline —
-# only path A (seam_is_soft) runs end-to-end. Path B is reachable only by unit tests.
-def merge_surfaces(filled: list[tuple[Region, Fill]], rgb: np.ndarray, *,
-                   seam_de: float = 0.045, edge_de: float = 0.06) -> list[tuple[Region, Fill]]:
-    """Fixed-point hybrid merge of adjacent surfaces. (B) both gradients -> merge when one's
-    colour matches the other's at the seam (gradients_continuous, seam_de). (A) at least one
-    flat (a narrow region that devolved) -> merge when the source has no edge across the seam
-    (seam_is_soft, edge_de). Either path also requires the union to fit a parametric gradient,
-    which becomes the merged fill. Keeps the larger member's label/color_hex. Deterministic:
-    descending-area scan -> order-independent partition. A hard-bordered feature (the dot)
-    never merges; two distinct flats whose union is not a gradient never merge."""
-    surfaces = list(filled)
-    merged = True
-    # Cache per-region-pair seam_is_soft results for path A. Key: unordered label pair
-    # (min, max). On a merge, the surviving rep.label is REUSED for the union region whose
-    # mask has changed (expanded), so all cache entries referencing either consumed label
-    # are stale and must be evicted. Entries for pairs among unaffected surviving regions
-    # are still valid and are kept — that cross-pass reuse is the cache's only payoff.
-    # Cache is local to this call (masks differ across merge_surfaces invocations).
-    seam_cache: dict[tuple[int, int], bool] = {}
-    while merged:
-        merged = False
-        surfaces.sort(key=lambda rf: rf[0].mask.sum(), reverse=True)
-        for i in range(len(surfaces)):
-            ri, fi = surfaces[i]
-            for j in range(i + 1, len(surfaces)):
-                rj, fj = surfaces[j]
-                if isinstance(fi, _GRADIENT) and isinstance(fj, _GRADIENT):
-                    ok = gradients_continuous(fi, ri.mask, fj, rj.mask, seam_de=seam_de)  # B
-                else:
-                    key = (min(ri.label, rj.label), max(ri.label, rj.label))
-                    if key not in seam_cache:
-                        seam_cache[key] = seam_is_soft(ri.mask, rj.mask, rgb, edge_de=edge_de)
-                    ok = seam_cache[key]                                                   # A
-                if not ok:
-                    continue
-                union = ri.mask | rj.mask
-                rep = ri if ri.mask.sum() >= rj.mask.sum() else rj
-                new_fill = fit_fill(union, rgb, flat_hex=rep.color_hex)
-                if not isinstance(new_fill, _GRADIENT):
-                    continue                              # union isn't a gradient: not a merge
-                new_region = Region(label=rep.label, mask=union, color_hex=rep.color_hex)
-                surfaces = ([s for k, s in enumerate(surfaces) if k not in (i, j)]
-                            + [(new_region, new_fill)])
-                # Evict stale entries: rep.label is reused with an expanded mask, so any
-                # cached pair involving ri.label or rj.label is now wrong.
-                stale = {ri.label, rj.label}
-                for ck in [ck for ck in seam_cache if ck[0] in stale or ck[1] in stale]:
-                    del seam_cache[ck]
-                merged = True
-                break
-            if merged:
-                break
-    return surfaces
+def _soft_adjacencies(
+    regions: list[Region],
+    rgb: np.ndarray,
+    *,
+    edge_de: float,
+) -> set[tuple[int, int]]:
+    """Return component-index pairs separated by a soft source-colour seam.
+
+    Constructing this graph from one ownership image makes the surface merge
+    proportional to actual region adjacencies, rather than all possible region
+    pairs.  It also means a small quantized island is a normal graph node: it
+    can join a continuous material surface without becoming a path of its own.
+    """
+    if not regions:
+        return set()
+    owner = np.full(rgb.shape[:2], -1, dtype=np.int32)
+    for index, region in enumerate(regions):
+        owner[region.mask] = index
+
+    pair_ids: list[np.ndarray] = []
+    deltas: list[np.ndarray] = []
+    wide_pair_ids: list[np.ndarray] = []
+    wide_deltas: list[np.ndarray] = []
+    count = len(regions)
+    for left_owner, right_owner, left_rgb, right_rgb in (
+        (owner[:, :-1], owner[:, 1:], rgb[:, :-1], rgb[:, 1:]),
+        (owner[:-1, :], owner[1:, :], rgb[:-1, :], rgb[1:, :]),
+    ):
+        valid = (left_owner >= 0) & (right_owner >= 0) & (left_owner != right_owner)
+        if not valid.any():
+            continue
+        left = left_owner[valid]
+        right = right_owner[valid]
+        low = np.minimum(left, right)
+        high = np.maximum(left, right)
+        pair_ids.append(low.astype(np.int64) * count + high)
+        left_oklab = srgb_to_oklab(left_rgb[valid] / 255.0)
+        right_oklab = srgb_to_oklab(right_rgb[valid] / 255.0)
+        deltas.append(np.linalg.norm(left_oklab - right_oklab, axis=1))
+    # A hard antialiased boundary can have several individually small colour
+    # steps.  Looking one pixel beyond each side of its seam exposes the sharp
+    # total change, while a genuinely continuous gradient remains smooth.
+    for left_owner, right_owner, left_rgb, right_rgb in (
+        (owner[:, 1:-2], owner[:, 2:-1], rgb[:, :-3], rgb[:, 3:]),
+        (owner[1:-2, :], owner[2:-1, :], rgb[:-3, :], rgb[3:, :]),
+    ):
+        valid = (left_owner >= 0) & (right_owner >= 0) & (left_owner != right_owner)
+        if not valid.any():
+            continue
+        left = left_owner[valid]
+        right = right_owner[valid]
+        low = np.minimum(left, right)
+        high = np.maximum(left, right)
+        wide_pair_ids.append(low.astype(np.int64) * count + high)
+        left_oklab = srgb_to_oklab(left_rgb[valid] / 255.0)
+        right_oklab = srgb_to_oklab(right_rgb[valid] / 255.0)
+        wide_deltas.append(np.linalg.norm(left_oklab - right_oklab, axis=1))
+    if not pair_ids:
+        return set()
+
+    ids = np.concatenate(pair_ids)
+    values = np.concatenate(deltas)
+    order = np.argsort(ids, kind="stable")
+    ids = ids[order]
+    values = values[order]
+    starts = np.r_[0, np.flatnonzero(np.diff(ids)) + 1]
+    ends = np.r_[starts[1:], len(ids)]
+    wide_by_id: dict[int, float] = {}
+    if wide_pair_ids:
+        wide_ids = np.concatenate(wide_pair_ids)
+        wide_values = np.concatenate(wide_deltas)
+        wide_order = np.argsort(wide_ids, kind="stable")
+        wide_ids = wide_ids[wide_order]
+        wide_values = wide_values[wide_order]
+        wide_starts = np.r_[0, np.flatnonzero(np.diff(wide_ids)) + 1]
+        wide_ends = np.r_[wide_starts[1:], len(wide_ids)]
+        wide_by_id = {
+            int(wide_ids[start]): float(np.median(wide_values[start:end]))
+            for start, end in zip(wide_starts, wide_ends, strict=True)
+        }
+    soft: set[tuple[int, int]] = set()
+    for start, end in zip(starts, ends, strict=True):
+        encoded = int(ids[start])
+        if float(np.median(values[start:end])) >= edge_de:
+            continue
+        if wide_by_id.get(encoded, 0.0) >= edge_de * 2.0:
+            continue
+        soft.add((encoded // count, encoded % count))
+    return soft
+
+
+def _noncredible_adjacencies(regions: list[Region]) -> set[tuple[int, int]]:
+    """Return adjacent region pairs with shape evidence against their seam."""
+    noncredible: set[tuple[int, int]] = set()
+    for left in range(len(regions)):
+        for right in range(left + 1, len(regions)):
+            if seam_is_noncredible(regions[left].mask, regions[right].mask):
+                noncredible.add((left, right))
+    return noncredible
+
+
+def material_groups(
+    regions: list[Region],
+    rgb: np.ndarray,
+    *,
+    edge_de: float = 0.06,
+) -> list[tuple[int, ...]]:
+    """Return contiguous material groups without fitting a fill or changing geometry.
+
+    The indices address ``regions`` directly.  Keeping this result separate from
+    the grouped masks lets callers fit their geometry first and union those
+    fitted paths only afterwards.  First merge across non-credible shared
+    seams; only when geometry has no such merge candidates, fall back to source
+    colour continuity for palette/gradient fragmentation.
+    """
+    if len(regions) < 2:
+        return [tuple(range(len(regions)))] if regions else []
+    shape_edges = _noncredible_adjacencies(regions)
+    merge_edges = shape_edges or _soft_adjacencies(regions, rgb, edge_de=edge_de)
+    if not merge_edges:
+        return [(index,) for index in range(len(regions))]
+
+    parent = list(range(len(regions)))
+
+    def find(index: int) -> int:
+        while parent[index] != index:
+            parent[index] = parent[parent[index]]
+            index = parent[index]
+        return index
+
+    for left, right in sorted(merge_edges):
+        left_root, right_root = find(left), find(right)
+        if left_root != right_root:
+            parent[right_root] = left_root
+
+    groups: dict[int, list[int]] = {}
+    for index in range(len(regions)):
+        groups.setdefault(find(index), []).append(index)
+    return sorted(
+        (tuple(indices) for indices in groups.values()),
+        key=lambda indices: (-sum(regions[index].area for index in indices), indices),
+    )
+
+
+def merge_material_regions(
+    regions: list[Region],
+    rgb: np.ndarray,
+    *,
+    edge_de: float = 0.06,
+) -> list[Region]:
+    """Compatibility helper returning the masks for :func:`material_groups`."""
+    merged: list[Region] = []
+    for indices in material_groups(regions, rgb, edge_de=edge_de):
+        members = [regions[index] for index in indices]
+        representative = max(members, key=lambda region: (region.area, -region.label))
+        mask = np.zeros_like(representative.mask)
+        for member in members:
+            mask |= member.mask
+        merged.append(Region(representative.label, mask, representative.color_hex))
+    return sorted(merged, key=lambda region: (-region.area, region.label, region.color_hex))
+
+
+def merge_surfaces(
+    filled: list[tuple[Region, Fill]],
+    rgb: np.ndarray,
+    *,
+    seam_de: float = 0.045,
+    edge_de: float = 0.06,
+) -> list[tuple[Region, Fill]]:
+    """Compatibility wrapper: material geometry first, then fit each material fill."""
+    del seam_de
+    materials = merge_material_regions([region for region, _fill in filled], rgb, edge_de=edge_de)
+    return [
+        (region, fit_fill(region.mask, rgb, flat_hex=region.color_hex))
+        for region in materials
+    ]

@@ -80,7 +80,22 @@ def test_symmetry_pass_reconstructs_self_symmetric_object_as_single_region():
     assert region.diagnostics["symmetry"]["mode"] == "self"
 
 
-def test_symmetry_pass_forwards_cubic_path_option_to_self_fit():
+def test_symmetry_pass_does_not_auto_reconstruct_a_material_surface_leaf():
+    angles = np.linspace(0.0, 2.0 * np.pi, 32, endpoint=False)
+    symmetric_contour = SkPath(shell=
+        [(48.0 + 20.0 * np.cos(theta), 48.0 + 30.0 * np.sin(theta)) for theta in angles]
+    )
+    obj = _obj(1, symmetric_contour).with_diagnostics(
+        diagnostics={"material_surface": {"root": "g1"}}
+    )
+    masks = {obj.id: _mask_for_polygon(obj.footprint)}
+
+    assert symmetry_pass([obj], masks) == []
+    out = optimize([obj], masks, [symmetry_pass])
+    assert out == [obj]
+
+
+def test_symmetry_pass_accepts_a_valid_specialized_self_fit_before_generic_cubic_fallback():
     shape = Shape(
         "path",
         {
@@ -103,13 +118,9 @@ def test_symmetry_pass_forwards_cubic_path_option_to_self_fit():
     )
 
     assert out[0].is_branch
-    assert "C" in str(out[0].children[0].current.params["d"])
 
 
-def test_symmetry_pass_rejects_inaccurate_fallback_when_trapezoid_fitter_is_unavailable(monkeypatch):
-    import vectormark.optimizer.passes.symmetry as symmetry_module
-
-    monkeypatch.setattr(symmetry_module, "rounded_trapezoid_half_fit", lambda *args, **kwargs: None)
+def test_symmetry_pass_selects_accurate_generic_path_fallback_over_heuristics():
     shape = Shape(
         "path",
         {
@@ -136,8 +147,7 @@ def test_symmetry_pass_rejects_inaccurate_fallback_when_trapezoid_fitter_is_unav
         [lambda objects, masks: symmetry_pass(objects, masks, epsilon=1.0, max_error=1.0, cubic=True)],
     )
 
-    assert out[0].is_leaf
-    assert out[0].current == shape
+    assert out[0].is_branch
 
 
 def test_symmetry_pass_smooths_daikonic_like_cap_instead_of_preserving_facets():
@@ -246,7 +256,7 @@ def test_symmetric_half_fit_fits_prefixed_half_only_once(monkeypatch):
     assert abs(float(calls[0][0][0]) - 322.92) > 1.0
 
 
-def test_symmetry_pass_reconstructs_gradient_self_symmetry_as_internal_branch():
+def test_symmetry_pass_records_gradient_self_symmetry_without_rewriting_geometry():
     angles = np.linspace(0.0, 2.0 * np.pi, 32, endpoint=False)
     symmetric_contour = SkPath(shell=
         [(48.0 + 20.0 * np.cos(theta), 48.0 + 30.0 * np.sin(theta)) for theta in angles]
@@ -263,12 +273,10 @@ def test_symmetry_pass_reconstructs_gradient_self_symmetry_as_internal_branch():
     out = optimize([obj], {obj.id: _mask_for_polygon(obj.footprint)}, [symmetry_pass])
 
     assert len(out) == 1
-    assert out[0].is_branch
-    assert [child.current.kind for child in out[0].children] == ["path", "use"]
-    source = out[0].children[0]
-    assert source.current is not None
-    assert source.footprint.symmetric_difference(to_polygon(source.current)).area < 1e-6
-    assert out[0].diagnostics["symmetry"]["mode"] == "self"
+    assert out[0].is_leaf
+    assert out[0].current == obj.current
+    assert out[0].footprint.symmetric_difference(obj.footprint).area < 1e-6
+    assert out[0].diagnostics["symmetry"]["mode"] == "intrinsic"
     assert out[0].diagnostics["symmetry"]["accepted"] is True
 
 

@@ -9,7 +9,7 @@ from ...skia_geometry import SkPath, unary_union, affinity
 from ...candidate import FlatFill
 from ...contour import region_corner_radius
 from ...fit import Shape, _fmt, fit_path
-from ...refine import fit_path_half_fit, half_ellipse_cap_half_fit, rounded_trapezoid_half_fit, symmetric_half_fit
+from ...refine import fit_path_half_fit, half_ellipse_cap_half_fit, symmetric_half_fit
 from ..framework import Proposal
 from ..gate import rasterize
 from ..shape_transform import bake_shape_transform
@@ -21,18 +21,65 @@ _ANGLE_EPS = 1e-9
 _AREA_RATIO_TOL = 0.03
 _PERIMETER_RATIO_TOL = 0.03
 _PAIR_RESIDUAL_TOL = 0.02
-_SELF_RESIDUAL_TOL = 0.02
+# Candidate threshold only.  A proposed symmetric reconstruction must still
+# pass the fitted-geometry and framework scene-fidelity checks below.
+_SELF_RESIDUAL_TOL = 0.04
 _FITTED_RECONSTRUCTION_RESIDUAL_TOL = 0.04
 _SELF_AXIS_OVERLAP = 0.75
 _SELF_MIRROR_Z_OFFSET = 0.1
 _MIN_SKIA_CONTOUR_AREA = 1.0
 _MIN_SKIA_CONTOUR_AREA_FRACTION = 1e-4
+_MAX_AUTO_SYMMETRY_INTERIORS = 8
+_MAX_AUTO_SYMMETRY_COMPONENTS = 4
 
 
 def _polygonal_flat(flat: object) -> SkPath | None:
     if isinstance(flat, SkPath) and not flat.is_empty:
         return flat
     return None
+
+
+def _automatic_symmetry_is_tractable(flat: SkPath) -> bool:
+    """Keep automatic reconstruction bounded on noisy compound trace roots.
+
+    A region with many counters/components has ambiguous semantic symmetry and
+    makes each reflected-union residual disproportionately expensive.  The
+    original path remains intact; callers may still apply explicit symmetry
+    relationships when that intent is known.
+    """
+    return len(flat.interiors) <= _MAX_AUTO_SYMMETRY_INTERIORS and len(flat.geoms) <= _MAX_AUTO_SYMMETRY_COMPONENTS
+
+
+def _is_material_surface(obj: VectorRegion) -> bool:
+    """Whether this leaf is a fill partition rather than a semantic shape."""
+    return isinstance(obj.diagnostics.get("material_surface"), dict)
+
+
+def _is_material_surface_root(obj: VectorRegion) -> bool:
+    """Whether a branch owns one semantic outline partitioned into materials."""
+    return (
+        obj.is_branch
+        and isinstance(obj.diagnostics.get("geometry_seed"), dict)
+        and len(obj.children) > 1
+        and all(child.is_leaf and _is_material_surface(child) for child in obj.children)
+    )
+
+
+def _is_geometry_root_leaf(obj: VectorRegion) -> bool:
+    """Whether a single material leaf is itself the trace-owned geometry root."""
+    return (
+        obj.is_leaf
+        and obj.drawing_id is not None
+        and isinstance(obj.diagnostics.get("geometry_seed"), dict)
+    )
+
+
+def _geometry_root_footprint(obj: VectorRegion, fallback: SkPath) -> SkPath:
+    """Prefer a root's immutable trace seed over intermediate leaf rewrites."""
+    if not _is_geometry_root_leaf(obj) or obj.original is None:
+        return fallback
+    seeded = to_polygon(obj.original)
+    return seeded if not seeded.is_empty else fallback
 
 
 def _flat_fill_hex(fill: object) -> str | None:
@@ -331,6 +378,9 @@ def _self_symmetry_branch(
         raster=rasterize(fitted_reflected_half, mask_shape),
         source_label=obj.source_label,
         color_hex=obj.color_hex,
+        drawing_id=obj.drawing_id,
+        source_regions=obj.source_regions,
+        coverage=obj.coverage,
         diagnostics={
             "symmetry": {
                 "accepted": True,
@@ -452,7 +502,7 @@ def _vertical_half_side(half: SkPath, axis: Axis2D) -> str:
     return "left" if float(half.centroid.x) < float(axis.cx) else "right"
 
 
-def _symmetric_refine_half_shape(
+def _symmetric_refine_half_shapes(
     flat: SkPath,
     half: SkPath,
     axis: Axis2D,
@@ -461,23 +511,17 @@ def _symmetric_refine_half_shape(
     max_error: float,
     corner_radius: float,
     cubic: bool,
-) -> Shape | None:
+) -> tuple[Shape, ...]:
     if flat.interiors or len(flat.geoms) != 1:
-        return None
+        return ()
     # A half-ellipse cap is bilaterally symmetric about a vertical line.
     if abs(math.cos(float(axis.theta))) > 1e-6:
-        return None
+        return ()
     side = _vertical_half_side(half, axis)
     contour = np.asarray(flat.exterior.coords, dtype=float)
+    shapes: list[Shape] = []
     for build in (
         lambda: half_ellipse_cap_half_fit(contour, float(axis.cx), side=side, max_error=max_error),
-        lambda: rounded_trapezoid_half_fit(
-            contour,
-            float(axis.cx),
-            side=side,
-            radius=corner_radius,
-            max_error=max_error,
-        ),
         lambda: symmetric_half_fit(
             contour,
             float(axis.cx),
@@ -486,22 +530,14 @@ def _symmetric_refine_half_shape(
             epsilon=epsilon,
             max_error=max_error,
         ),
-        lambda: fit_path_half_fit(
-            contour,
-            float(axis.cx),
-            side=side,
-            epsilon=epsilon,
-            max_error=max_error,
-            cubic=cubic,
-        ),
     ):
         try:
             shape = build()
         except Exception:
             continue
         if shape is not None:
-            return shape
-    return None
+            shapes.append(shape)
+    return tuple(shapes)
 
 
 def _best_self_reconstruction(
@@ -528,9 +564,9 @@ def _best_self_reconstruction(
             continue
         if reconstructed.is_empty or not isinstance(reconstructed, SkPath):
             continue
-        shape = None
+        shapes: tuple[Shape, ...] = ()
         if not preserve_explicit_geometry:
-            shape = _symmetric_refine_half_shape(
+            shapes = _symmetric_refine_half_shapes(
                 flat,
                 half,
                 axis,
@@ -539,21 +575,41 @@ def _best_self_reconstruction(
                 corner_radius=corner_radius,
                 cubic=cubic,
             )
-        if shape is None:
-            shape = _fit_geometry_to_path_shape(half, epsilon=epsilon, max_error=max_error, cubic=cubic)
-        if shape is None:
-            continue
-        shape = _pin_half_shape_to_axis(shape, axis)
-        if shape is None:
-            continue
-        fitted_half = to_polygon(shape)
-        if fitted_half.is_empty:
-            continue
-        fitted_reconstructed = unary_union([fitted_half, _reflect_flat(fitted_half, axis)])
-        fitted_residual = _residual(fitted_reconstructed, flat)
-        if fitted_residual > _FITTED_RECONSTRUCTION_RESIDUAL_TOL:
-            continue
-        candidates.append((fitted_residual, axis, half, reflected_half, shape))
+        def accept(shape: Shape) -> tuple[float, Shape] | None:
+            pinned = _pin_half_shape_to_axis(shape, axis)
+            if pinned is None:
+                return None
+            fitted_half = to_polygon(pinned)
+            if fitted_half.is_empty:
+                return None
+            fitted_reconstructed = unary_union([fitted_half, _reflect_flat(fitted_half, axis)])
+            fitted_residual = _residual(fitted_reconstructed, flat)
+            if fitted_residual > _FITTED_RECONSTRUCTION_RESIDUAL_TOL:
+                return None
+            return fitted_residual, pinned
+
+        accepted = next((result for shape in shapes if (result := accept(shape)) is not None), None)
+        if accepted is None:
+            side = _vertical_half_side(half, axis)
+            contour = np.asarray(flat.exterior.coords, dtype=float)
+            generic_shapes = [
+                fit_path_half_fit(
+                    contour,
+                    float(axis.cx),
+                    side=side,
+                    epsilon=epsilon,
+                    max_error=max_error,
+                    cubic=cubic,
+                ),
+                _fit_geometry_to_path_shape(half, epsilon=epsilon, max_error=max_error, cubic=cubic),
+            ]
+            accepted = next(
+                (result for shape in generic_shapes if shape is not None and (result := accept(shape)) is not None),
+                None,
+            )
+        if accepted is not None:
+            fitted_residual, pinned = accepted
+            candidates.append((fitted_residual, axis, half, reflected_half, pinned))
 
     if not candidates:
         return None
@@ -608,6 +664,97 @@ def _pair_proposal(
     )
 
 
+def _material_root_self_symmetry_proposal(
+    obj: VectorRegion,
+    flat: SkPath,
+    mask: np.ndarray,
+    *,
+    epsilon: float,
+    max_error: float,
+    cubic: bool,
+) -> Proposal | None:
+    """Mirror a semantic root, then reclip its material children to that outline.
+
+    A drawing trace keeps continuous fills as child regions so later fill work
+    can remain localized.  Those children are not the object whose exterior is
+    symmetric; applying the leaf-only reconstruction to them either changes a
+    colour boundary or does nothing.  Reconstruct the seed footprint once and
+    preserve every child as an intersection with the new exterior instead.
+    """
+    best = _best_self_reconstruction(
+        flat,
+        mask,
+        epsilon=epsilon,
+        max_error=max_error,
+        cubic=cubic,
+    )
+    if best is None:
+        return None
+    axis, _half, _reflected_half, half_shape, residual = best
+    fitted_half = to_polygon(half_shape)
+    if fitted_half.is_empty:
+        return None
+    reconstructed = unary_union([fitted_half, _reflect_flat(fitted_half, axis)])
+    if not isinstance(reconstructed, SkPath) or reconstructed.is_empty:
+        return None
+
+    children: list[VectorRegion] = []
+    for child in obj.children:
+        child_flat = _polygonal_flat(child.footprint)
+        if child_flat is None:
+            return None
+        clipped = child_flat.intersection(reconstructed)
+        if clipped.is_empty:
+            return None
+        shape = _fit_geometry_to_path_shape(clipped, epsilon=epsilon, max_error=max_error, cubic=cubic)
+        if shape is None:
+            return None
+        children.append(
+            child.with_current(
+                shape,
+                footprint=clipped,
+                raster=rasterize(clipped, mask.shape),
+                diagnostics={
+                    "symmetry": {
+                        "accepted": True,
+                        "mode": "root_clip",
+                        "root": int(obj.id),
+                    }
+                },
+            )
+        )
+
+    return Proposal(
+        (obj.id,),
+        [
+            VectorRegion.branch(
+                id=obj.id,
+                children=children,
+                z=obj.z,
+                raster=rasterize(reconstructed, mask.shape),
+                footprint=reconstructed,
+                fill=obj.fill,
+                source_label=obj.source_label,
+                color_hex=obj.color_hex,
+                drawing_id=obj.drawing_id,
+                source_regions=obj.source_regions,
+                diagnostics={
+                    "symmetry": {
+                        "accepted": True,
+                        "mode": "root_self",
+                        "axis": {
+                            "theta": float(axis.theta),
+                            "cx": float(axis.cx),
+                            "cy": float(axis.cy),
+                        },
+                        "residual": float(residual),
+                    }
+                },
+            )
+        ],
+    )
+
+
 def symmetry_pass(
     objects: list[VectorRegion],
     masks: dict[int, np.ndarray],
@@ -616,16 +763,35 @@ def symmetry_pass(
     max_error: float = 1.0,
     cubic: bool = False,
 ) -> list[Proposal]:
+    proposals: list[Proposal] = []
+    for obj in sorted(objects, key=lambda current: int(current.id)):
+        if not _is_material_surface_root(obj) or obj.id not in masks:
+            continue
+        # A material-surface root renders its children, not its own footprint.
+        # Mirroring the root then clipping/re-fitting the original children can
+        # emit a scene that is less symmetric than the input despite the root
+        # footprint itself being symmetric.  Until geometry and material layers
+        # have distinct render representations, automatic self-symmetry must
+        # fail closed for these roots.  Explicit plans may still reconstruct
+        # their geometry with a deliberate fill assignment.
+        continue
+
     usable: list[tuple[VectorRegion, SkPath]] = []
     for obj in sorted(objects, key=lambda current: int(current.id)):
         if not obj.is_leaf or obj.current is None:
             continue
+        # Compound splitting creates implementation children for nested
+        # cutouts.  They are not independently trace-owned semantic shapes,
+        # so automatic self-reflection must never reconstruct them directly.
+        if isinstance(obj.diagnostics.get("compound"), dict):
+            continue
         flat = _polygonal_flat(obj.footprint)
         if flat is None or obj.current.kind == "use" or obj.id not in masks:
             continue
+        if not _automatic_symmetry_is_tractable(flat):
+            continue
         usable.append((obj, flat))
 
-    proposals: list[Proposal] = []
     paired_ids: set[int] = set()
     next_id = max((int(obj.id) for obj, _flat in usable), default=-1) + 1
 
@@ -651,6 +817,41 @@ def symmetry_pass(
     for obj, flat in usable:
         if obj.id in paired_ids:
             continue
+        # ``material_surface`` leaves partition one geometry root by colour.
+        # They are not independent semantic shapes, so a self-reflection can
+        # preserve their footprint while materially changing the rendered
+        # artwork.  Automatic symmetry belongs on geometry roots; callers may
+        # still apply an explicit symmetry plan to a selected material leaf.
+        geometry_root_leaf = _is_geometry_root_leaf(obj)
+        if _is_material_surface(obj) and not geometry_root_leaf:
+            continue
+        # A gradient is fitted onto finalized geometry.  It can carry a
+        # verified symmetry relationship, but must not cause a self-symmetry
+        # rewrite that replaces that geometry with a mirrored half.
+        if not isinstance(obj.fill, FlatFill) and not geometry_root_leaf:
+            intrinsic = _best_self_axis(flat)
+            if intrinsic is not None:
+                axis, residual = intrinsic
+                proposals.append(
+                    Proposal(
+                        (obj.id,),
+                        [obj.with_current(obj.current, diagnostics=_intrinsic_symmetry_diagnostics(axis, residual))],
+                    )
+                )
+            continue
+        # Native primitives already encode exact geometric symmetry.  Verify
+        # and report the relation without replacing their deterministic form.
+        if obj.current.kind in {"circle", "ellipse", "rect"}:
+            intrinsic = _best_self_axis(flat)
+            if intrinsic is not None:
+                axis, residual = intrinsic
+                proposals.append(
+                    Proposal(
+                        (obj.id,),
+                        [obj.with_current(obj.current, diagnostics=_intrinsic_symmetry_diagnostics(axis, residual))],
+                    )
+                )
+            continue
         geometry = obj.diagnostics.get("geometry") if isinstance(obj.diagnostics, dict) else None
         explicit_kind = geometry.get("explicit") if isinstance(geometry, dict) else None
         if explicit_kind in {"circle", "ellipse", "rect", "rounded_rect", "cap", "trapezoid", "rounded_trapezoid"}:
@@ -667,8 +868,9 @@ def symmetry_pass(
         if obj.current.kind != "path":
             continue
         preserve_explicit_geometry = explicit_kind is not None
+        reconstruction_flat = _geometry_root_footprint(obj, flat)
         best = _best_self_reconstruction(
-            flat,
+            reconstruction_flat,
             masks[obj.id],
             epsilon=epsilon,
             max_error=max_error,

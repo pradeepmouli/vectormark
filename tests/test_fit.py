@@ -21,6 +21,17 @@ def test_recognizes_circle():
     assert abs(shape.params["r"] - 18) < 1.5
 
 
+def test_recognizes_circle_despite_one_anti_aliased_outlier():
+    angles = np.linspace(0.0, 2.0 * np.pi, 160, endpoint=False)
+    contour = np.array([(30.0 + 18.0 * np.cos(angle), 30.0 + 18.0 * np.sin(angle)) for angle in angles])
+    contour[0] += np.array((1.7, 0.0))
+    contour = np.vstack((contour, contour[0]))
+
+    shape = recognize_primitive(contour, epsilon=1.5)
+
+    assert shape is not None and shape.kind == "circle"
+
+
 def test_recognizes_axis_aligned_rect():
     c = outer_contour(_rect(10, 14, 50, 40))
     shape = recognize_primitive(c, epsilon=1.0)
@@ -287,7 +298,10 @@ def test_fit_path_smooths_quadratic_joins_on_smooth_leaf():
 
     assert fitted.params["d"].count("L") == 0
     assert _quadratic_join_dots(fitted.params["d"])
-    assert min(_quadratic_join_dots(fitted.params["d"])) > 0.99
+    # A dense quadratic run has shared controls at adjacent joins.  Those
+    # joins are deliberately left alone rather than receiving order-dependent
+    # partial smoothing; the raw fit remains smooth enough without facets.
+    assert min(_quadratic_join_dots(fitted.params["d"])) > 0.9
 
 
 def test_quadratic_to_line_smoothing_only_adjusts_quadratic_control():
@@ -300,3 +314,4 @@ def test_quadratic_to_line_smoothing_only_adjusts_quadratic_control():
     assert "L30 0" in smoothed
     assert "L40 0" in smoothed
     assert smoothed.endswith("Z")
+    assert _smooth_quadratic_path_d(smoothed) == smoothed

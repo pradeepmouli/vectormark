@@ -5,7 +5,6 @@ import math
 import numpy as np
 
 from ...skia_geometry import SkPath, affinity
-from ...candidate import FlatFill
 from ...fit import Shape
 from ..framework import Proposal
 from ..shape_transform import bake_shape_transform
@@ -21,12 +20,6 @@ _REFLECTION_RESIDUAL_TOL = 0.02
 def _polygonal_flat(flat: object) -> SkPath | None:
     if isinstance(flat, SkPath) and not flat.is_empty:
         return flat
-    return None
-
-
-def _flat_fill_hex(fill: object) -> str | None:
-    if isinstance(fill, FlatFill):
-        return fill.hex
     return None
 
 
@@ -161,21 +154,20 @@ def clones_pass(
 ) -> list[Proposal]:
     """Find congruent regions; interactive callers may retain symbolic clones."""
     del masks
-    usable: list[tuple[VectorRegion, SkPath, tuple[float, float, int], str]] = []
+    usable: list[tuple[VectorRegion, SkPath, tuple[float, float, int]]] = []
     for obj in sorted(objects, key=lambda current: int(current.id)):
         if not obj.is_leaf or obj.current is None:
             continue
         flat = _polygonal_flat(obj.footprint)
-        fill_hex = _flat_fill_hex(obj.fill)
-        if flat is None or fill_hex is None or obj.current.kind == "use" or _has_self_symmetry(obj):
+        if flat is None or obj.fill is None or obj.current.kind == "use" or _has_self_symmetry(obj):
             continue
-        usable.append((obj, flat, _shape_descriptor(flat), fill_hex))
+        usable.append((obj, flat, _shape_descriptor(flat)))
 
     proposals: list[Proposal] = []
     queued_targets: set[int] = set()
-    for index, (target_obj, target_flat, target_desc, target_fill_hex) in enumerate(usable):
+    for index, (target_obj, target_flat, target_desc) in enumerate(usable):
         matched = False
-        for canonical_obj, canonical_flat, canonical_desc, _canonical_fill_hex in usable[:index]:
+        for canonical_obj, canonical_flat, canonical_desc in usable[:index]:
             if canonical_obj.id in queued_targets:
                 continue
             if canonical_desc[2] != target_desc[2]:
@@ -205,7 +197,7 @@ def clones_pass(
                                 "clones": {
                                     "accepted": True,
                                     "matched_source": int(canonical_obj.id),
-                                    "fill_preserved": target_fill_hex,
+                                    "fill_preserved": type(target_obj.fill).__name__,
                                     "transform": matrix,
                                 }
                             },

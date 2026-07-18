@@ -23,6 +23,15 @@ def test_uniform_region_is_flat():
     assert isinstance(fill, FlatFill) and fill.hex == "#1E78C8"
 
 
+def test_flat_region_ignores_a_sparse_background_antialias_fringe():
+    mask, rgb = _solid(h=50, w=50)
+    rgb[:2, :] = (255, 255, 255)
+
+    fill = fit_fill(mask, rgb, flat_hex="#1E78C8")
+
+    assert isinstance(fill, FlatFill) and fill.hex == "#1E78C8"
+
+
 def test_linear_ramp_is_gradient():
     # _best_parametric may choose linear or radial (whichever has lower mean ΔE);
     # for the searched parametric approach either kind represents the ramp correctly.

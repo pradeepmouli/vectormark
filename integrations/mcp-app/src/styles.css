@@ -61,7 +61,8 @@ body {
 }
 
 button,
-input {
+input,
+select {
   font: inherit;
 }
 
@@ -182,6 +183,53 @@ h1 {
   transition: border-color 150ms ease, box-shadow 150ms ease;
 }
 
+.field select {
+  min-width: 0;
+  min-height: 34px;
+  border: 1px solid var(--vm-border);
+  border-radius: 7px;
+  background: var(--vm-panel);
+  color: var(--vm-text);
+  padding: 6px 9px;
+  outline: none;
+}
+
+.field select:focus {
+  border-color: var(--vm-accent);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--vm-accent) 18%, transparent);
+}
+
+.control-note {
+  margin: 0;
+  color: var(--vm-muted);
+  font-size: 12px;
+  line-height: 1.4;
+}
+
+.select-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.trace-advanced {
+  border: 1px solid var(--vm-border);
+  border-radius: 7px;
+  background: var(--vm-panel-strong);
+  padding: 8px;
+}
+
+.trace-advanced summary {
+  cursor: pointer;
+  color: var(--vm-muted);
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.trace-advanced[open] summary {
+  margin-bottom: 8px;
+}
+
 .field input:focus {
   border-color: var(--vm-accent);
   box-shadow: 0 0 0 3px color-mix(in srgb, var(--vm-accent) 18%, transparent);
@@ -256,6 +304,76 @@ h1 {
   gap: 10px;
   min-width: 0;
   padding: 14px;
+}
+
+.artifact-header {
+  display: flex;
+  align-items: start;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.artifact-header h2 {
+  margin: 0;
+  font-size: 17px;
+}
+
+.artifact-header code,
+.artifact-uri {
+  color: var(--vm-muted);
+  font-family: var(--font-mono, "SFMono-Regular", Consolas, monospace);
+  font-size: 11px;
+  overflow-wrap: anywhere;
+}
+
+.artifact-header code {
+  max-width: 48%;
+  text-align: right;
+}
+
+.artifact-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.artifact-button {
+  border: 1px solid var(--vm-border);
+  border-radius: 6px;
+  background: var(--vm-panel);
+  color: var(--vm-muted);
+  cursor: pointer;
+  font-size: 12px;
+  font-weight: 700;
+  padding: 5px 8px;
+}
+
+.artifact-button.active,
+.artifact-button:hover {
+  border-color: var(--vm-accent);
+  background: color-mix(in srgb, var(--vm-accent) 14%, var(--vm-panel));
+  color: var(--vm-accent-strong);
+}
+
+.artifact-uri {
+  display: block;
+  border: 1px solid var(--vm-border);
+  border-radius: 6px;
+  background: var(--vm-panel-strong);
+  padding: 6px 8px;
+}
+
+.artifact-json {
+  width: 100%;
+  max-height: 390px;
+  margin: 0;
+  overflow: auto;
+  padding: 12px;
+  color: var(--vm-text);
+  font-family: var(--font-mono, "SFMono-Regular", Consolas, monospace);
+  font-size: 11px;
+  line-height: 1.5;
+  white-space: pre-wrap;
 }
 
 /* Error banner */
@@ -580,7 +698,8 @@ details[open] .diag-summary::before {
   }
 
   .number-grid,
-  .toggle-row {
+  .toggle-row,
+  .select-grid {
     grid-template-columns: 1fr;
   }
 

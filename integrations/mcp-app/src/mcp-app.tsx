@@ -62,14 +62,70 @@ interface IdealizeLogoResult {
   diagnostics?: Diagnostics;
 }
 
-interface IdealizeLogoInput {
-  image_path?: string;
-  epsilon?: number;
-  max_error?: number;
-  colors?: number;
-  flatten?: boolean;
-  no_symmetry?: boolean;
+interface ImageRef {
+  download_url?: string;
+  file_id?: string;
+  mime_type?: string;
+  file_name?: string;
+  url?: string;
+  data_uri?: string;
+  base64?: string;
 }
+
+interface TraceOptionsInput {
+  refine: "auto" | "none";
+  max_colors: number | "auto";
+  min_region_size: number;
+  max_hole_area: number;
+  min_region_fraction: number;
+  trace_level: "pixel" | "subpixel";
+  simplify_tolerance: number;
+  curve_tolerance: number;
+  fit_strategy: "quadratic" | "progressive" | "progressive_allow_lines";
+  remove_background: "auto" | "off" | "on";
+  preprocess: {
+    max_size_px: number;
+    preserve_transparency: boolean;
+    quantize: boolean;
+  };
+}
+
+interface TraceToolInput {
+  /**
+   * ChatGPT currently sends either a transferable ImageRef or a renderer-only
+   * `/mnt/data/...` display path.  Keep this unknown at the boundary and
+   * normalize it before ever calling the MCP server.
+   */
+  image?: unknown;
+  options?: Partial<TraceOptionsInput>;
+}
+
+interface TraceOptionSchema {
+  enum?: string[];
+  default?: unknown;
+}
+
+interface DrawingArtifacts {
+  svg: string;
+  preview: string;
+  review_panel: string;
+  labeled_svg: string;
+  raw_trace: string;
+  plan: string;
+  versions: string;
+}
+
+interface DrawingResult {
+  drawing_id: string;
+  version: string;
+  parent_version?: string;
+  artifacts: DrawingArtifacts;
+  report?: { targets?: unknown[] };
+  trace?: { width?: number; height?: number; options?: Record<string, unknown> };
+  trace_options_schema?: Record<string, TraceOptionSchema>;
+}
+
+type WidgetResult = IdealizeLogoResult | DrawingResult;
 
 type Theme = "default" | "daikonic";
 
@@ -94,10 +150,14 @@ function firstImageDataUri(result: CallToolResult | null): string | null {
  * the older flat render_idealized_logo shape. Defensive: missing fields are
  * tolerated — only `svg` is required.
  */
-function parseStructuredResult(result: CallToolResult | null): IdealizeLogoResult | null {
+function parseStructuredResult(result: CallToolResult | null): WidgetResult | null {
   if (!result) return null;
 
-  const structured = result.structuredContent as Partial<IdealizeLogoResult> | undefined;
+  type DecodedResult = Partial<IdealizeLogoResult> & Partial<DrawingResult>;
+  const structured = result.structuredContent as DecodedResult | undefined;
+  if (structured?.drawing_id && structured.version && structured.artifacts) {
+    return structured as DrawingResult;
+  }
   if (structured?.svg) {
     return {
       svg: structured.svg,
@@ -113,7 +173,10 @@ function parseStructuredResult(result: CallToolResult | null): IdealizeLogoResul
   const text = firstText(result);
   if (!text) return null;
   try {
-    const parsed = JSON.parse(text) as Partial<IdealizeLogoResult>;
+    const parsed = JSON.parse(text) as DecodedResult;
+    if (parsed.drawing_id && parsed.version && parsed.artifacts) {
+      return parsed as DrawingResult;
+    }
     if (parsed.svg) {
       return {
         svg: parsed.svg,
@@ -129,6 +192,10 @@ function parseStructuredResult(result: CallToolResult | null): IdealizeLogoResul
     return null;
   }
   return null;
+}
+
+function isDrawingResult(result: WidgetResult): result is DrawingResult {
+  return "drawing_id" in result && "artifacts" in result;
 }
 
 function formatBytes(bytes: number): string {
@@ -176,557 +243,326 @@ function DaikonicMark({ size = 28 }: { size?: number }) {
   );
 }
 
-// ─── Root ─────────────────────────────────────────────────────────────────────
+// ─── Trace form and drawing artifact viewer ───────────────────────────────────
 
-function AppRoot() {
-  const [toolInput, setToolInput] = useState<IdealizeLogoInput>({});
-  const [toolResult, setToolResult] = useState<CallToolResult | null>(null);
-  const [hostContext, setHostContext] = useState<McpUiHostContext | undefined>();
-  const [errorText, setErrorText] = useState<string | null>(null);
-  const [theme, setTheme] = useState<Theme>("daikonic");
+const DEFAULT_TRACE_OPTIONS: TraceOptionsInput = {
+  refine: "none",
+  max_colors: 16,
+  min_region_size: 16,
+  max_hole_area: 128,
+  min_region_fraction: 0.02,
+  trace_level: "pixel",
+  simplify_tolerance: 1.5,
+  curve_tolerance: 1,
+  fit_strategy: "quadratic",
+  remove_background: "auto",
+  preprocess: { max_size_px: 2048, preserve_transparency: true, quantize: false },
+};
 
-  const { app, isConnected, error } = useApp({
-    appInfo: { name: "vectormark", version: "0.0.1" },
-    capabilities: {},
-    onAppCreated: (createdApp) => {
-      createdApp.ontoolinput = (params) => {
-        setToolInput((current) => ({
-          ...current,
-          ...(params.arguments as IdealizeLogoInput),
-        }));
-      };
-      createdApp.ontoolresult = (result) => {
-        setErrorText(null);
-        setToolResult(result);
-      };
-      createdApp.ontoolcancelled = (params) => {
-        setErrorText(params.reason || "Tool call was cancelled.");
-      };
-      createdApp.onerror = (appError) => {
-        setErrorText(appError instanceof Error ? appError.message : String(appError));
-      };
-      createdApp.onhostcontextchanged = (params) => {
-        setHostContext((current) => ({ ...current, ...params }));
-      };
-      createdApp.onteardown = async () => ({});
-    },
-  });
+const FALLBACK_ENUMS: Record<string, string[]> = {
+  refine: ["auto", "none"],
+  trace_level: ["pixel", "subpixel"],
+  fit_strategy: ["quadratic", "progressive", "progressive_allow_lines"],
+  remove_background: ["auto", "off", "on"],
+};
 
-  useEffect(() => {
-    if (app) setHostContext(app.getHostContext());
-  }, [app]);
+type ArtifactKind = "svg" | "preview" | "review_panel" | "labeled_svg" | "raw_trace" | "plan" | "versions";
 
-  // Apply daikonic theme to the document root so CSS variables cascade everywhere.
-  useEffect(() => {
-    document.documentElement.dataset.theme = theme === "daikonic" ? "daikonic" : "";
-    return () => {
-      delete document.documentElement.dataset.theme;
-    };
-  }, [theme]);
+const ARTIFACTS: Array<{ kind: ArtifactKind; label: string }> = [
+  { kind: "svg", label: "SVG" },
+  { kind: "preview", label: "Preview PNG" },
+  { kind: "review_panel", label: "Review panel" },
+  { kind: "labeled_svg", label: "Region map SVG" },
+  { kind: "raw_trace", label: "Raw trace JSON" },
+  { kind: "plan", label: "Plan JSON" },
+  { kind: "versions", label: "Version manifest" },
+];
 
-  const result = useMemo(() => parseStructuredResult(toolResult), [toolResult]);
-  const rasterSrc = useMemo(() => firstImageDataUri(toolResult), [toolResult]);
-
-  if (error) {
-    return <StatusPanel title="Connection failed" detail={error.message} />;
-  }
-
-  if (!isConnected || !app) {
-    return <StatusPanel title="Connecting" detail="Waiting for the MCP Apps host." />;
-  }
-
-  return (
-    <VectormarkApp
-      app={app}
-      hostContext={hostContext}
-      initialInput={toolInput}
-      result={result}
-      rasterSrc={rasterSrc}
-      errorText={errorText}
-      theme={theme}
-      onThemeToggle={() => setTheme((t) => (t === "daikonic" ? "default" : "daikonic"))}
-      onResult={setToolResult}
-      onError={setErrorText}
-    />
-  );
+function enumChoices(schema: Record<string, TraceOptionSchema> | undefined, name: string): string[] {
+  return schema?.[name]?.enum ?? FALLBACK_ENUMS[name] ?? [];
 }
 
-// ─── VectormarkApp ────────────────────────────────────────────────────────────
-
-interface VectormarkAppProps {
-  app: App;
-  hostContext?: McpUiHostContext;
-  initialInput: IdealizeLogoInput;
-  result: IdealizeLogoResult | null;
-  rasterSrc: string | null;
-  errorText: string | null;
-  theme: Theme;
-  onThemeToggle: () => void;
-  onResult: (result: CallToolResult | null) => void;
-  onError: (message: string | null) => void;
+function dataUriForSvg(svg: string): string {
+  return `data:image/svg+xml,${encodeURIComponent(svg)}`;
 }
 
-function VectormarkApp({
+function imageRefFromToolInput(value: unknown): ImageRef | undefined {
+  if (typeof value === "string") {
+    return value.startsWith("data:image/") ? { data_uri: value } : undefined;
+  }
+  if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
+  const candidate = value as Partial<ImageRef>;
+  if (typeof candidate.download_url === "string") return { ...candidate, download_url: candidate.download_url };
+  if (typeof candidate.url === "string") return { ...candidate, url: candidate.url };
+  if (typeof candidate.data_uri === "string" && candidate.data_uri.startsWith("data:image/")) return { ...candidate, data_uri: candidate.data_uri };
+  if (typeof candidate.base64 === "string") return { ...candidate, base64: candidate.base64 };
+  return undefined;
+}
+
+function sourceImageMessage(options: TraceOptionsInput): string {
+  return [
+    "Please rerun `trace_drawing` using the original attached image and these settings from the VectorMark widget.",
+    "The widget received only a host-local display path, so it cannot safely resubmit the image itself.",
+    "```json",
+    JSON.stringify({ options }, null, 2),
+    "```",
+  ].join("\n");
+}
+
+function artifactSvg(result: CallToolResult | null): string | null {
+  const structured = result?.structuredContent as { svg?: string } | undefined;
+  if (structured?.svg) return structured.svg;
+  const text = result ? firstText(result) : undefined;
+  return text?.startsWith("<svg") ? text : null;
+}
+
+function artifactJson(result: CallToolResult | null): string | null {
+  const structured = result?.structuredContent as { trace?: unknown; plan?: unknown; versions?: unknown } | undefined;
+  const value = structured?.trace ?? structured?.plan ?? structured?.versions;
+  if (value) return JSON.stringify(value, null, 2);
+  const text = result ? firstText(result) : undefined;
+  if (!text) return null;
+  try {
+    return JSON.stringify(JSON.parse(text), null, 2);
+  } catch {
+    return text;
+  }
+}
+
+function TraceControls({
   app,
-  hostContext,
   initialInput,
   result,
-  rasterSrc,
-  errorText,
-  theme,
-  onThemeToggle,
   onResult,
   onError,
-}: VectormarkAppProps) {
-  const [form, setForm] = useState<IdealizeLogoInput>({
-    colors: 16,
-    epsilon: 1.5,
-    max_error: 1,
-    flatten: false,
-    no_symmetry: false,
-  });
+}: {
+  app: App;
+  initialInput: TraceToolInput;
+  result: WidgetResult | null;
+  onResult: (result: CallToolResult) => void;
+  onError: (message: string | null) => void;
+}) {
+  const [form, setForm] = useState<TraceOptionsInput>(DEFAULT_TRACE_OPTIONS);
+  const [sourceImage, setSourceImage] = useState<ImageRef | undefined>();
+  const [sourceUnavailable, setSourceUnavailable] = useState(false);
+  const [handoffSent, setHandoffSent] = useState(false);
   const [isRunning, setIsRunning] = useState(false);
+  const schema = result && isDrawingResult(result) ? result.trace_options_schema : undefined;
 
   useEffect(() => {
-    setForm((current) => ({ ...current, ...initialInput }));
+    const image = imageRefFromToolInput(initialInput.image);
+    setSourceImage(image);
+    setSourceUnavailable(Boolean(initialInput.image) && !image);
+    setHandoffSent(false);
+    if (!initialInput.options) return;
+    setForm((current) => ({
+      ...current,
+      ...initialInput.options,
+      preprocess: { ...current.preprocess, ...initialInput.options?.preprocess },
+    }));
   }, [initialInput]);
 
-  const runIdealize = useCallback(async () => {
-    if (!form.image_path?.trim()) {
-      onError("Choose a local raster path before running vectormark.");
+  const setOption = <K extends keyof TraceOptionsInput>(key: K, value: TraceOptionsInput[K]) => {
+    setForm((current) => ({ ...current, [key]: value }));
+  };
+
+  const runTrace = useCallback(async () => {
+    if (!sourceImage) {
+      onError("Trace a ChatGPT-attached image first; the widget reruns that same image reference.");
       return;
     }
-
     setIsRunning(true);
     onError(null);
     try {
-      const nextResult = await app.callServerTool({
-        name: "idealize_logo",
-        arguments: {
-          image: { path: form.image_path },
-          options: {
-            colors: Number(form.colors ?? 16),
-            epsilon: Number(form.epsilon ?? 1.5),
-            max_error: Number(form.max_error ?? 1),
-            flatten: Boolean(form.flatten),
-            no_symmetry: Boolean(form.no_symmetry),
-          },
-        },
-      });
-      onResult(nextResult);
+      onResult(await app.callServerTool({
+        name: "trace_drawing",
+        arguments: { image: sourceImage, options: form },
+      }));
     } catch (runError) {
       onError(runError instanceof Error ? runError.message : String(runError));
     } finally {
       setIsRunning(false);
     }
-  }, [app, form, onError, onResult]);
+  }, [app, form, onError, onResult, sourceImage]);
 
-  return (
-    <main
-      className="app-shell"
-      style={{
-        paddingTop: hostContext?.safeAreaInsets?.top,
-        paddingRight: hostContext?.safeAreaInsets?.right,
-        paddingBottom: hostContext?.safeAreaInsets?.bottom,
-        paddingLeft: hostContext?.safeAreaInsets?.left,
-      }}
-    >
-      <section className="control-panel" aria-label="vectormark controls">
-        <div className="brand-strip">
-          <div className="brand-id">
-            {theme === "daikonic" && <DaikonicMark size={32} />}
-            <div>
-              <p className="eyebrow">vectormark</p>
-              <h1>Logo idealizer</h1>
-            </div>
-          </div>
-          <div className="brand-strip-end">
-            <button
-              className="theme-btn"
-              title={
-                theme === "daikonic"
-                  ? "Switch to default theme"
-                  : "Switch to daikonic brand theme"
-              }
-              onClick={onThemeToggle}
-            >
-              {theme === "daikonic" ? "Default" : "Daikonic"}
-            </button>
-            <span className="status-dot" aria-label={isRunning ? "Running" : "Ready"} />
-          </div>
-        </div>
-
-        <label className="field field-wide">
-          Raster path
-          <input
-            value={form.image_path ?? ""}
-            onChange={(event) =>
-              setForm((current) => ({ ...current, image_path: event.target.value }))
-            }
-            placeholder="/path/to/logo.png"
-          />
-        </label>
-
-        <div className="number-grid">
-          <label className="field">
-            Colors
-            <input
-              min="1"
-              max="64"
-              type="number"
-              value={form.colors ?? 16}
-              onChange={(event) =>
-                setForm((current) => ({ ...current, colors: Number(event.target.value) }))
-              }
-            />
-          </label>
-          <label className="field">
-            Epsilon
-            <input
-              min="0"
-              step="0.1"
-              type="number"
-              value={form.epsilon ?? 1.5}
-              onChange={(event) =>
-                setForm((current) => ({ ...current, epsilon: Number(event.target.value) }))
-              }
-            />
-          </label>
-          <label className="field">
-            Max error
-            <input
-              min="0"
-              step="0.1"
-              type="number"
-              value={form.max_error ?? 1}
-              onChange={(event) =>
-                setForm((current) => ({ ...current, max_error: Number(event.target.value) }))
-              }
-            />
-          </label>
-        </div>
-
-        <div className="toggle-row">
-          <label className="toggle">
-            <input
-              checked={Boolean(form.flatten)}
-              type="checkbox"
-              onChange={(event) =>
-                setForm((current) => ({ ...current, flatten: event.target.checked }))
-              }
-            />
-            Flatten paths
-          </label>
-          <label className="toggle">
-            <input
-              checked={Boolean(form.no_symmetry)}
-              type="checkbox"
-              onChange={(event) =>
-                setForm((current) => ({ ...current, no_symmetry: event.target.checked }))
-              }
-            />
-            No symmetry
-          </label>
-        </div>
-
-        <button className="run-button" disabled={isRunning} onClick={runIdealize}>
-          {isRunning ? "Idealizing..." : "Run vectormark"}
-        </button>
-      </section>
-
-      <section className="preview-panel" aria-label="SVG preview">
-        {errorText ? <div className="error-banner">{errorText}</div> : null}
-        {result ? <LogoPreview result={result} rasterSrc={rasterSrc} /> : <EmptyPreview />}
-      </section>
-    </main>
-  );
-}
-
-// ─── LogoPreview ──────────────────────────────────────────────────────────────
-
-function LogoPreview({
-  result,
-  rasterSrc,
-}: {
-  result: IdealizeLogoResult;
-  rasterSrc: string | null;
-}) {
-  const [view, setView] = useState<"svg" | "raster">("svg");
-  const [copied, setCopied] = useState(false);
-
-  // Render via <img> data URI, NOT dangerouslySetInnerHTML: an <img>-loaded SVG cannot
-  // execute scripts or event handlers, so a hostile `svg` (e.g. from render_idealized_logo,
-  // which echoes caller-supplied SVG) can't run in the widget. encodeURIComponent keeps it
-  // UTF-8 safe (btoa would choke on non-Latin1).
-  const svgSrc = `data:image/svg+xml,${encodeURIComponent(result.svg)}`;
-  const showRaster = view === "raster" && rasterSrc != null;
-  const hasRaster = rasterSrc != null;
-
-  const copySvg = useCallback(async () => {
+  const requestHostRerun = useCallback(async () => {
+    setIsRunning(true);
+    onError(null);
     try {
-      await navigator.clipboard.writeText(result.svg);
-      setCopied(true);
-      setTimeout(() => setCopied(false), 1600);
-    } catch {
-      // Clipboard access denied — fail silently.
+      const response = await app.sendMessage({
+        role: "user",
+        content: [{ type: "text", text: sourceImageMessage(form) }],
+      });
+      if (response.isError) throw new Error("ChatGPT could not queue the trace request.");
+      setHandoffSent(true);
+    } catch (handoffError) {
+      onError(handoffError instanceof Error ? handoffError.message : String(handoffError));
+    } finally {
+      setIsRunning(false);
     }
-  }, [result.svg]);
+  }, [app, form, onError]);
 
-  const downloadSvg = useCallback(() => {
-    const blob = new Blob([result.svg], { type: "image/svg+xml" });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement("a");
-    a.href = url;
-    a.download = "logo.svg";
-    document.body.appendChild(a);
-    a.click();
-    document.body.removeChild(a);
-    URL.revokeObjectURL(url);
-  }, [result.svg]);
+  const enumSelect = (name: keyof Pick<TraceOptionsInput, "refine" | "trace_level" | "fit_strategy" | "remove_background">, label: string) => (
+    <label className="field" key={name}>
+      {label}
+      <select value={form[name]} onChange={(event) => setOption(name, event.target.value as TraceOptionsInput[typeof name])}>
+        {enumChoices(schema, name).map((choice) => <option key={choice} value={choice}>{choice}</option>)}
+      </select>
+    </label>
+  );
 
   return (
-    <>
-      {hasRaster && (
-        <div className="view-toggle" role="group" aria-label="Preview mode">
-          <button
-            className={`view-btn${view === "raster" ? " active" : ""}`}
-            onClick={() => setView("raster")}
-          >
-            Before
-          </button>
-          <button
-            className={`view-btn${view === "svg" ? " active" : ""}`}
-            onClick={() => setView("svg")}
-          >
-            After
-          </button>
+    <section className="control-panel" aria-label="trace settings">
+      <div className="brand-strip">
+        <div className="brand-id">
+          <DaikonicMark size={32} />
+          <div><p className="eyebrow">vectormark</p><h1>Trace & refine</h1></div>
         </div>
-      )}
-
-      <div className="preview-stage">
-        <img
-          src={showRaster ? rasterSrc : svgSrc}
-          alt={showRaster ? "Original raster input" : "Idealized logo SVG"}
-        />
+        <span className="status-dot" aria-label={isRunning ? "Tracing" : "Ready"} />
       </div>
 
-      <div className="preview-footer">
-        <dl className="metrics">
-          <div>
-            <dt>Canvas</dt>
-            <dd>
-              {result.width} × {result.height}
-            </dd>
-          </div>
-          <div>
-            <dt>SVG</dt>
-            <dd>{formatBytes(result.svg_bytes)}</dd>
-          </div>
-        </dl>
-        <div className="action-buttons">
-          <button className="action-btn" onClick={copySvg}>
-            {copied ? "Copied!" : "Copy SVG"}
-          </button>
-          <button className="action-btn" onClick={downloadSvg}>
-            Download
-          </button>
-        </div>
+      <p className="control-note">
+        {sourceImage
+          ? "Reruns use the original attached image."
+          : sourceUnavailable
+            ? "ChatGPT supplied a display-only attachment path. Ask the agent to rerun it with these settings."
+            : "Run trace_drawing on an attached image to enable reruns."}
+      </p>
+
+      <div className="select-grid">
+        {enumSelect("refine", "Refine")}
+        {enumSelect("trace_level", "Boundary")}
+        {enumSelect("fit_strategy", "Path fitting")}
+        {enumSelect("remove_background", "Background")}
       </div>
 
-      {result.diagnostics != null && (
-        <DiagnosticsPanel diagnostics={result.diagnostics} />
+      <div className="number-grid">
+        <label className="field">Max colors
+          <input disabled={form.max_colors === "auto"} min="2" max="256" type="number" value={form.max_colors === "auto" ? "" : form.max_colors}
+            onChange={(event) => setOption("max_colors", Number(event.target.value) || 2)} />
+        </label>
+        <label className="toggle"> <input checked={form.max_colors === "auto"} type="checkbox"
+          onChange={(event) => setOption("max_colors", event.target.checked ? "auto" : 16)} /> Auto palette </label>
+        <label className="field">Min region px
+          <input min="1" type="number" value={form.min_region_size} onChange={(event) => setOption("min_region_size", Number(event.target.value))} />
+        </label>
+      </div>
+
+      <details className="trace-advanced">
+        <summary>Advanced trace settings</summary>
+        <div className="number-grid">
+          <label className="field">Hole area
+            <input min="0" type="number" value={form.max_hole_area} onChange={(event) => setOption("max_hole_area", Number(event.target.value))} />
+          </label>
+          <label className="field">Min fraction
+            <input min="0" max="0.99" step="0.01" type="number" value={form.min_region_fraction} onChange={(event) => setOption("min_region_fraction", Number(event.target.value))} />
+          </label>
+          <label className="field">Simplify px
+            <input min="0" step="0.1" type="number" value={form.simplify_tolerance} onChange={(event) => setOption("simplify_tolerance", Number(event.target.value))} />
+          </label>
+          <label className="field">Curve error
+            <input min="0" step="0.1" type="number" value={form.curve_tolerance} onChange={(event) => setOption("curve_tolerance", Number(event.target.value))} />
+          </label>
+          <label className="field">Max image px
+            <input min="1" type="number" value={form.preprocess.max_size_px} onChange={(event) => setForm((current) => ({ ...current, preprocess: { ...current.preprocess, max_size_px: Number(event.target.value) } }))} />
+          </label>
+        </div>
+        <div className="toggle-row">
+          <label className="toggle"><input checked={form.preprocess.preserve_transparency} type="checkbox" onChange={(event) => setForm((current) => ({ ...current, preprocess: { ...current.preprocess, preserve_transparency: event.target.checked } }))} /> Preserve alpha</label>
+          <label className="toggle"><input checked={form.preprocess.quantize} type="checkbox" onChange={(event) => setForm((current) => ({ ...current, preprocess: { ...current.preprocess, quantize: event.target.checked } }))} /> Pre-quantize</label>
+        </div>
+      </details>
+
+      {sourceImage ? (
+        <button className="run-button" disabled={isRunning} onClick={runTrace}>
+          {isRunning ? "Tracing…" : "Rerun trace"}
+        </button>
+      ) : sourceUnavailable ? (
+        <button className="run-button" disabled={isRunning || handoffSent} onClick={requestHostRerun}>
+          {isRunning ? "Sending…" : handoffSent ? "Trace request sent" : "Ask agent to rerun"}
+        </button>
+      ) : (
+        <button className="run-button" disabled>Rerun trace</button>
       )}
-    </>
+    </section>
   );
 }
 
-// ─── DiagnosticsPanel ─────────────────────────────────────────────────────────
+function ArtifactViewer({ app, drawing, initialPanel, onError }: { app: App; drawing: DrawingResult; initialPanel: string | null; onError: (message: string | null) => void }) {
+  const [selected, setSelected] = useState<ArtifactKind>("review_panel");
+  const [loaded, setLoaded] = useState<CallToolResult | null>(null);
+  const [loading, setLoading] = useState(false);
 
-function DiagnosticsPanel({ diagnostics }: { diagnostics: Diagnostics }) {
-  const { input, processed, vectormark, output, warnings } = diagnostics;
-  const warnCount = warnings?.length ?? 0;
+  useEffect(() => { setSelected("review_panel"); setLoaded(null); }, [drawing.drawing_id, drawing.version]);
 
-  return (
-    <details className="diag-panel">
-      <summary className="diag-summary">
-        Diagnostics
-        {warnCount > 0 && (
-          <span className="diag-warn-badge" title={`${warnCount} warning${warnCount > 1 ? "s" : ""}`}>
-            {warnCount}
-          </span>
-        )}
-      </summary>
+  const load = useCallback(async (kind: ArtifactKind) => {
+    setSelected(kind);
+    setLoading(true);
+    onError(null);
+    try {
+      setLoaded(await app.callServerTool({ name: "get_drawing_artifact", arguments: { drawing_id: drawing.drawing_id, version: drawing.version, artifact: kind } }));
+    } catch (loadError) {
+      onError(loadError instanceof Error ? loadError.message : String(loadError));
+    } finally {
+      setLoading(false);
+    }
+  }, [app, drawing.drawing_id, drawing.version, onError]);
 
-      <div className="diag-body">
-        {input != null && (
-          <div className="diag-section">
-            <span className="diag-section-title">Input</span>
-            <div className="diag-rows">
-              {input.source_kind != null && (
-                <div className="diag-row">
-                  <span className="diag-label">Source</span>
-                  <span className="diag-value">
-                    {SOURCE_KIND_LABELS[input.source_kind] ?? input.source_kind}
-                  </span>
-                </div>
-              )}
-              {input.mime_type != null && (
-                <div className="diag-row">
-                  <span className="diag-label">Type</span>
-                  <span className="diag-value">{input.mime_type}</span>
-                </div>
-              )}
-              {input.original_width != null && input.original_height != null && (
-                <div className="diag-row">
-                  <span className="diag-label">Original</span>
-                  <span className="diag-value">
-                    {input.original_width} × {input.original_height}
-                  </span>
-                </div>
-              )}
-              {input.bytes != null && (
-                <div className="diag-row">
-                  <span className="diag-label">File size</span>
-                  <span className="diag-value">{formatBytes(input.bytes)}</span>
-                </div>
-              )}
-            </div>
-          </div>
-        )}
+  const svg = artifactSvg(loaded);
+  const image = firstImageDataUri(loaded) ?? (selected === "review_panel" ? initialPanel : null);
+  const json = selected === "raw_trace" ? artifactJson(loaded) : null;
+  const uri = drawing.artifacts[selected];
 
-        {processed != null && (
-          <div className="diag-section">
-            <span className="diag-section-title">Processed</span>
-            <div className="diag-rows">
-              {processed.width != null && processed.height != null && (
-                <div className="diag-row">
-                  <span className="diag-label">Canvas</span>
-                  <span className="diag-value">
-                    {processed.width} × {processed.height}
-                  </span>
-                </div>
-              )}
-              {(processed.cropped ?? processed.resized ?? processed.transparent ?? processed.quantized) != null && (
-                <div className="diag-row">
-                  <span className="diag-label">Flags</span>
-                  <span className="diag-chips">
-                    {processed.cropped && <span className="chip">Cropped</span>}
-                    {processed.resized && <span className="chip">Resized</span>}
-                    {processed.transparent && <span className="chip">Transparent</span>}
-                    {processed.quantized && <span className="chip">Quantized</span>}
-                    {!processed.cropped && !processed.resized && !processed.transparent && !processed.quantized && (
-                      <span className="diag-none">none</span>
-                    )}
-                  </span>
-                </div>
-              )}
-            </div>
-          </div>
-        )}
-
-        {vectormark != null && (
-          <div className="diag-section">
-            <span className="diag-section-title">Options</span>
-            <div className="diag-rows">
-              {vectormark.colors != null && (
-                <div className="diag-row">
-                  <span className="diag-label">Colors</span>
-                  <span className="diag-value">{vectormark.colors}</span>
-                </div>
-              )}
-              {vectormark.epsilon != null && (
-                <div className="diag-row">
-                  <span className="diag-label">Epsilon</span>
-                  <span className="diag-value">{vectormark.epsilon}</span>
-                </div>
-              )}
-              {vectormark.max_error != null && (
-                <div className="diag-row">
-                  <span className="diag-label">Max error</span>
-                  <span className="diag-value">{vectormark.max_error}</span>
-                </div>
-              )}
-              <div className="diag-row">
-                <span className="diag-label">Flatten</span>
-                <span className="diag-value">{vectormark.flatten ? "yes" : "no"}</span>
-              </div>
-              <div className="diag-row">
-                <span className="diag-label">Symmetry</span>
-                <span className="diag-value">{vectormark.no_symmetry ? "off" : "on"}</span>
-              </div>
-            </div>
-          </div>
-        )}
-
-        {output != null && (
-          <div className="diag-section">
-            <span className="diag-section-title">Output</span>
-            <div className="diag-rows">
-              {output.element_count != null && (
-                <div className="diag-row">
-                  <span className="diag-label">Elements</span>
-                  <span className="diag-value">{output.element_count}</span>
-                </div>
-              )}
-              {output.svg_bytes != null && (
-                <div className="diag-row">
-                  <span className="diag-label">SVG size</span>
-                  <span className="diag-value">{formatBytes(output.svg_bytes)}</span>
-                </div>
-              )}
-              <div className="diag-row">
-                <span className="diag-label">Features</span>
-                <span className="diag-chips">
-                  {output.has_defs && <span className="chip">Defs</span>}
-                  {output.has_paths && <span className="chip">Paths</span>}
-                  {output.has_primitives && <span className="chip">Primitives</span>}
-                  {output.has_symmetry && <span className="chip chip-accent">Symmetry</span>}
-                  {!output.has_defs && !output.has_paths && !output.has_primitives && !output.has_symmetry && (
-                    <span className="diag-none">none</span>
-                  )}
-                </span>
-              </div>
-            </div>
-          </div>
-        )}
-
-        {warnCount > 0 && (
-          <div className="diag-section diag-section-warn">
-            <span className="diag-section-title">Warnings</span>
-            <ul className="diag-warnings">
-              {warnings!.map((w, i) => (
-                <li key={i}>{w}</li>
-              ))}
-            </ul>
-          </div>
-        )}
-      </div>
-    </details>
-  );
-}
-
-// ─── Empty / Status panels ────────────────────────────────────────────────────
-
-function EmptyPreview() {
-  return (
-    <div className="empty-preview">
-      <div className="empty-glyph" />
-      <p>Run vectormark to preview the idealized SVG.</p>
+  return <>
+    <div className="artifact-header"><div><p className="eyebrow">Drawing {drawing.version}</p><h2>Response files</h2></div><code>{drawing.drawing_id}</code></div>
+    <div className="artifact-list" role="group" aria-label="Response files">
+      {ARTIFACTS.map(({ kind, label }) => <button key={kind} className={`artifact-button${selected === kind ? " active" : ""}`} onClick={() => load(kind)}>{label}</button>)}
     </div>
-  );
+    <code className="artifact-uri">{uri}</code>
+    <div className="preview-stage">
+      {loading ? <p>Loading {selected}…</p> : image ? <img src={image} alt={`${selected} response artifact`} /> : svg ? <img src={dataUriForSvg(svg)} alt={`${selected} response artifact`} /> : json ? <pre className="artifact-json">{json}</pre> : <p>Select a response file to load it through VectorMark.</p>}
+    </div>
+  </>;
 }
 
-function StatusPanel({ title, detail }: { title: string; detail: string }) {
-  return (
-    <main className="status-panel">
-      <h1>{title}</h1>
-      <p>{detail}</p>
-    </main>
-  );
+function LegacyPreview({ result }: { result: IdealizeLogoResult }) {
+  return <div className="preview-stage"><img src={dataUriForSvg(result.svg)} alt="Rendered SVG" /></div>;
 }
 
-createRoot(document.getElementById("root")!).render(
-  <StrictMode>
-    <AppRoot />
-  </StrictMode>,
-);
+function AppRoot() {
+  const [toolInput, setToolInput] = useState<TraceToolInput>({});
+  const [toolResult, setToolResult] = useState<CallToolResult | null>(null);
+  const [hostContext, setHostContext] = useState<McpUiHostContext | undefined>();
+  const [errorText, setErrorText] = useState<string | null>(null);
+
+  const { app, isConnected, error } = useApp({
+    appInfo: { name: "vectormark", version: "0.2.1" }, capabilities: {},
+    onAppCreated: (createdApp) => {
+      createdApp.ontoolinput = (params) => setToolInput((current) => ({ ...current, ...((params.arguments ?? {}) as TraceToolInput) }));
+      createdApp.ontoolresult = (result) => { setErrorText(null); setToolResult(result); };
+      createdApp.ontoolcancelled = (params) => setErrorText(params.reason || "Tool call was cancelled.");
+      createdApp.onerror = (appError) => setErrorText(appError instanceof Error ? appError.message : String(appError));
+      createdApp.onhostcontextchanged = (params) => setHostContext((current) => ({ ...current, ...params }));
+      createdApp.onteardown = async () => ({});
+    },
+  });
+  useEffect(() => { if (app) setHostContext(app.getHostContext()); }, [app]);
+  const result = useMemo(() => parseStructuredResult(toolResult), [toolResult]);
+  const panel = useMemo(() => firstImageDataUri(toolResult), [toolResult]);
+
+  if (error) return <StatusPanel title="Connection failed" detail={error.message} />;
+  if (!isConnected || !app) return <StatusPanel title="Connecting" detail="Waiting for the MCP Apps host." />;
+
+  return <main className="app-shell" style={{ paddingTop: hostContext?.safeAreaInsets?.top, paddingRight: hostContext?.safeAreaInsets?.right, paddingBottom: hostContext?.safeAreaInsets?.bottom, paddingLeft: hostContext?.safeAreaInsets?.left }}>
+    <TraceControls app={app} initialInput={toolInput} result={result} onResult={setToolResult} onError={setErrorText} />
+    <section className="preview-panel" aria-label="drawing response">
+      {errorText && <div className="error-banner">{errorText}</div>}
+      {result ? isDrawingResult(result) ? <ArtifactViewer app={app} drawing={result} initialPanel={panel} onError={setErrorText} /> : <LegacyPreview result={result} /> : <EmptyPreview />}
+    </section>
+  </main>;
+}
+
+function EmptyPreview() { return <div className="empty-preview"><div className="empty-glyph" /><p>Trace an image to inspect its review panel and response files.</p></div>; }
+function StatusPanel({ title, detail }: { title: string; detail: string }) { return <main className="status-panel"><h1>{title}</h1><p>{detail}</p></main>; }
+
+createRoot(document.getElementById("root")!).render(<StrictMode><AppRoot /></StrictMode>);

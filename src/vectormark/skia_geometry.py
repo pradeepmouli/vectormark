@@ -808,7 +808,15 @@ class SkPath:
 
     def symmetric_difference(self, other: "SkPath") -> "SkPath":
         result = skia.Op(self._path, other._path, skia.kXOR_PathOp)
-        return SkPath.from_skia(result) if result is not None else SkPath()
+        if result is None:
+            return SkPath()
+        # PathOps can represent an XOR as overlapping even-odd contours.  Its
+        # fill is correct, but the compatibility ``area`` implementation
+        # operates on contour containment and cannot measure that form.  A
+        # Simplify resolves it into disjoint contours before callers use the
+        # result as a residual or acceptance gate.
+        simplified = skia.Simplify(result)
+        return SkPath.from_skia(simplified if simplified is not None else result)
 
     def union(self, other: "SkPath") -> "SkPath":
         result = skia.Op(self._path, other._path, skia.kUnion_PathOp)

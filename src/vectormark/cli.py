@@ -27,6 +27,11 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--colors", type=int, default=16, help="max palette colours")
     ap.add_argument("--flatten", action="store_true", help="flatten primitives to paths")
     ap.add_argument("--no-symmetry", action="store_true", help="disable symmetry detection")
+    ap.add_argument(
+        "--corner-normalize",
+        action="store_true",
+        help="canonicalize recognized rounded corners to one endpoint-preserving quadratic",
+    )
     ap.add_argument("--variants", action="store_true",
                     help="write an epsilon × max_error matrix of variants to a directory")
     ap.add_argument("--axes", action="store_true",
@@ -39,7 +44,12 @@ def main(argv: list[str] | None = None) -> int:
     if args.axes and not args.variants:
         print("note: --axes only applies in --variants mode; ignoring it", file=sys.stderr)
 
-    base = Options(max_colors=args.colors, flatten=args.flatten, no_symmetry=args.no_symmetry)
+    base = Options(
+        max_colors=args.colors,
+        flatten=args.flatten,
+        no_symmetry=args.no_symmetry,
+        corner_normalize=args.corner_normalize,
+    )
 
     if args.variants:
         if args.epsilon != 1.5 or args.max_error != 1.0:
@@ -70,6 +80,7 @@ def main(argv: list[str] | None = None) -> int:
     svg = idealize(args.input, options=Options(
         epsilon=args.epsilon, max_error=args.max_error, max_colors=args.colors,
         flatten=args.flatten, no_symmetry=args.no_symmetry,
+        corner_normalize=args.corner_normalize,
     ))
     if args.output:
         with open(args.output, "w") as f:

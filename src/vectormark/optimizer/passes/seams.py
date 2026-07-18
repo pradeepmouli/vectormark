@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import math
 
 import numpy as np
 
@@ -12,8 +13,12 @@ from ..vector_region import VectorRegion, _parse_subpaths, to_polygon
 from .simplify import _simplified_path_shape
 
 
-_SEAM_TOL = 2.0
+# Trace fitting can move the endpoints of an otherwise clearly shared edge a
+# little over two pixels.  This is only an *admission* tolerance: accepted
+# seams are still projected to one exact coordinate.
+_SEAM_TOL = 3.0
 _JUNCTION_TOL = 6.5
+_MIN_SUBPATH_SPAN = 3.0
 
 
 @dataclass(frozen=True)
@@ -60,7 +65,58 @@ def _shape_bounds(obj: VectorRegion) -> tuple[float, float, float, float] | None
     return float(minx), float(miny), float(maxx), float(maxy)
 
 
+def _same_surface_fill_group(a: VectorRegion, b: VectorRegion) -> bool:
+    """Whether automatic stitching may alter this pair's shared boundary.
+
+    Trace/refine assigns a ``surface_fill`` group after geometry fitting.  Its
+    members are palette fragments of one material; neighbouring members of a
+    different group can instead be a deliberate counter or overlaid detail.
+    Legacy/manual regions carry no group and retain the previous permissive
+    behavior.
+    """
+    # A compound child represents a nested fill/cutout layer from one source
+    # path.  Its boundary is containment, not an independently traced material
+    # seam.  It must never be moved toward a sibling by generic seam repair.
+    if isinstance(a.diagnostics.get("compound"), dict) or isinstance(b.diagnostics.get("compound"), dict):
+        return False
+    a_fill = a.diagnostics.get("surface_fill")
+    b_fill = b.diagnostics.get("surface_fill")
+    if not isinstance(a_fill, dict) or not isinstance(b_fill, dict):
+        return True
+    return a_fill.get("group") == b_fill.get("group")
+
+
 def _regions_close(a: VectorRegion, b: VectorRegion, *, tol: float) -> bool:
+    """Cheaply reject separated bounds before asking Skia for exact distance.
+
+    ``SkPath.distance`` is intentionally exact, but it is disproportionately
+    expensive for the large, detailed paths retained by an interactive trace.
+    The Euclidean distance between two axis-aligned bounding boxes is a lower
+    bound on the path distance, so a bound that exceeds ``tol`` can never
+    contain a seam candidate.  Nearby bounds still use the exact geometry
+    check below.
+    """
+    a_bounds = _shape_bounds(a)
+    b_bounds = _shape_bounds(b)
+    if a_bounds is None or b_bounds is None:
+        return False
+    ax0, ay0, ax1, ay1 = a_bounds
+    bx0, by0, bx1, by1 = b_bounds
+    dx = max(ax0 - bx1, bx0 - ax1, 0.0)
+    dy = max(ay0 - by1, by0 - ay1, 0.0)
+    if dx * dx + dy * dy > tol * tol:
+        return False
+    if (
+        a.current is not None
+        and b.current is not None
+        and a.current.kind == "path"
+        and b.current.kind == "path"
+    ):
+        # Endpoint proximity is the actionable criterion for a path seam:
+        # subsequent rewriting can move only those coordinates.  Avoid an
+        # exact path-to-path distance here; it is costly for detailed,
+        # overlapping traced paths and contributes no additional signal.
+        return _path_endpoints_within(a.current, b.current, tol=tol)
     try:
         return float(a.footprint.distance(b.footprint)) <= tol
     except Exception:
@@ -109,7 +165,7 @@ def _candidate_for_pair(a: VectorRegion, b: VectorRegion, *, tol: float) -> _Sea
             return _SeamCandidate("y", "top", "bottom", ay0, by1, seam, *x_span)
     if a.current.kind != "path" or b.current.kind != "path":
         return None
-    return _SeamCandidate("vertices", "", "", 0.0, float(a.footprint.distance(b.footprint)), 0.0, 0.0, 0.0)
+    return _SeamCandidate("vertices", "", "", 0.0, 0.0, 0.0, 0.0, 0.0)
 
 
 def _subpath_d(tokens: list[tuple[str, list[float]]]) -> str:
@@ -300,13 +356,68 @@ def _coordinate_indexes(command: str) -> tuple[tuple[int, int], ...]:
     return ()
 
 
+def _subpath_is_degenerate(subpath: list[tuple[str, list[float]]]) -> bool:
+    """Ignore tiny AA-fringe loops when finding a material seam.
+
+    These loops are trace provenance, not meaningful boundary segments.  If
+    they participate in nearest-point matching, they can consume a match that
+    belongs to the actual shared line of the containing path.
+    """
+    points = [
+        (float(values[x_idx]), float(values[y_idx]))
+        for command, values in subpath
+        for x_idx, y_idx in _coordinate_indexes(command)
+    ]
+    if len(points) < 2:
+        return True
+    xs, ys = zip(*points, strict=True)
+    return max(xs) - min(xs) < _MIN_SUBPATH_SPAN and max(ys) - min(ys) < _MIN_SUBPATH_SPAN
+
+
 def _path_coordinate_refs(tokens: list[list[tuple[str, list[float]]]]):
     refs = []
     for subpath_index, subpath in enumerate(tokens):
+        if _subpath_is_degenerate(subpath):
+            continue
         for token_index, (command, values) in enumerate(subpath):
             for x_idx, y_idx in _coordinate_indexes(command):
                 refs.append((subpath_index, token_index, x_idx, y_idx, float(values[x_idx]), float(values[y_idx])))
     return refs
+
+
+def _path_endpoints_within(a: Shape, b: Shape, *, tol: float) -> bool:
+    """Return whether two paths have endpoints within *tol* in expected O(n+m).
+
+    This is a broad-phase filter for detailed raw trace paths.  A seam rewrite
+    can only move path endpoints, so a pair with no nearby endpoints cannot
+    produce a seam candidate.  The caller still asks Skia for exact distance
+    once this filter admits a pair.
+    """
+    if tol < 0:
+        return False
+    cell_size = max(float(tol), 1e-9)
+    a_refs = _path_coordinate_refs(_parse_subpaths(str(a.params.get("d", ""))))
+    b_refs = _path_coordinate_refs(_parse_subpaths(str(b.params.get("d", ""))))
+    if not a_refs or not b_refs:
+        return False
+
+    buckets: dict[tuple[int, int], list[tuple[float, float]]] = {}
+    for *_indices, x, y in b_refs:
+        key = (math.floor(x / cell_size), math.floor(y / cell_size))
+        buckets.setdefault(key, []).append((x, y))
+
+    tol_sq = tol * tol
+    for *_indices, x, y in a_refs:
+        cell_x = math.floor(x / cell_size)
+        cell_y = math.floor(y / cell_size)
+        for offset_x in (-1, 0, 1):
+            for offset_y in (-1, 0, 1):
+                for other_x, other_y in buckets.get((cell_x + offset_x, cell_y + offset_y), ()):
+                    dx = x - other_x
+                    dy = y - other_y
+                    if dx * dx + dy * dy <= tol_sq:
+                        return True
+    return False
 
 
 def _path_endpoint_refs(
@@ -315,6 +426,8 @@ def _path_endpoint_refs(
 ) -> list[_CoordinateRef]:
     refs: list[_CoordinateRef] = []
     for subpath_index, subpath in enumerate(tokens):
+        if _subpath_is_degenerate(subpath):
+            continue
         for token_index, (command, values) in enumerate(subpath):
             for x_idx, y_idx in _coordinate_indexes(command):
                 refs.append(
@@ -441,30 +554,44 @@ def _true_up_path_vertices(a_shape: Shape, b_shape: Shape, *, tol: float) -> tup
     b_tokens = _parse_subpaths(str(b_shape.params.get("d", "")))
     a_refs = _path_coordinate_refs(a_tokens)
     b_refs = _path_coordinate_refs(b_tokens)
-    pairs: list[tuple[float, tuple, tuple]] = []
-    for a_ref in a_refs:
-        for b_ref in b_refs:
-            dx = a_ref[4] - b_ref[4]
-            dy = a_ref[5] - b_ref[5]
-            dist = float((dx * dx + dy * dy) ** 0.5)
-            if 0.0 < dist <= tol:
-                pairs.append((dist, a_ref, b_ref))
+    if not a_refs or not b_refs:
+        return a_shape, b_shape, False
 
+    cell_size = max(float(tol), 1e-9)
+    buckets: dict[tuple[int, int], list[tuple]] = {}
+    for ref in b_refs:
+        cell = (math.floor(ref[4] / cell_size), math.floor(ref[5] / cell_size))
+        buckets.setdefault(cell, []).append(ref)
+
+    # Greedily select the nearest unmatched local counterpart.  The old global
+    # pair sort was quadratic and only existed to establish the same one-to-one
+    # vertex relation; local nearest matching is deterministic in path order
+    # and bounds work by nearby vertices rather than all path commands.
     changed = False
-    used_a: set[tuple[int, int, int, int]] = set()
     used_b: set[tuple[int, int, int, int]] = set()
-    for _dist, a_ref, b_ref in sorted(pairs, key=lambda item: item[0]):
-        a_key = tuple(a_ref[:4])
-        b_key = tuple(b_ref[:4])
-        if a_key in used_a or b_key in used_b:
+    for a_ref in a_refs:
+        cell_x = math.floor(a_ref[4] / cell_size)
+        cell_y = math.floor(a_ref[5] / cell_size)
+        best: tuple[float, tuple] | None = None
+        for dx_cell in (-1, 0, 1):
+            for dy_cell in (-1, 0, 1):
+                for b_ref in buckets.get((cell_x + dx_cell, cell_y + dy_cell), ()):
+                    b_key = tuple(b_ref[:4])
+                    if b_key in used_b:
+                        continue
+                    dist = math.hypot(a_ref[4] - b_ref[4], a_ref[5] - b_ref[5])
+                    if 0.0 < dist <= tol and (best is None or dist < best[0]):
+                        best = (dist, b_ref)
+        if best is None:
             continue
+        _dist, b_ref = best
+        b_key = tuple(b_ref[:4])
         midpoint_x = (a_ref[4] + b_ref[4]) / 2.0
         midpoint_y = (a_ref[5] + b_ref[5]) / 2.0
         a_tokens[a_ref[0]][a_ref[1]][1][a_ref[2]] = midpoint_x
         a_tokens[a_ref[0]][a_ref[1]][1][a_ref[3]] = midpoint_y
         b_tokens[b_ref[0]][b_ref[1]][1][b_ref[2]] = midpoint_x
         b_tokens[b_ref[0]][b_ref[1]][1][b_ref[3]] = midpoint_y
-        used_a.add(a_key)
         used_b.add(b_key)
         changed = True
 
@@ -563,7 +690,25 @@ def _replace_leaves(root: VectorRegion, replacements_by_leaf_id: dict[int, Vecto
         _replace_leaves(child, replacements_by_leaf_id)
         for child in root.children
     ]
-    return root.with_children(children)
+    # A branch's footprint is the retained exterior geometry root.  Its
+    # children are material partitions, whose fitted paths can have tiny
+    # independent residuals.  Recomputing the branch footprint from those
+    # children turns an interior stitch into a spurious exterior shape change
+    # and makes the optimizer reject it.  Preserve the container footprint and
+    # raster; only its addressed children changed.
+    return VectorRegion.branch(
+        id=root.id,
+        children=children,
+        z=root.z,
+        raster=root.raster,
+        footprint=root.footprint,
+        fill=root.fill,
+        source_label=root.source_label,
+        color_hex=root.color_hex,
+        drawing_id=root.drawing_id,
+        source_regions=root.source_regions,
+        diagnostics=root.diagnostics,
+    )
 
 
 def _leaf_key(ref: _LeafRef) -> tuple[int, int]:
@@ -632,8 +777,11 @@ def _apply_leaf_pair(
     if a_shape is None or b_shape is None:
         return None
     a_shape, b_shape, vertices_changed = _true_up_path_vertices(a_shape, b_shape, tol=_SEAM_TOL)
-    cleaned_a = _cleanup_mutated_path(a_shape, epsilon=epsilon, max_error=max_error, cubic=cubic)
-    cleaned_b = _cleanup_mutated_path(b_shape, epsilon=epsilon, max_error=max_error, cubic=cubic)
+    # Simplification has its own pass before stitch in the automatic workflow.
+    # Do retain the local inflecting-cubic repair caused by moving an endpoint,
+    # but do not rerun general linelet/path simplification for every pair.
+    cleaned_a = _cleanup_inflecting_cubics(a_shape, max_error=max_error, line_epsilon=epsilon)
+    cleaned_b = _cleanup_inflecting_cubics(b_shape, max_error=max_error, line_epsilon=epsilon)
     if cleaned_a != a_shape or cleaned_b != b_shape:
         a_shape, b_shape = cleaned_a, cleaned_b
         a_shape, b_shape, cleanup_vertices_changed = _true_up_path_vertices(a_shape, b_shape, tol=_SEAM_TOL)
@@ -712,15 +860,26 @@ def _cluster_leaf_vertices(
             if ra != rb:
                 parent[rb] = ra
 
+        # Only endpoints in neighboring ``link_tol`` cells can be joined.
+        # The former all-pairs loop made a detailed traced surface quadratic in
+        # its command count (and could exhaust memory before v0 was retained).
+        # Looking only backward through the spatial buckets considers each pair
+        # once while preserving the original strict distance predicate.
+        buckets: dict[tuple[int, int], list[int]] = {}
         for i, a_ref in enumerate(refs):
-            for j in range(i + 1, len(refs)):
-                b_ref = refs[j]
-                if not allow_same_key_links and a_ref.key == b_ref.key:
-                    continue
-                dx = a_ref.x - b_ref.x
-                dy = a_ref.y - b_ref.y
-                if 0.0 < (dx * dx + dy * dy) ** 0.5 <= link_tol:
-                    union(i, j)
+            cell_x = math.floor(a_ref.x / link_tol)
+            cell_y = math.floor(a_ref.y / link_tol)
+            for dx_cell in (-1, 0, 1):
+                for dy_cell in (-1, 0, 1):
+                    for j in buckets.get((cell_x + dx_cell, cell_y + dy_cell), ()):
+                        b_ref = refs[j]
+                        if not allow_same_key_links and a_ref.key == b_ref.key:
+                            continue
+                        dx = a_ref.x - b_ref.x
+                        dy = a_ref.y - b_ref.y
+                        if 0.0 < math.hypot(dx, dy) <= link_tol:
+                            union(i, j)
+            buckets.setdefault((cell_x, cell_y), []).append(i)
 
         groups: dict[int, list[_CoordinateRef]] = {}
         for index, ref in enumerate(refs):
@@ -744,8 +903,14 @@ def _cluster_leaf_vertices(
     for key in changed_keys:
         update = updates_by_leaf[key]
         shape = _shape_from_tokens(update.shape, tokens_by_key[key])
+        # Stitching owns only shared boundary coordinates.  Running the
+        # linelet simplifier here can rewrite unrelated outer geometry, which
+        # makes the framework reject the entire seam proposal before its exact
+        # endpoint projection is applied.  Preserve the local inflecting-cubic
+        # guard, but leave all general simplification to its dedicated pass.
+        shape = _cleanup_inflecting_cubics(shape, max_error=max_error, line_epsilon=epsilon)
         updates_by_leaf[key] = _LeafUpdate(
-            _cleanup_mutated_path(shape, epsilon=epsilon, max_error=max_error, cubic=cubic),
+            shape,
             update.paired_with,
             update.candidate,
             "vertex_cluster",
@@ -769,6 +934,7 @@ def seams_pass(
     epsilon: float = 1.0,
     max_error: float = 1.0,
     cubic: bool = False,
+    post_symmetry: bool = False,
 ) -> list[Proposal]:
     owners = sorted(objects, key=lambda current: (float(current.z), int(current.id)))
     owner_by_id = {int(owner.id): owner for owner in owners}
@@ -781,6 +947,8 @@ def seams_pass(
     owner_edges: list[tuple[int, int]] = []
 
     def record_pair(a_ref: _LeafRef, b_ref: _LeafRef) -> None:
+        if not _same_surface_fill_group(a_ref.leaf, b_ref.leaf):
+            return
         leaf_ref_by_key.setdefault(_leaf_key(a_ref), a_ref)
         leaf_ref_by_key.setdefault(_leaf_key(b_ref), b_ref)
         edge = _apply_leaf_pair(
@@ -795,15 +963,25 @@ def seams_pass(
         if edge is not None:
             owner_edges.append(edge)
 
-    for owner in owners:
-        for a_ref, b_ref in _leaf_pairs_within(owner, owner, tol=_SEAM_TOL):
-            record_pair(a_ref, b_ref)
-
-    for owner_index, a_owner in enumerate(owners):
-        for b_owner in owners[owner_index + 1:]:
-            leaf_pairs = _leaf_pairs_between(a_owner, a_owner, b_owner, b_owner, tol=_SEAM_TOL)
-            for a_ref, b_ref in leaf_pairs:
+    if post_symmetry:
+        # Before refinement, stitch can repair every retained root.  After
+        # symmetry, only a self-symmetry branch gained a new coincident axis;
+        # revisiting unrelated compound roots is redundant and expensive.
+        for owner in owners:
+            symmetry = owner.diagnostics.get("symmetry")
+            if isinstance(symmetry, dict) and symmetry.get("mode") == "self":
+                for a_ref, b_ref in _leaf_pairs_within(owner, owner, tol=_SEAM_TOL):
+                    record_pair(a_ref, b_ref)
+    else:
+        for owner in owners:
+            for a_ref, b_ref in _leaf_pairs_within(owner, owner, tol=_SEAM_TOL):
                 record_pair(a_ref, b_ref)
+
+        for owner_index, a_owner in enumerate(owners):
+            for b_owner in owners[owner_index + 1:]:
+                leaf_pairs = _leaf_pairs_between(a_owner, a_owner, b_owner, b_owner, tol=_SEAM_TOL)
+                for a_ref, b_ref in leaf_pairs:
+                    record_pair(a_ref, b_ref)
 
     proposals: list[Proposal] = []
     for owner_ids in _owner_components(owner_edges):

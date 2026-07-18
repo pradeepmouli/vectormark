@@ -89,7 +89,7 @@ def _grouped_scene(*source_regions: str) -> tuple[VectorRegion, ...]:
     )
 
 
-def _path_plan(segment: str = "r1.p0.c1-1") -> dict[str, object]:
+def _path_plan(segment: str = "r1.p0.c1") -> dict[str, object]:
     return {
         "version": "vectormark.plan.v1",
         "drawing_id": "drw_x",
@@ -231,12 +231,17 @@ def test_plan_rejects_invalid_global_fitting_defaults(defaults):
 def test_structural_operations_require_a_version_boundary(operation: str):
     from vectormark.drawing_plan import PlanValidationError, parse_plan, validate_plan
 
+    structural_op = (
+        {"op": "split", "target": "r1", "divider": {"type": "line", "points": [[0, 0], [1, 1]]}}
+        if operation == "split"
+        else {"op": operation, "target": "r1"}
+    )
     plan = parse_plan(
         {
             "version": "vectormark.plan.v1",
             "drawing_id": "drw_x",
             "base_version": "v0",
-            "ops": [{"op": operation, "target": "r1"}, {"op": "set_fill", "target": "r1", "fill": {"type": "flat", "color": "#112233"}}],
+            "ops": [structural_op, {"op": "set_fill", "target": "r1", "fill": {"type": "flat", "color": "#112233"}}],
         }
     )
 
@@ -247,7 +252,7 @@ def test_structural_operations_require_a_version_boundary(operation: str):
 def test_plan_reports_pointer_for_unknown_retained_segment():
     from vectormark.drawing_plan import PlanValidationError, parse_plan, validate_plan
 
-    plan = parse_plan(_path_plan("r1.p0.c99-1"))
+    plan = parse_plan(_path_plan("r1.p0.c99"))
 
     with pytest.raises(PlanValidationError, match="/ops/0/geometry/ops/0/target"):
         validate_plan(plan, _trace(), _scene("r1"))
@@ -256,7 +261,7 @@ def test_plan_reports_pointer_for_unknown_retained_segment():
 def test_path_geometry_rejects_segment_owned_by_another_region():
     from vectormark.drawing_plan import PlanValidationError, parse_plan, validate_plan
 
-    plan = parse_plan(_path_plan("r2.p0.c1-1"))
+    plan = parse_plan(_path_plan("r2.p0.c1"))
 
     with pytest.raises(PlanValidationError, match="/ops/0/geometry/ops/0/target"):
         validate_plan(plan, _two_region_trace(), _scene("r1", "r2"))
@@ -286,7 +291,7 @@ def test_path_geometry_uses_retained_target_commands_not_raw_trace_provenance():
                     "geometry": {
                         "type": "path",
                         "ops": [
-                            {"op": "fit", "target": "r1.p1.c1-1", "type": "keep"},
+                            {"op": "fit", "target": "r1.p1.c1", "type": "keep"},
                             {"op": "close"},
                         ],
                     },
@@ -314,9 +319,9 @@ def test_path_geometry_requires_a_newly_merged_target_to_be_refined_in_its_child
                     "geometry": {
                         "type": "path",
                         "ops": [
-                            {"op": "fit", "target": "r1.p0.c1-1", "type": "line"},
+                            {"op": "fit", "target": "r1.p0.c1", "type": "line"},
                             {"op": "close"},
-                            {"op": "fit", "target": "r2.p0.c1-1", "type": "line"},
+                            {"op": "fit", "target": "r2.p0.c1", "type": "line"},
                             {"op": "close"},
                         ],
                     },
@@ -326,7 +331,7 @@ def test_path_geometry_requires_a_newly_merged_target_to_be_refined_in_its_child
         }
     )
 
-    with pytest.raises(PlanValidationError, match="retained segment"):
+    with pytest.raises(PlanValidationError, match="retained command"):
         validate_plan(plan, _two_region_trace(), _scene("r1", "r2"))
 
 
@@ -345,7 +350,7 @@ def test_path_geometry_uses_its_own_retained_segment_ids():
                     "geometry": {
                         "type": "path",
                         "ops": [
-                            {"op": "fit", "target": "g1.p0.c1-1", "type": "line"},
+                            {"op": "fit", "target": "g1.p0.c1", "type": "line"},
                             {"op": "close"},
                         ],
                     },
@@ -363,8 +368,8 @@ def test_path_geometry_rejects_a_segment_fitted_twice():
 
     payload = _path_plan()
     payload["ops"][0]["geometry"]["ops"] = [
-        {"op": "fit", "target": "r1.p0.c1-1", "type": "line"},
-        {"op": "fit", "target": "r1.p0.c1-1", "type": "line"},
+        {"op": "fit", "target": "r1.p0.c1", "type": "line"},
+        {"op": "fit", "target": "r1.p0.c1", "type": "line"},
     ]
 
     with pytest.raises(PlanValidationError, match="/ops/0/geometry/ops/1/target"):
@@ -513,7 +518,7 @@ def test_parse_plan_recursively_freezes_nested_path_op_sequences():
     plan = parse_plan(payload)
     path_ops[0]["target"] = "changed-after-parsing"
 
-    assert plan.ops[0]["geometry"]["ops"][0]["target"] == "r1.p0.c1-1"
+    assert plan.ops[0]["geometry"]["ops"][0]["target"] == "r1.p0.c1"
     validate_plan(plan, _trace(), _scene("r1"))
 
 
@@ -522,16 +527,16 @@ def test_parse_plan_recursively_freezes_nested_path_op_sequences():
     [
         (
             [
-                {"op": "fit", "target": "r1.p0.c1-1", "type": "line"},
-                {"op": "break", "target": "r1.p0.c99-1"},
+                {"op": "fit", "target": "r1.p0.c1", "type": "line"},
+                {"op": "break", "target": "r1.p0.c99"},
             ],
             "/ops/0/geometry/ops/1/target",
         ),
         (
             [
-                {"op": "fit", "target": "r1.p0.c1-1", "type": "line"},
-                {"op": "break", "target": "r1.p0.c1-1"},
-                {"op": "break", "target": "r1.p0.c1-1"},
+                {"op": "fit", "target": "r1.p0.c1", "type": "line"},
+                {"op": "break", "target": "r1.p0.c1"},
+                {"op": "break", "target": "r1.p0.c1"},
             ],
             "/ops/0/geometry/ops/2/target",
         ),

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections import namedtuple
+from collections.abc import Callable
 from typing import Protocol
 
 import numpy as np
@@ -159,6 +160,7 @@ def optimize(
     passes: Iterable[Pass],
     *,
     budget: float = _TRACE_FIDELITY_BUDGET,
+    on_pass: Callable[[str, list[VectorRegion]], None] | None = None,
 ) -> list[VectorRegion]:
     current_objects = sorted(objects, key=_object_key)
     current_masks = {obj_id: np.asarray(mask, dtype=bool).copy() for obj_id, mask in masks.items()}
@@ -261,5 +263,8 @@ def optimize(
                 for replacement in replacements
             ]
             current_objects = sorted(remaining + annotated_replacements, key=_object_key)
+
+        if on_pass is not None:
+            on_pass(pass_name, list(current_objects))
 
     return current_objects

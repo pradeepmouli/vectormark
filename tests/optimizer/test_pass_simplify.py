@@ -397,44 +397,38 @@ def test_simplify_pass_tries_quadratics_before_cubics():
     assert "Q" in cubic_enabled_d
 
 
-def test_optimizer_passes_forward_cubic_path_option_to_simplify():
-    arc_points = []
-    cx, cy, radius = 40.0, 40.0, 25.0
-    for theta in np.linspace(math.pi, 0.0, 33):
-        x = cx + radius * math.cos(float(theta))
-        y = cy - radius * math.sin(float(theta))
-        arc_points.append((x, y))
-    commands = [f"M{arc_points[0][0]} {arc_points[0][1]}"]
-    commands.extend(f"L{x} {y}" for x, y in arc_points[1:])
-    commands.extend(["L65 40", "L15 40", "Z"])
-    d = " ".join(commands)
-    obj = _obj_from_d(d)
-    simplify_quadratic = next(
-        pass_fn
-        for pass_fn in _optimizer_passes(Options(optimizer=True, cubic_paths=False))
-        if getattr(pass_fn, "__name__", "") == "simplify_pass"
-    )
-    simplify_cubic = next(
-        pass_fn
-        for pass_fn in _optimizer_passes(Options(optimizer=True, cubic_paths=True))
-        if getattr(pass_fn, "__name__", "") == "simplify_pass"
-    )
-
-    quadratic_proposals = simplify_quadratic([obj], {obj.id: _mask_for_obj(obj)})
-    cubic_proposals = simplify_cubic([obj], {obj.id: _mask_for_obj(obj)})
-
-    assert quadratic_proposals
-    assert cubic_proposals
-    quadratic_d = str(quadratic_proposals[0].new_objects[0].current.params["d"])
-    cubic_enabled_d = str(cubic_proposals[0].new_objects[0].current.params["d"])
-    assert _command_count(cubic_enabled_d) <= _command_count(quadratic_d)
-
-
-def test_optimizer_runs_late_simplify_before_final_seams():
+def test_optimizer_pipeline_keeps_only_the_constrained_linelet_simplifier():
     pass_names = [getattr(pass_fn, "__name__", pass_fn.__class__.__name__) for pass_fn in _optimizer_passes(Options(optimizer=True))]
 
-    assert pass_names.count("simplify_pass") == 3
-    assert pass_names[-6:] == ["symmetry_pass", "seams_pass", "simplify_pass", "clones_pass", "simplify_pass", "seams_pass"]
+    assert "simplify_pass" not in pass_names
+    assert pass_names.count("linelet_simplify_pass") == 1
+
+
+def test_optimizer_detects_repetition_before_lossy_simplification():
+    pass_names = [getattr(pass_fn, "__name__", pass_fn.__class__.__name__) for pass_fn in _optimizer_passes(Options(optimizer=True))]
+
+    assert pass_names.count("simplify_pass") == 0
+    assert pass_names.count("linelet_simplify_pass") == 1
+    assert pass_names[:9] == ["primitives_pass", "occlusion_pass", "split_compound_pass", "primitives_pass", "clones_pass", "straighten_pass", "linelet_simplify_pass", "smooth_pass", "symmetry_pass"]
+    assert pass_names[-1:] == ["seams_pass"]
+
+
+def test_simplify_rejects_a_local_bulge_beyond_max_error():
+    """A small relative-area change can still visibly bow a long flat edge."""
+    d = (
+        "M406 243.5 L240 243.5 Q238.75 242.25 237.5 241 "
+        "Q234.97 220.64 235.5 199 L409 197.5 Q409.75 198.25 410.5 199 "
+        "Q411.13 220.17 408.5 240 Q407.47 241.84 406 243.5 Z"
+    )
+    obj = _obj_from_d(d)
+
+    assert simplify_pass(
+        [obj],
+        {obj.id: _mask_for_obj(obj, (512, 512))},
+        epsilon=1.5,
+        max_error=1.0,
+        max_boundary_error=1.0,
+    ) == []
 
 
 def test_simplify_pass_rejects_paths_more_complex_than_original_trace():

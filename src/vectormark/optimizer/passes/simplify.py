@@ -590,6 +590,62 @@ def _geometry_residual(current: Shape, candidate: Shape) -> float:
         return float("inf")
 
 
+def _boundary_max_deviation(current: Shape, candidate: Shape) -> float:
+    """Approximate the symmetric boundary Hausdorff distance in pixels.
+
+    Area-only residuals are blind to a long, visibly bowed edge: its displaced
+    strip can occupy little area relative to the whole region.  SkPath exposes
+    linearised curve samples, so measure the largest sampled boundary movement
+    in either direction and keep simplification within its declared fit error.
+    """
+    from ..vector_region import to_polygon
+
+    try:
+        current_path = to_polygon(current)
+        candidate_path = to_polygon(candidate)
+        current_rings = current_path.linearized_subpaths
+        candidate_rings = candidate_path.linearized_subpaths
+    except Exception:
+        return float("inf")
+
+    def segments(rings: list[list[tuple[float, float]]]) -> list[tuple[tuple[float, float], tuple[float, float]]]:
+        return [
+            (point, ring[(index + 1) % len(ring)])
+            for ring in rings if len(ring) >= 2
+            for index, point in enumerate(ring)
+        ]
+
+    def point_distance(point: tuple[float, float], edges: list[tuple[tuple[float, float], tuple[float, float]]]) -> float:
+        if not edges:
+            return float("inf")
+        return min(_point_line_distance(np.asarray(point), np.asarray(start), np.asarray(end)) for start, end in edges)
+
+    current_edges = segments(current_rings)
+    candidate_edges = segments(candidate_rings)
+    if not current_edges or not candidate_edges:
+        return float("inf")
+
+    def samples(rings: list[list[tuple[float, float]]]) -> list[tuple[float, float]]:
+        # Curves may be linearised into thousands of points.  A bounded,
+        # evenly spaced sample retains a conservative practical guard without
+        # turning each auto-refinement pass into a quadratic-time bottleneck.
+        return [
+            point
+            for ring in rings if ring
+            for point in ring[::max(1, math.ceil(len(ring) / 64))]
+        ]
+
+    current_to_candidate = max(
+        point_distance(point, candidate_edges)
+        for point in samples(current_rings)
+    )
+    candidate_to_current = max(
+        point_distance(point, current_edges)
+        for point in samples(candidate_rings)
+    )
+    return max(current_to_candidate, candidate_to_current)
+
+
 def _is_improvement(
     current: Shape,
     candidate: Shape,
@@ -597,6 +653,7 @@ def _is_improvement(
     original: Shape | None = None,
     check_geometry: bool = True,
     epsilon: float = 1.0,
+    max_boundary_error: float | None = None,
     linelet_only: bool = False,
     allow_new_lines: bool = False,
 ) -> bool:
@@ -641,6 +698,8 @@ def _is_improvement(
             residual_limit = max(residual_limit, _MAX_SMOOTH_CURVE_GEOMETRY_RESIDUAL)
         if _geometry_residual(current, candidate) > residual_limit:
             return False
+        if max_boundary_error is not None and _boundary_max_deviation(current, candidate) > max_boundary_error:
+            return False
     original_segments = _path_segment_count(original) if original is not None else None
     original_cost = _path_command_cost(original) if original is not None else None
     if original_segments is None:
@@ -666,6 +725,7 @@ def _simplified_path_shape(
     check_geometry: bool = True,
     linelet_only: bool = False,
     allow_new_lines: bool = False,
+    max_boundary_error: float | None = None,
 ) -> Shape | None:
     if shape.kind != "path":
         return None
@@ -693,6 +753,7 @@ def _simplified_path_shape(
         original=original,
         check_geometry=check_geometry,
         epsilon=epsilon,
+        max_boundary_error=max_boundary_error,
         linelet_only=linelet_only,
         allow_new_lines=allow_new_lines,
     ):
@@ -776,6 +837,7 @@ def simplify_pass(
     samples: int = 16,
     cubic: bool = False,
     linelet_only: bool = False,
+    max_boundary_error: float | None = None,
 ) -> list[Proposal]:
     proposals: list[Proposal] = []
     referenced_source_ids = _referenced_source_ids(objects)
@@ -786,6 +848,14 @@ def simplify_pass(
             continue
         if not _simplifiable_polygon(obj.footprint):
             continue
+        if linelet_only and obj.current.kind == "path":
+            # A compound path's subpaths are topology (counters, islands, or
+            # disconnected material fragments), not one run of linelets.
+            # The boundary-residual check compares samples against every edge;
+            # applying it across all subpaths is both semantically unsafe and
+            # disproportionately expensive on a detailed trace.
+            if len(_parse_subpaths(str(obj.current.params.get("d", "")))) > 1:
+                continue
         if obj.current.kind == "path" and obj.current.params.get("fill_rule"):
             solid = _simplified_path_shape(
                 obj.current,
@@ -797,6 +867,7 @@ def simplify_pass(
                 original=obj.original,
                 check_geometry=False,
                 linelet_only=linelet_only,
+                max_boundary_error=max_boundary_error,
             )
             if solid is not None:
                 cover_ids = _covering_later_ids(obj, solid, objects, masks)
@@ -814,6 +885,7 @@ def simplify_pass(
             cubic=cubic,
             original=obj.original,
             linelet_only=linelet_only,
+            max_boundary_error=max_boundary_error,
         )
         if simplified is None:
             continue
