@@ -119,16 +119,16 @@ def _path_inflections(d: str) -> int:
     return count
 
 
-def _svg_diagnostics(svg: str) -> dict[str, object]:
-    """Return per-region command, corner, and inflection diagnostics."""
-    regions: dict[str, dict[str, int]] = {}
+def _path_diagnostics(svg: str) -> dict[str, dict[str, int]]:
+    """Return command/corner metrics keyed by emitted target ID."""
+    diagnostics: dict[str, dict[str, int]] = {}
     for index, match in enumerate(_PATH_ELEMENT.finditer(svg)):
         attributes, d = match.group("attributes"), match.group("d")
         identifier = _ID_ATTRIBUTE.search(attributes)
         region_id = identifier.group(1) if identifier is not None else f"path_{index}"
         commands = {command: _SVG_COMMAND.findall(d).count(command) for command in ("L", "Q", "C", "A")}
         corners = path_corner_diagnostics(d)
-        regions[region_id] = {
+        diagnostics[region_id] = {
             "drawable_commands": sum(commands.values()),
             **commands,
             "corners": len(corners["spans"]),
@@ -136,7 +136,54 @@ def _svg_diagnostics(svg: str) -> dict[str, object]:
             "free_commands": int(corners["commands"]["free"]),
             "inflections": _path_inflections(d),
         }
-    return {"regions": regions}
+    return diagnostics
+
+
+def _report_with_path_diagnostics(svg: str, report: dict[str, object] | None = None) -> dict[str, object]:
+    """Return the standard MCP drawing-report shape enriched with path metrics.
+
+    Real drawing snapshots retain their native MCP report; trace/decomposition
+    snapshots synthesize the same target envelope so the panel never exposes a
+    second diagnostics schema.
+    """
+    path_metrics = _path_diagnostics(svg)
+    if report is None:
+        return {
+            "targets": [
+                {
+                    "id": target_id,
+                    "root_id": target_id,
+                    "source_regions": [],
+                    "geometry": "path",
+                    "fill": "unresolved",
+                    "z": index,
+                    "diagnostics": {"path": metrics},
+                }
+                for index, (target_id, metrics) in enumerate(path_metrics.items())
+            ]
+        }
+    targets: list[dict[str, object]] = []
+    for target in report.get("targets", ()):
+        target_record = dict(target)
+        diagnostics = dict(target_record.get("diagnostics", {}))
+        target_id = str(target_record["id"])
+        if target_id in path_metrics:
+            diagnostics["path"] = path_metrics.pop(target_id)
+        target_record["diagnostics"] = diagnostics
+        targets.append(target_record)
+    # SVG-only overlays can exist without a retained target. Keep them
+    # addressable in the same report schema instead of dropping diagnostics.
+    for target_id, metrics in path_metrics.items():
+        targets.append({
+            "id": target_id,
+            "root_id": target_id,
+            "source_regions": [],
+            "geometry": "path",
+            "fill": "unresolved",
+            "z": len(targets),
+            "diagnostics": {"path": metrics},
+        })
+    return {"targets": targets}
 
 
 def _stage_parameters(
@@ -195,9 +242,9 @@ def _write_pass_index(output: Path, snapshots, trace, *, min_region_fraction: fl
     cards = "\n".join(
         f'''<article><h2>{html.escape(label)}</h2>
 <object data="{html.escape(filename)}" type="image/svg+xml"></object>
-<details><summary>parameters and diagnostics</summary><pre>{html.escape(json.dumps({"parameters": _stage_parameters(name, trace, min_region_fraction=min_region_fraction), "diagnostics": _svg_diagnostics(svg)}, indent=2, sort_keys=True))}</pre></details>
+<details><summary>parameters and report</summary><pre>{html.escape(json.dumps({"parameters": _stage_parameters(name, trace, min_region_fraction=min_region_fraction), "report": _report_with_path_diagnostics(svg, report)}, indent=2, sort_keys=True))}</pre></details>
 <p><a href="{html.escape(filename)}">{html.escape(filename)}</a></p></article>'''
-        for name, label, filename, svg in snapshots
+        for name, label, filename, svg, report in snapshots
     )
     output.write_text(f'''<!doctype html>
 <title>VectorMark MCP optimizer pass review</title>
@@ -273,10 +320,10 @@ def main() -> None:
     # stage names deliberately describe drawing representations rather than
     # implementation helpers, so a reviewer can localize a regression without
     # needing to know the optimizer internals.
-    decomposition_snapshots: list[tuple[str, str]] = []
+    decomposition_snapshots: list[tuple[str, str, dict[str, object] | None]] = []
 
     def capture_decomposition_stage(name, regions, fills) -> None:
-        decomposition_snapshots.append((name, _region_polyline_svg(trace, regions, fills)))
+        decomposition_snapshots.append((name, _region_polyline_svg(trace, regions, fills), None))
 
     raw_roots = root_regions(
         trace,
@@ -284,25 +331,32 @@ def main() -> None:
         min_region_fraction=options.min_region_fraction,
         on_decomposition_stage=capture_decomposition_stage,
     )
+    raw_rendered = render_drawing(trace, raw_roots)
     v0 = stitch_regions(trace, raw_roots)
+    v0_rendered = render_drawing(trace, v0)
     pass_snapshots = [
-        ("source", _source_svg(rgb)),
+        ("source", _source_svg(rgb), None),
     ]
     if trace.geometry_regions:
         pass_snapshots.extend([
-            ("boundary_polyline_trace", _trace_stage_svg(trace, "contours", geometry=True)),
-            ("boundary_path_fit", _trace_stage_svg(trace, "baseline", geometry=True)),
+            ("boundary_polyline_trace", _trace_stage_svg(trace, "contours", geometry=True), None),
+            ("boundary_path_fit", _trace_stage_svg(trace, "baseline", geometry=True), None),
         ])
     pass_snapshots.extend(decomposition_snapshots)
     pass_snapshots.extend([
-        ("root_fit", render_drawing(trace, raw_roots).svg),
-        ("initial_stitch", render_drawing(trace, v0).svg),
+        ("root_fit", raw_rendered.svg, dict(raw_rendered.report)),
+        ("initial_stitch", v0_rendered.svg, dict(v0_rendered.report)),
     ])
+
+    def capture_auto_pass(name, regions) -> None:
+        rendered = render_drawing(trace, regions)
+        pass_snapshots.append((name, rendered.svg, dict(rendered.report)))
+
     auto = auto_refine(
         trace,
         v0,
         rgb=rgb,
-        on_pass=lambda name, regions: pass_snapshots.append((name, render_drawing(trace, regions).svg)),
+        on_pass=capture_auto_pass,
     )
     v0_svg = render_drawing(trace, v0).svg
     auto_svg = render_drawing(trace, auto).svg
@@ -331,10 +385,10 @@ def main() -> None:
         for stale_svg in debug_dir.glob("*.svg"):
             stale_svg.unlink()
         index_entries = []
-        for index, (name, svg) in enumerate(pass_snapshots):
+        for index, (name, svg, report) in enumerate(pass_snapshots):
             filename = f"{index:02d}-{name.removesuffix('_pass')}.svg"
             (debug_dir / filename).write_text(svg)
-            index_entries.append((name, f"{index:02d} {name.removesuffix('_pass')}", filename, svg))
+            index_entries.append((name, f"{index:02d} {name.removesuffix('_pass')}", filename, svg, report))
         _write_pass_index(
             debug_dir / "index.html",
             index_entries,
