@@ -145,6 +145,42 @@ a fallback for hosts that cannot provide file references. A trycloudflare URL is
 unauthenticated, so keep it ephemeral or put Cloudflare Access / OAuth in front for
 anything beyond personal testing.
 
+### OpenAI Secure MCP Tunnel (preferred over a public tunnel)
+
+OpenAI's [Secure MCP Tunnels](https://developers.openai.com/api/docs/guides/secure-mcp-tunnels)
+fit better than a public cloudflared/ngrok URL. The connection is **outbound-only**:
+a local `tunnel-client` long-polls OpenAI's control plane and forwards each JSON-RPC
+request to your private MCP server, so nothing is exposed to the open internet and no
+inbound firewall rule is needed. The "open `/mcp`" risk the security section warns
+about goes away — the server stays bound to `localhost` and only OpenAI's
+authenticated tunnel reaches it.
+
+Point the tunnel at the **HTTP** server (`--mcp-server-url`), not a stdio server
+(`--mcp-command`): over HTTP the filesystem tools are withheld (see "Safe-by-default"
+above), so even through the authenticated tunnel ChatGPT only gets `idealize_logo_data`
+plus the widget — never arbitrary file read/write.
+
+```bash
+# 1. run the private HTTP server (localhost only)
+VECTORMARK_MCP_TRANSPORT=streamable-http VECTORMARK_MCP_PORT=8000 \
+  uv run --extra server --extra scoring vectormark-mcp        # http://localhost:8000/mcp
+
+# 2. download tunnel-client from github.com/openai/tunnel-client/releases, then init a profile
+tunnel-client init --profile vectormark \
+  --tunnel-id tunnel_<your-tunnel-id> \
+  --mcp-server-url http://localhost:8000/mcp        # writes ~/.config/tunnel-client/vectormark.yaml
+
+# 3. run the daemon (keep it up while you use the connector)
+export CONTROL_PLANE_API_KEY="sk-..."               # a Tunnels-scoped runtime key
+tunnel-client run --profile vectormark
+```
+
+Create the tunnel ID and key under
+`https://platform.openai.com/settings/organization/tunnels` and `.../api-keys`. Then,
+**while `tunnel-client run` is up**, add/verify the connector in ChatGPT at
+`https://chatgpt.com/#settings/Connectors` (Developer mode). The daemon must stay
+healthy for connector discovery and for every MCP call ChatGPT makes.
+
 ## Hosted MCP app
 
 A hosted app has three parts:
